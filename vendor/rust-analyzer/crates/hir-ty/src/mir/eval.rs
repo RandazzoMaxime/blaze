@@ -24,8 +24,8 @@ use la_arena::ArenaMap;
 use macros::GenericTypeVisitable;
 use rustc_abi::{Size, TargetDataLayout};
 use rustc_apfloat::{
-    Float,
-    ieee::{Half as f16, Quad as f128},
+    Float, FloatConvert,
+    ieee::{Double, Half as f16, Quad as f128, Single},
 };
 use rustc_ast_ir::Mutability;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -87,6 +87,30 @@ macro_rules! from_bytes {
     };
 }
 use from_bytes;
+
+/// A float as an integer of `bits` bits, as `as` makes it and rustc's evaluation computes it
+/// with rustc_apfloat: rounded toward zero, saturating, and NaN as zero.
+fn apfloat_to_int<F: Float>(value: F, bits: usize, signed: bool) -> u128 {
+    if signed { value.to_i128(bits).value as u128 } else { value.to_u128(bits).value }
+}
+
+/// The bytes of a float converted to the float type `to` as rustc's evaluation does: rounded
+/// to nearest, ties to even, and a NaN made the positive quiet NaN without a payload.
+fn convert_apfloat<F>(value: F, to: rustc_type_ir::FloatTy) -> Vec<u8>
+where
+    F: FloatConvert<f16> + FloatConvert<Single> + FloatConvert<Double> + FloatConvert<f128>,
+{
+    fn to_float<F: FloatConvert<T>, T: Float>(value: F, bytes: usize) -> Vec<u8> {
+        let converted = if value.is_nan() { T::NAN } else { value.convert(&mut false).value };
+        converted.to_bits().to_le_bytes()[0..bytes].to_vec()
+    }
+    match to {
+        rustc_type_ir::FloatTy::F16 => to_float::<F, f16>(value, 2),
+        rustc_type_ir::FloatTy::F32 => to_float::<F, Single>(value, 4),
+        rustc_type_ir::FloatTy::F64 => to_float::<F, Double>(value, 8),
+        rustc_type_ir::FloatTy::F128 => to_float::<F, f128>(value, 16),
+    }
+}
 
 macro_rules! not_supported {
     ($it: expr) => {
@@ -531,20 +555,25 @@ impl<'db> Evaluator<'db> {
     /// Runs a body without arguments and takes its result out of the evaluator's memory.
     fn evaluate(&mut self, body: &'db MirBody<'db>, ty: Ty<'db>) -> Result<'db, Allocation<'db>> {
         let interval = self.interpret_mir(body, None.into_iter())?;
-        // The ids made here are not rustc's hashes and mean nothing outside this evaluation,
-        // so only a constant that cannot carry one is answered: one of a type with no `TypeId`
-        // in it or behind its references. A `TypeId` is pointers to const eval, which cannot
-        // read them as integers, so no other value is computed from an id's bytes: comparing
-        // two (`IS_UNIT` in core) and reflection's counts, sizes and names are answered.
-        if !self.type_ids.is_empty() && !self.holds_no_type_id(ty, &mut FxHashSet::default()) {
-            not_supported!("a constant computed from a `TypeId`");
-        }
         let bytes = interval.get(self)?;
         let mut memory_map =
             self.create_memory_map(bytes, ty, &Locals { ptr: ArenaMap::new(), body })?;
+        // The ids made here are not rustc's hashes and mean nothing outside this evaluation,
+        // so a constant that may hold one says what each is of. A `TypeId` is pointers to
+        // const eval, which cannot read them as integers, so no other value is computed from
+        // an id's bytes: comparing two (`IS_UNIT` in core) and reflection's counts, sizes and
+        // names are answered.
+        if !self.type_ids.is_empty() && !self.holds_no_type_id(ty, &mut FxHashSet::default()) {
+            let of = |it: &TypeIdOf<'db>| match *it {
+                TypeIdOf::Ty(ty) => Some(ty),
+                TypeIdOf::Field { .. } => None,
+            };
+            memory_map.type_ids = self.type_ids.iter().map(of).collect();
+        }
         let bytes = Box::from(bytes);
         let memory_map = if memory_map.memory.is_empty()
             && memory_map.statics.is_empty()
+            && memory_map.type_ids.is_empty()
             && self.vtable_map.is_empty()
         {
             MemoryMap::Empty
@@ -731,7 +760,7 @@ impl<'db> Evaluator<'db> {
                                 }
                             },
                             TyKind::Slice(_) => match metadata {
-                                Some(it) => from_bytes!(u64, it.get(self)?),
+                                Some(it) => from_bytes!(usize, it.get(self)?) as u64,
                                 None => not_supported!("slice place without metadata"),
                             },
                             _ => not_supported!("bad type for const index"),
@@ -1573,6 +1602,28 @@ impl<'db> Evaluator<'db> {
                         not_supported!("invalid float to int cast");
                     };
                     let value = self.eval_operand(operand, locals)?.get(self)?;
+                    let is_signed = matches!(target_ty.as_ref().kind(), TyKind::Int(_));
+                    let dest_size = self.size_of_sized(
+                        target_ty.as_ref(),
+                        locals,
+                        "destination of float to int cast",
+                    )?;
+                    let soft = match ty {
+                        rustc_type_ir::FloatTy::F16 => Some(apfloat_to_int(
+                            from_bytes!(f16, u16, value),
+                            dest_size * 8,
+                            is_signed,
+                        )),
+                        rustc_type_ir::FloatTy::F128 => Some(apfloat_to_int(
+                            from_bytes!(f128, u128, value),
+                            dest_size * 8,
+                            is_signed,
+                        )),
+                        _ => None,
+                    };
+                    if let Some(bits) = soft {
+                        return Ok(Owned(bits.to_le_bytes()[0..dest_size].to_vec()));
+                    }
                     let value = match ty {
                         rustc_type_ir::FloatTy::F32 => {
                             let value = value.try_into().unwrap();
@@ -1583,15 +1634,9 @@ impl<'db> Evaluator<'db> {
                             f64::from_le_bytes(value)
                         }
                         rustc_type_ir::FloatTy::F16 | rustc_type_ir::FloatTy::F128 => {
-                            not_supported!("unstable floating point type f16 and f128");
+                            unreachable!("converted above")
                         }
                     };
-                    let is_signed = matches!(target_ty.as_ref().kind(), TyKind::Int(_));
-                    let dest_size = self.size_of_sized(
-                        target_ty.as_ref(),
-                        locals,
-                        "destination of float to int cast",
-                    )?;
                     let dest_bits = dest_size * 8;
                     let (max, min) = if dest_bits == 128 {
                         (i128::MAX, i128::MIN)
@@ -1614,6 +1659,18 @@ impl<'db> Evaluator<'db> {
                         not_supported!("invalid float to int cast");
                     };
                     let value = self.eval_operand(operand, locals)?.get(self)?;
+                    let TyKind::Float(target_ty) = target_ty.as_ref().kind() else {
+                        not_supported!("invalid float to float cast");
+                    };
+                    use rustc_type_ir::FloatTy::{F16, F32, F64, F128};
+                    if matches!(ty, F16 | F128) || matches!(target_ty, F16 | F128) {
+                        return Ok(Owned(match ty {
+                            F16 => convert_apfloat(from_bytes!(f16, u16, value), target_ty),
+                            F32 => convert_apfloat(from_bytes!(Single, u32, value), target_ty),
+                            F64 => convert_apfloat(from_bytes!(Double, u64, value), target_ty),
+                            F128 => convert_apfloat(from_bytes!(f128, u128, value), target_ty),
+                        }));
+                    }
                     let value = match ty {
                         rustc_type_ir::FloatTy::F32 => {
                             let value = value.try_into().unwrap();
@@ -1624,17 +1681,14 @@ impl<'db> Evaluator<'db> {
                             f64::from_le_bytes(value)
                         }
                         rustc_type_ir::FloatTy::F16 | rustc_type_ir::FloatTy::F128 => {
-                            not_supported!("unstable floating point type f16 and f128");
+                            unreachable!("converted above")
                         }
-                    };
-                    let TyKind::Float(target_ty) = target_ty.as_ref().kind() else {
-                        not_supported!("invalid float to float cast");
                     };
                     match target_ty {
                         rustc_type_ir::FloatTy::F32 => Owned((value as f32).to_le_bytes().to_vec()),
                         rustc_type_ir::FloatTy::F64 => Owned(value.to_le_bytes().to_vec()),
                         rustc_type_ir::FloatTy::F16 | rustc_type_ir::FloatTy::F128 => {
-                            not_supported!("unstable floating point type f16 and f128");
+                            unreachable!("converted above")
                         }
                     }
                 }
@@ -1651,11 +1705,23 @@ impl<'db> Evaluator<'db> {
                         TyKind::Int(_) => (value as f32, value as f64),
                         _ => (value as u128 as f32, value as u128 as f64),
                     };
+                    // rustc_apfloat rounds to nearest, ties to even, as rustc's evaluation does.
+                    fn of<F: Float>(value: i128, signed: bool) -> u128 {
+                        let float = match signed {
+                            true => F::from_i128(value),
+                            false => F::from_u128(value as u128),
+                        };
+                        float.value.to_bits()
+                    }
+                    let signed = matches!(current_ty.kind(), TyKind::Int(_));
                     match target_ty {
                         rustc_type_ir::FloatTy::F32 => Owned(single.to_le_bytes().to_vec()),
                         rustc_type_ir::FloatTy::F64 => Owned(double.to_le_bytes().to_vec()),
-                        rustc_type_ir::FloatTy::F16 | rustc_type_ir::FloatTy::F128 => {
-                            not_supported!("unstable floating point type f16 and f128");
+                        rustc_type_ir::FloatTy::F16 => {
+                            Owned((of::<f16>(value, signed) as u16).to_le_bytes().to_vec())
+                        }
+                        rustc_type_ir::FloatTy::F128 => {
+                            Owned(of::<f128>(value, signed).to_le_bytes().to_vec())
                         }
                     }
                 }
@@ -2284,6 +2350,10 @@ impl<'db> Evaluator<'db> {
         size: usize,
     ) -> Result<'db, ()> {
         let AllocationData { ty, memory: ref v, ref memory_map } = *allocation;
+        // Its ids are of the evaluation that made it, and mean another type here.
+        if memory_map.has_type_ids() {
+            not_supported!("a constant computed from a `TypeId`, read by another evaluation");
+        }
         let patch_map = memory_map.transform_addresses(|b, align| {
             let addr = self.heap_allocate(b.len(), align)?;
             self.write_memory(addr, b)?;
@@ -2691,16 +2761,17 @@ impl<'db> Evaluator<'db> {
                             | TyKind::Uint(_)
                             | TyKind::Float(_)
                     ) => {}
+                // Its pointers are an id, of nothing in memory.
+                TyKind::Adt(adt, _)
+                    if this
+                        .lang_items()
+                        .TypeId
+                        .is_some_and(|it| adt.def_id() == AdtId::StructId(it)) => {}
                 TyKind::Pat(base, _) => rec(this, bytes, base, locals, mm, stack_depth_limit - 1)?,
                 TyKind::RawPtr(..) => {
                     let Some(addr) = bytes.get(..this.ptr_size()) else { return Ok(()) };
                     let addr = from_bytes!(usize, addr);
-                    if let Some(Allocated { start, size, align }) = this.allocation_at(addr)
-                        && let Ok(memory) = this.read_memory(Address::from_usize(start), size)
-                    {
-                        mm.insert(start, memory.into());
-                        mm.note_align(start, align);
-                    }
+                    behind_raw(this, addr, mm, stack_depth_limit - 1)?;
                 }
                 TyKind::Ref(_, t, _) => {
                     let size = this.size_align_of(t, locals)?;
@@ -2893,6 +2964,49 @@ impl<'db> Evaluator<'db> {
                     rec(this, bytes, ty, locals, mm, stack_depth_limit - 1)?;
                 }
                 _ => (),
+            }
+            Ok(())
+        }
+        /// Keeps the whole allocation `addr` is in, the type of which a raw pointer does not
+        /// say, and what every word of it that is in another allocation or a static points
+        /// to: the reader of the map takes each such word to be a pointer, as it is in a
+        /// `NonNull<()>` to a value with a `&str` in it (std's `io::Error` of a message).
+        fn behind_raw<'db>(
+            this: &Evaluator<'db>,
+            addr: usize,
+            mm: &mut ComplexMemoryMap<'db>,
+            stack_depth_limit: usize,
+        ) -> Result<'db, ()> {
+            if stack_depth_limit.checked_sub(1).is_none() {
+                return Err(MirEvalError::StackOverflow);
+            }
+            let pointee = this.static_memory.iter().find(|&&(start, size, _)| {
+                addr.checked_sub(start).is_some_and(|offset| offset < size.max(1))
+            });
+            if let Some(&(start, size, id)) = pointee {
+                let pointee = crate::StaticMemory { start, size, id };
+                if !mm.statics.contains(&pointee) {
+                    mm.statics.push(pointee);
+                }
+                return Ok(());
+            }
+            let Some(Allocated { start, size, align }) = this.allocation_at(addr) else {
+                return Ok(());
+            };
+            if mm.memory.get(&start).is_some_and(|it| it.len() >= size) {
+                return Ok(());
+            }
+            let Ok(memory) = this.read_memory(Address::from_usize(start), size) else {
+                return Ok(());
+            };
+            let memory = memory.to_vec();
+            mm.insert(start, memory.clone().into());
+            mm.note_align(start, align);
+            for word in memory.chunks_exact(this.ptr_size()) {
+                let inner = from_bytes!(usize, word);
+                if inner != 0 {
+                    behind_raw(this, inner, mm, stack_depth_limit - 1)?;
+                }
             }
             Ok(())
         }

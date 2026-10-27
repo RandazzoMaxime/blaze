@@ -35,10 +35,6 @@ use crate::{
 /// builds and leaves the rest to the command that drives cargo.
 pub(crate) const DRIVEN: &str = "RA_JIT_CARGO_DRIVES";
 
-/// The variable `cargo ra-jit` sets in the first build of a workspace: the roots of the
-/// crates that are the daemon's to compile, as a list of paths.
-pub(crate) const STAGED: &str = "RA_JIT_STAGED_CRATES";
-
 /// The variable that says cargo runs every crate's rustc through this wrapper, and the
 /// workspace's through it twice.
 pub(crate) const EVERY_CRATE: &str = "RA_JIT_EVERY_CRATE";
@@ -49,6 +45,12 @@ pub(crate) const STANDS_IN: &str = "stands-in";
 const PROGRAM_OF: &str = "CARGO_BIN_EXE_";
 /// The variable that names the directory cargo gives the integration tests of a build.
 const SCRATCH: &str = "CARGO_TARGET_TMPDIR";
+
+/// Whether the variable is one cargo sets to say where a program of the build is, or its
+/// tests' directory.
+pub(crate) fn names_a_place(name: &str) -> bool {
+    name.starts_with(PROGRAM_OF) || name == SCRATCH
+}
 
 /// The file in the daemon's directory that has a line for every program plain cargo asked
 /// for: who linked it, and why when it was rustc.
@@ -81,7 +83,14 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     // is not the workspace's.
     let outside = twice.is_none() && !only_asks && std::env::var_os(EVERY_CRATE).is_some();
     // The wrapper the user had for the workspace's crates still runs rustc.
-    let mut compiler = match Enabled::read().and_then(|it| it.chained) {
+    // Under `cargo ra-jit`, the one the project's configuration names, which ra-jit's took the
+    // place of; under plain cargo, the one `ra-jit enable` found in the user's configuration.
+    // Set but empty, the project has cargo run rustc through no wrapper, and so does this.
+    let chained = match std::env::var_os(super::switch::CHAINED) {
+        Some(theirs) => Some(theirs).filter(|it| !it.is_empty()),
+        None => Enabled::read().and_then(|it| it.chained).map(OsString::from),
+    };
+    let mut compiler = match chained {
         // What a cargo that only asks through ra-jit compiles is compiled as it would be
         // without it, by the workspace's wrapper when there is one.
         _ if only_asks => {
@@ -114,16 +123,13 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
             Err(why) => unit.script_to_rustc(&why),
         }
     }
-    if unit.is_staged() {
-        match unit.stood_in(&rustc, &dir) {
-            Ok(code) => std::process::exit(code),
-            // rustc compiles the crate as cargo asked, and the daemon links against that.
-            Err(why) => eprintln!("warning: rustc compiles `{}`: {why:#}", unit.id),
-        }
-    }
     let known = if plain { State::of_unit(&dir) } else { Vec::new() };
-    if !known.is_empty() {
-        match unit.by_daemon(&dir, &known, &rustc) {
+    // A build whose state another build of ra-jit wrote, or whose programs are gone, is one
+    // the daemon has not loaded: rustc links the program, as it does one no build has.
+    let loaded = known.iter().find_map(|it| State::read(it));
+    let was_loaded = loaded.is_some();
+    if let Some(state) = loaded {
+        match unit.by_daemon(&dir, state, &known, &rustc) {
             Ok(()) => {
                 tally("daemon", &unit.crate_name);
                 std::process::exit(0);
@@ -153,11 +159,11 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         && let Err(error) = unit.record(stamp, &copies, unit.linked.then_some(line), &unit.source)
     {
         // The build is good; the daemon has no part in this crate until it is built again.
-        eprintln!("warning: ra-jit did not record `{}`: {error:#}", unit.id);
+        eprintln!("warning: blaze did not record `{}`: {error:#}", unit.id);
     }
     if plain && status.success() {
         // The program is rustc's now: the builds that had it are loaded again from this one.
-        if known.is_empty() {
+        if !was_loaded {
             tally("rustc", NOT_LOADED);
         }
         State::forget(&known);
@@ -169,10 +175,8 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// The compiler cargo named, `rustc`, for a crate cargo asked it for: run then, or, for a
-/// proc macro ra-jit linked, when a crate of rustc's that links it is compiled
-/// ([`own_macro::rustc_first`]).
-pub(crate) fn rustc_of(rustc: &OsStr) -> Command {
+/// The compiler cargo named, `rustc`, for a crate cargo asked it for.
+fn rustc_of(rustc: &OsStr) -> Command {
     Command::new(rustc)
 }
 
@@ -190,6 +194,7 @@ fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow
         }
     }
     let status = compiler.status()?;
+    stand_in_front_of_rustcs(unit.as_ref(), status)?;
     if let Some(unit) = unit.filter(|it| status.success() && !it.script) {
         let record = unit.as_record(stamp_now(), Vec::new(), None);
         if record.is_rlib() || record.runs_in_build() {
@@ -199,45 +204,77 @@ fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow
     Ok(status.code().unwrap_or(1))
 }
 
-/// Builds a crate for rust-analyzer's `cargo check --compile-time-deps` as `compiler`, rustc,
-/// does without ra-jit, but a proc macro when it is ra-jit's ([`own_macro::wanted`]): the
-/// libraries rustc compiles are then described for the proc macros that link them. The code
-/// to end with.
-fn for_load(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
-    if !own_macro::wanted() {
-        return Ok(compiler.status()?.code().unwrap_or(1));
+/// Builds a crate for rust-analyzer's `cargo check --compile-time-deps`. Into ra-jit's own
+/// target directory, which cargo's builds never read ([`own_macro::OWN_TARGET`]), nothing is
+/// rustc's: a build script is compiled and linked by ra-jit as [`outside`] does one, a proc
+/// macro is linked by ra-jit for its server ([`own_macro`]), and a library is only described
+/// for those that link it ([`Unit::described_only`]), since every crate that links one there
+/// is ra-jit's and is compiled from the descriptions. One ra-jit cannot build fails the load
+/// with why. Into cargo's target directory, or with ra-jit's proc macros turned off for the
+/// harness's reference builds ([`own_macro::turned_off`]), `compiler`, rustc, builds it as
+/// without ra-jit. The code to end with.
+fn for_load(compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
+    let own = std::env::var_os(own_macro::OWN_TARGET).is_some() && !own_macro::turned_off();
+    let unit = match Unit::of(args) {
+        Some(unit) if own => unit,
+        unit => return by_rustc(compiler, unit.as_ref()),
+    };
+    let record = unit.as_record(stamp_now(), Vec::new(), None);
+    let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    let failed = |what: String, why: String| {
+        anyhow::anyhow!("blaze did not build {what} of `{package}` for the load: {why}")
+    };
+    if unit.script {
+        let dir = unit.records.join(&unit.id);
+        unit.by_ra_jit(rustc, &dir).map_err(|why| failed("the build script".to_owned(), why))?;
+        return Ok(0);
     }
-    let unit = Unit::of(args);
-    let record = unit.as_ref().map(|it| it.as_record(stamp_now(), Vec::new(), None));
-    if let Some((unit, record)) =
-        unit.as_ref().zip(record.as_ref()).filter(|(_, it)| it.is_proc_macro())
-    {
-        let built = own_macro::made(record).ok_or("cargo names no place for it".to_owned());
-        let dir = unit.records.join(&unit.id).join(record.stamp.to_string());
-        let built = built.and_then(|made| {
-            own_script::compile_as(rustc, &unit.args, &unit.cwd, &unit.source, &made, &dir)
-        });
-        match built {
-            Ok(()) => {
-                record.write_described(&unit.records)?;
-                return Ok(0);
-            }
-            Err(why) => {
-                let then = format!("rustc compiles the proc macro `{}`", unit.crate_name);
-                say::fallback(&why, &then);
-            }
+    let named = || format!("`{}`", unit.crate_name);
+    if record.is_proc_macro() {
+        if std::env::var_os(own_macro::SERVER).is_none() {
+            let why = own_macro::missing_server();
+            return Err(failed(format!("the proc macro {}", named()), why));
         }
-    }
-    let text: Vec<String> = args.iter().filter_map(|it| it.to_str().map(str::to_owned)).collect();
-    own_macro::rustc_first(rustc, &text, &std::env::current_dir()?)?;
-    let status = compiler.status()?;
-    if let Some((unit, record)) = unit.as_ref().zip(record.as_ref())
-        && status.success()
-        && (record.is_rlib() || record.runs_in_build())
-    {
+        let built = own_macro::made(&record).ok_or("cargo names no place for it".to_owned());
+        let dir = unit.records.join(&unit.id).join(record.stamp.to_string());
+        built
+            .and_then(|made| {
+                own_script::compile_as(rustc, &unit.args, &unit.cwd, &unit.source, &made, &dir)
+            })
+            .map_err(|why| failed(format!("the proc macro {}", named()), why))?;
         record.write_described(&unit.records)?;
+        return Ok(0);
     }
+    if !record.is_rlib() {
+        let why = "it is neither a library, a proc macro nor a build script".to_owned();
+        return Err(failed(named(), why));
+    }
+    record.write_described(&unit.records)?;
+    unit.described_only(&record).map_err(|why| failed(named(), format!("{why:#}")))?;
+    Ok(0)
+}
+
+/// Has `compiler`, rustc, build `unit` as cargo asked, which runs as one of ra-jit's when it
+/// is a build script ([`stand_in_front_of_rustcs`]). The code to end with.
+fn by_rustc(mut compiler: Command, unit: Option<&Unit>) -> anyhow::Result<i32> {
+    let status = compiler.status()?;
+    stand_in_front_of_rustcs(unit, status)?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Has cargo run a build script rustc linked, `unit` when it is one and `status` says rustc
+/// did, through `ra-jit build-script` as one of ra-jit's is ([`Unit::record`]): every build
+/// script runs in the sandbox, whoever compiled it.
+fn stand_in_front_of_rustcs(
+    unit: Option<&Unit>,
+    status: std::process::ExitStatus,
+) -> anyhow::Result<()> {
+    let Some(unit) = unit.filter(|it| it.script && status.success()) else { return Ok(()) };
+    let record = unit.as_record(0, Vec::new(), None);
+    match record.outputs().first() {
+        Some(linked) => script::stand_in_front(linked),
+        None => Ok(()),
+    }
 }
 
 /// Starts a process that has the daemon load the build of the cargo above this one, when
@@ -246,7 +283,7 @@ fn loaded_later() -> Result<(), String> {
     let cargo = Cargo::above()?;
     let typed = cargo.args.join(" ");
     let asked =
-        cli::of_cargo(&cargo.args).ok_or(format!("`cargo {typed}` is not a build ra-jit loads"))?;
+        cli::of_cargo(&cargo.args).ok_or(format!("`cargo {typed}` is not a build blaze loads"))?;
     if let Some(why) = asked.only_cargo() {
         return Err(why);
     }
@@ -353,7 +390,7 @@ impl Unit {
             id: String::new(),
             crate_name,
             source: cwd.join(&args[source]),
-            records: Record::dir_for(&cwd.join(out_dir)),
+            records: Record::dir_for(&cwd.join(&out_dir)),
             args,
             cwd,
             linked: false,
@@ -369,23 +406,22 @@ impl Unit {
         }
         unit.script = record.is_build_script();
         unit.linked = record.is_linked() && !record.runs_in_build();
-        unit.id =
-            format!("{}{}", unit.crate_name, record.codegen("extra-filename").unwrap_or_default());
+        let extra = record.codegen("extra-filename").unwrap_or_default();
+        unit.id = Record::id_of(&unit.crate_name, extra, &unit.cwd.join(&out_dir));
         Some(unit)
     }
 
     /// Has the daemon build the program and puts it where rustc would have, with the
-    /// dep-info rustc would have written. `known` are the builds that have the program, and
-    /// `dir` is where the unit is recorded. `Err` is why the program is rustc's to link.
-    fn by_daemon(&self, dir: &Path, known: &[String], rustc: &OsString) -> Result<(), String> {
-        let mut read = known.iter().map(|key| State::read(key).map_err(|why| (key, why)));
-        let mut state = match read.find_map(Result::ok) {
-            Some(state) => state,
-            None => {
-                let why = known.iter().find_map(|it| State::read(it).err().flatten());
-                return Err(why.unwrap_or("the build is not one the daemon has loaded").to_owned());
-            }
-        };
+    /// dep-info rustc would have written. `state` is the first of `known`, the builds that
+    /// have the program, that the daemon loaded, and `dir` is where the unit is recorded.
+    /// `Err` is why the program is rustc's to link.
+    fn by_daemon(
+        &self,
+        dir: &Path,
+        mut state: State,
+        known: &[String],
+        rustc: &OsString,
+    ) -> Result<(), String> {
         if let Some(why) = state.refusal.clone().or_else(|| state.broken_guard()) {
             return Err(why);
         }
@@ -408,20 +444,31 @@ impl Unit {
             }
             Err(why) => return Err(why.why()),
         }
+        let binary = &checkout.programs[at].binary;
+        self.put(binary, read)?;
+        state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", binary.display()))?;
+        // Every other build with the program kept the one cargo had before.
+        State::forget(known.iter().filter(|it| **it != state.key));
+        Ok(())
+    }
+
+    /// Puts `binary`, the daemon's build of the program, where rustc would have linked it,
+    /// with the dep-info rustc wrote of it (`read`, rustc run by [`Self::dep_info`]).
+    fn put(
+        &self,
+        binary: &Path,
+        read: Result<std::io::Result<Output>, String>,
+    ) -> Result<(), String> {
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);
             std::process::exit(super::FAILED);
         }
-        let binary = &checkout.programs[at].binary;
         // Cargo starts the program with no word to the daemon, which may still be writing it.
         let _unwritten = crate::splice::unwritten(binary);
         let record = self.as_record(0, Vec::new(), None);
         let linked = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
         place(binary, &linked).map_err(|it| format!("installing {}: {it}", linked.display()))?;
-        state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", linked.display()))?;
-        // Every other build with the program kept the one cargo had before.
-        State::forget(known.iter().filter(|it| **it != state.key));
         let _ = std::io::stderr().write_all(&read.stderr);
         Ok(())
     }
@@ -436,6 +483,58 @@ impl Unit {
         let exe = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
         own_script::compile(rustc, &self.args, &self.cwd, &self.source, &exe, &copies)?;
         self.record(stamp, &copies, None, &self.source).map_err(|it| format!("{it:#}"))
+    }
+
+    /// Gives cargo what rustc would have written of the library `record` is of, which the
+    /// load reads nothing of but its record: an empty file for each it was to emit, and the
+    /// dep-info, which names every Rust file of the crate's directory (no package nested in
+    /// it, nothing hidden, no `target`), so that cargo builds the crate again, and so the
+    /// scripts and proc macros that link it, when one of those changes. Each is written in
+    /// place of what is there, which may be a link to cargo's own (`seed_own_target`).
+    fn described_only(&self, record: &Record) -> anyhow::Result<()> {
+        let out_dir = record.out_dir().context("cargo names no `--out-dir`")?;
+        let stem =
+            format!("{}{}", self.crate_name, record.codegen("extra-filename").unwrap_or_default());
+        let emits = self.args.iter().filter_map(|it| it.strip_prefix("--emit="));
+        let mut outputs = Vec::new();
+        for kind in emits.flat_map(|it| it.split(',')) {
+            match kind {
+                "link" => outputs.push(out_dir.join(format!("lib{stem}.rlib"))),
+                "metadata" => outputs.push(out_dir.join(format!("lib{stem}.rmeta"))),
+                "dep-info" => {}
+                other => {
+                    anyhow::bail!("cargo asks for `--emit={other}`, which blaze does not write")
+                }
+            }
+        }
+        let info = out_dir.join(format!("{stem}.d"));
+        let root = self.source.parent().context("a crate root without a directory")?;
+        let manifest = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+        let mut files = vec![self.source.clone()];
+        rust_files(root, manifest.as_deref(), &mut files)
+            .with_context(|| format!("reading {}", root.display()))?;
+        files.sort();
+        files.dedup();
+        let files: Vec<String> =
+            files.iter().map(|it| dep_info::escaped(&it.display().to_string())).collect();
+        let mut text = String::new();
+        for target in outputs.iter().chain([&info]) {
+            let target = dep_info::escaped(&target.display().to_string());
+            text.push_str(&format!("{target}: {}\n\n", files.join(" ")));
+        }
+        for file in &files {
+            text.push_str(&format!("{file}:\n"));
+        }
+        let write = |path: &Path, bytes: &[u8]| {
+            let new = path.with_extension(format!("{}.new", std::process::id()));
+            std::fs::write(&new, bytes)
+                .and_then(|()| std::fs::rename(&new, path))
+                .with_context(|| format!("writing {}", path.display()))
+        };
+        for output in &outputs {
+            write(output, b"")?;
+        }
+        write(&info, text.as_bytes())
     }
 
     /// Says in one line why rustc compiles the build script and not ra-jit.
@@ -498,95 +597,6 @@ impl Unit {
         self.target().map_or(cfg!(target_os = "linux"), |it| it.contains("-linux-")) && !by_itself
     }
 
-    /// Whether the crate is one the first build of the workspace leaves to the daemon.
-    fn is_staged(&self) -> bool {
-        let Some(staged) = std::env::var_os(STAGED) else { return false };
-        let lists = std::env::split_paths(&staged).any(|it| it == self.source);
-        lists && !self.script && !self.args.iter().any(|it| it == "--test")
-    }
-
-    /// Has rustc do of the crate what it does in a build by the daemon: check it, and
-    /// build what stands in for it, which is what cargo links and has no code. `dir` is
-    /// where the unit is recorded. `Ok` is the status rustc's check ended with; `Err` is
-    /// why nothing stands in for the crate.
-    ///
-    /// What stands in is built first and from the libraries that stand in for the crates
-    /// it depends on, and the check reads the metadata of the checks of those. Cargo
-    /// starts the units that depend on this one when the check has written the metadata,
-    /// which is when both are there.
-    fn stood_in(&self, rustc: &OsString, dir: &Path) -> anyhow::Result<i32> {
-        let program = crate::stub::is_program(&self.args).context("not a library or a program")?;
-        let stamp = stamp_now();
-        let copies = dir.join(stamp.to_string());
-        std::fs::create_dir_all(&copies)?;
-        let line = copies.join("link.line");
-        let extra = self.as_record(0, Vec::new(), None);
-        let stem =
-            format!("{}{}", self.crate_name, extra.codegen("extra-filename").unwrap_or_default());
-        let source = copies.join(format!("{stem}.ra-jit.rs"));
-        std::fs::write(&source, crate::stub::text_of(&self.args, program, &self.source))?;
-
-        let mut stand_in = Command::new(rustc);
-        let mut args = self.args.iter().peekable();
-        while let Some(arg) = args.next() {
-            let incremental = |it: &&String| it.starts_with(&format!("{INCREMENTAL}="));
-            if arg == "-C" && args.peek().is_some_and(incremental) {
-                args.next();
-            } else if self.cwd.join(arg) == self.source {
-                stand_in.arg(&source);
-            } else if arg.starts_with("--emit=") {
-                stand_in.arg("--emit=link");
-            } else {
-                stand_in.arg(self.standing_in(arg).unwrap_or_else(|| arg.clone()));
-            }
-        }
-        if program {
-            stand_in.arg(format!("--print=link-args={}", line.display())).arg("-Csave-temps");
-            if self.for_linux() {
-                stand_in.arg(format!("-Clink-arg={}", super::plan::BUILD_ID));
-                stand_in.arg(format!("-Clink-arg={}", super::plan::kept_builtins()));
-            }
-        }
-        let built = stand_in.stdin(Stdio::null()).output().context("running rustc")?;
-        anyhow::ensure!(
-            built.status.success(),
-            "what stands in for it does not build: {}",
-            String::from_utf8_lossy(&built.stderr).trim_end()
-        );
-        std::fs::write(dir.join(STANDS_IN), "")?;
-
-        // The crate is not checked by rustc: the daemon's front end is what checks it, and a
-        // second compile beside the daemon's would only compete with it.
-        self.record(stamp, &copies, program.then_some(line), &source)?;
-        Ok(0)
-    }
-
-    /// `--extern`'s value `named` with the library that stands in for the crate, when the
-    /// value is the metadata of a crate that has one.
-    fn standing_in(&self, named: &str) -> Option<String> {
-        let (name, path) = named.split_once('=')?;
-        let stem = Path::new(path).file_name()?.to_str()?.strip_suffix(".rmeta")?;
-        let id = stem.strip_prefix("lib")?;
-        self.records
-            .join(id)
-            .join(STANDS_IN)
-            .exists()
-            .then(|| format!("{name}={}", Path::new(path).with_extension("rlib").display()))
-    }
-
-    /// `--extern`'s value `named` with the metadata rustc's check wrote of the crate, when
-    /// the value is the library that stands in for one.
-    fn checked_against(&self, named: &str) -> Option<String> {
-        let (name, path) = named.split_once('=')?;
-        let stem = Path::new(path).file_name()?.to_str()?.strip_suffix(".rlib")?;
-        let id = stem.strip_prefix("lib")?;
-        self.records
-            .join(id)
-            .join(STANDS_IN)
-            .exists()
-            .then(|| format!("{name}={}", Path::new(path).with_extension("rmeta").display()))
-    }
-
     /// Says in one line why rustc links the program and not the daemon, and counts it.
     fn left_to_rustc(&self, why: &str) {
         say::fallback(why, &format!("rustc links `{}`", self.crate_name));
@@ -603,9 +613,7 @@ impl Unit {
             stamp,
             copies,
             link_line,
-            env: std::env::vars()
-                .filter(|(name, _)| name.starts_with(PROGRAM_OF) || name == SCRATCH)
-                .collect(),
+            env: std::env::vars().filter(|(name, _)| names_a_place(name)).collect(),
             crate_env: std::env::vars()
                 .filter(|(name, _)| super::own_script::read_by_crates(name))
                 .collect(),
@@ -667,4 +675,27 @@ impl Unit {
         }
         self.as_record(stamp, copies, link_line).write(&self.records)
     }
+}
+
+/// Adds to `files` every Rust file below `dir` but those of a package nested in it (a
+/// directory with a manifest that is not `manifest`), of a hidden directory or of `target`.
+pub(crate) fn rust_files(
+    dir: &Path,
+    manifest: Option<&Path>,
+    files: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if entry.file_type()?.is_dir() {
+            let nested = path.join("Cargo.toml").is_file() && Some(&*path) != manifest;
+            if !(name.to_string_lossy().starts_with('.') || name == "target" || nested) {
+                rust_files(&path, manifest, files)?;
+            }
+        } else if path.extension().is_some_and(|it| it == "rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }

@@ -67,7 +67,7 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("RA_JIT", "RUSTC", "CARGO"))}
     prefix = os.environ.get("NR_PATH_PREFIX", "")
     env.update(PATH=f"{L}/target/release:{prefix + ':' if prefix else ''}/run/current-system/sw/bin:{env['PATH']}",
-               RUSTUP_TOOLCHAIN="nr-nightly" if base == "bun" else "nr-stable",
+               RUSTUP_TOOLCHAIN="nr-pin",
                RA_JIT_HOME=home, RA_JIT_CACHE=store, CARGO_HOME=cargo_home, RUST_BACKTRACE="0",
                RA_JIT_SKIPPED=f"{L}/logs/{name}.skipped", NR_LOG=log, **spec.get("env", {}))
     if base == "bun":
@@ -76,7 +76,7 @@ def main():
     # made here by the ra-jit under test as the release workflow makes it, from the toolchain
     # the builds use, and fetched by the first build. NR_STD=build has the builds make it.
     if os.environ.get("NR_STD") != "build":
-        toolchain = f"{L}/tc-{'nightly' if base == 'bun' else 'stable'}"
+        toolchain = f"{L}/tc-pin"
         shipped = f"{L}/std-remote"
         # What the toolchain runs for it is the release's, not the build's: counted apart.
         subprocess.run(["ra-jit", "std", shipped, toolchain], env=dict(env, NR_LOG=f"{L}/logs/std.log"), check=True)
@@ -117,7 +117,7 @@ def main():
         quiet()
         ended = time.time()
         err = run.stderr.splitlines()
-        notes = [l for l in err if "ra-jit" in l or "Finished" in l or "error" in l.lower()][-25:]
+        notes = [l for l in err if "blaze" in l or "Finished" in l or "error" in l.lower()][-25:]
         row = dict(step=label, argv=argv, began=began, returned=returned, ended=ended, code=run.returncode,
                    secs=round(returned - began, 1), notes=notes, status=status[-2000:])
         with open(steps_out, "a") as out:

@@ -344,6 +344,236 @@ fn f() -> () {
         );
     }
 
+    // salsa's `&dyn Database` methods: the object's `'static` is not an elided input lifetime.
+    #[test]
+    fn a_trait_objects_default_lifetime_is_not_elided() {
+        check_diagnostics(
+            r#"
+//- minicore: sized
+trait Z: 'static { fn z(&self) -> &u8; }
+fn f(d: &dyn Z) -> &u8 { d.z() }
+fn g<'a>(d: &'a dyn Z, x: &'a u8) -> &'a u8 { if true { d.z() } else { x } }
+"#,
+        );
+    }
+
+    // biome_fs: an alias's elided lifetime is one lifetime wherever the alias uses it.
+    #[test]
+    fn an_aliases_elided_lifetime_is_one_lifetime() {
+        check_diagnostics(
+            r#"
+//- minicore: sized
+trait TS<'s> {}
+type Pair<'f, 's> = (&'f dyn TS<'s>, &'f dyn TS<'s>);
+fn same<'s>(_: &dyn TS<'s>, _: &dyn TS<'s>) {}
+fn split(pair: Pair) { same(pair.0, pair.1) }
+"#,
+        );
+    }
+
+    // helix-vcs: a closure's elided parameter lifetimes are its own, for any lifetime.
+    #[test]
+    fn a_closures_annotated_reference_is_higher_ranked() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, fn, copy, slice, index
+struct H { a: u32 }
+fn f(hs: &[H], inv: bool) -> (u32, u32) {
+    let r = if inv { |h: &H| h.a } else { |h: &H| h.a };
+    let x = H { a: 1 };
+    (r(&x), r(&hs[0]))
+}
+"#,
+        );
+    }
+
+    // biome's `use_sorted_keys`: the pointer two fn items coerce to holds for any lifetime.
+    #[test]
+    fn fn_items_coerce_to_a_higher_ranked_pointer() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, fn, copy
+struct T(u8);
+impl T {
+    fn a(x: &T, y: &T) -> bool { x.0 < y.0 }
+    fn b(x: &T, y: &T) -> bool { x.0 > y.0 }
+}
+fn find(_: impl FnMut(&T) -> bool) {}
+fn f(k: bool) {
+    let c = match k { true => T::a, false => T::b };
+    let t = T(3);
+    find(|x| c(x, &t))
+}
+"#,
+        );
+    }
+
+    // biome_formatter's buffers: `&S<Self::C>` implies what `S<C>` does.
+    #[test]
+    fn implied_bounds_see_through_a_projection() {
+        check_diagnostics(
+            r#"
+//- minicore: sized
+struct S<C>(C);
+trait B { type C; fn st(&self) -> &S<Self::C>; }
+impl<W: B<C = C> + ?Sized, C> B for &mut W {
+    type C = C;
+    fn st(&self) -> &S<Self::C> { (**self).st() }
+}
+"#,
+        );
+    }
+
+    // biome's `markup!`: a value with no destructor and no interior mutability is promoted,
+    // whatever its type.
+    #[test]
+    fn promotion_goes_by_the_value() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, drop, option, copy
+struct D;
+impl Drop for D { fn drop(&mut self) {} }
+enum M { Hard, Soft }
+enum F { L(M), T(D) }
+fn take(_: Option<&'static F>) {}
+fn take_d(_: &'static D) {}
+fn g() {
+    take(Some(&F::L(M::Hard)));
+    take_d(&D);
+         //^^ error: temporary value dropped while borrowed
+}
+"#,
+        );
+    }
+
+    // biome's organize_imports: `use<>` on an `impl Trait` inside the return type.
+    #[test]
+    fn use_bound_of_a_nested_impl_trait_captures_nothing() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, option, copy
+//- /main.rs edition:2024
+struct N(u8);
+fn att(n: &N) -> Option<impl Sized + use<>> { Some(n.0) }
+impl N { fn with(self, _i: impl Sized) -> N { self } }
+fn f(mut n: N) -> N {
+    if let Some(a) = att(&n) { n = n.with(a); }
+    n
+}
+"#,
+        );
+    }
+
+    // hir-ty's `InferBodyId::store_and_root_expr`: lifetime elision counts none of the impl's
+    // lifetimes in a parameter that writes `Self`, so the return type has the lifetime of `db`
+    // or `x`, here and where it is called.
+    #[test]
+    fn elision_counts_no_lifetime_of_self() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, deref, copy, clone, derive
+use core::ops::Deref;
+struct Store(u32);
+struct Body(Store);
+impl Deref for Body {
+    type Target = Store;
+    fn deref(&self) -> &Store { &self.0 }
+}
+trait Db {}
+fn body_of(_db: &dyn Db) -> &Body { loop {} }
+#[derive(Clone, Copy)]
+struct Id<'a>(&'a u8);
+impl Id<'_> {
+    fn store(self, db: &dyn Db) -> (&Store, u32) {
+        let body = body_of(db);
+        (body, 0)
+    }
+    fn other(self, _o: Self, x: &u32) -> &u32 { x }
+}
+impl<'a> Id<'a> {
+    fn named(self, x: &u32) -> &u32 { x }
+}
+fn caller<'a>(db: &'a dyn Db, id: Id<'_>) -> &'a Store { id.store(db).0 }
+fn caller_err(id: Id<'static>) -> &'static u32 {
+    let x = 1;
+    id.named(&x)
+  //^^^^^^^^^^^^ error: cannot return reference to local variable
+}
+"#,
+        );
+    }
+
+    // hir-ty's `path_to_const`: what the types in a trait object's arguments imply holds,
+    // `'db: 'a` of `&dyn Fn() -> &'a G<'db>`.
+    #[test]
+    fn implied_bounds_of_a_trait_objects_arguments() {
+        check_diagnostics(
+            r#"
+//- minicore: sized, fn, dispatch_from_dyn
+struct G<'db>(&'db u32);
+fn need<'a, 'db: 'a>(_: &'a G<'db>) {}
+fn f<'a, 'db>(g: &dyn Fn() -> &'a G<'db>) { need(g()) }
+"#,
+        );
+    }
+
+    // core's `fmt::rt::Argument::new_display`: the `'_` of `Formatter<'_>` is late-bound in
+    // `Display::fmt`, so the item reifies to the `for<'a, 'b, 'c> fn` it is given as.
+    #[test]
+    fn a_fn_items_elided_lifetime_is_late_bound_when_reified() {
+        check_diagnostics(
+            r#"
+//- minicore: sized
+struct Formatter<'a>(&'a ());
+trait Display {
+    fn fmt(&self, f: &mut Formatter<'_>);
+}
+fn new<T>(_: &T, _: fn(&T, &mut Formatter<'_>)) {}
+fn new_display<T: Display>(x: &T) {
+    new(x, Display::fmt)
+}
+"#,
+        );
+    }
+
+    // hir-def's `module_for_assoc_item_loc`: `dyn 'db + Database` implies `'db: 'static`
+    // where a supertrait of `Database` is `'static`.
+    #[test]
+    fn a_supertraits_static_bound_is_implied() {
+        check_diagnostics(
+            r#"
+//- minicore: sized
+trait Base: 'static {}
+trait Database: Base {}
+fn take(_: &dyn Database) {}
+fn f<'db>(db: &(dyn 'db + Database)) { take(db) }
+"#,
+        );
+    }
+
+    #[test]
+    fn a_failed_guard_ends_what_its_pattern_binds() {
+        check_diagnostics(
+            r#"
+//- minicore: copy
+fn p(_: &u8) -> bool { false }
+fn f(v: (u8, u8)) -> u8 {
+    let mut n = 0;
+    loop {
+        n += match v {
+            (ref a, 1) | (2, ref a) if p(a) => *a,
+            (ref a, _) if p(a) => *a,
+            _ => 1,
+        };
+        if n > 2 {
+            return n;
+        }
+    }
+}
+"#,
+        );
+    }
+
     #[test]
     fn unused_mut_self() {
         check_diagnostics(

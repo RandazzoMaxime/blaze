@@ -16,7 +16,9 @@ run, twice: once as before, where the load's `cargo check --compile-time-deps` h
 the proc macros, and once with `RA_JIT_PROC_MACRO_SERVER` naming the server, where ra-jit links
 each of them (crates/ra-jit/src/cargo/own_macro.rs) and that server expands with them. Each
 program has to print what cargo's does, and the proc-macro libraries in the target directory
-have to be all rustc's, then all ra-jit's.
+have to be all rustc's, then all ra-jit's. Every build shares one store: the package whole,
+which names the standard library's crates, has to refuse what the server's and libraries'
+builds over the library's unit kept (#328).
 
 With the names of bench apps (`APPS`, or `all` for each of them) it holds those instead. Each
 is built whole by ra-jit into its own target directory twice, from an empty store each time:
@@ -205,25 +207,40 @@ def lib_name(package):
     return None
 
 
-def closure(meta, name):
-    """The package called `name` and the libraries it links: its normal dependencies, all the
-    way down, but proc-macro crates, which run while it is built. Each by its crate's name."""
-    packages = {p["id"]: p for p in meta["packages"]}
-    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-    start = next(p["id"] for p in meta["packages"] if p["name"] == name)
-    seen, todo, crates = {start}, [start], []
+def unit_graph(root):
+    """What `cargo build` in `root` compiles, unit by unit: the graph of the build, not cargo
+    metadata's resolve, which also has an optional dependency that only a weak feature
+    (`borsh?/std`) names and so is never built: smol_str's borsh."""
+    ran, _ = run(["cargo", "build", "--unit-graph", "-Z", "unstable-options"], root,
+                 f"cargo build --unit-graph of {root}")
+    return json.loads(ran.stdout)["units"]
+
+
+def closure(meta, units, name):
+    """The package called `name` and the libraries it links in the build: its units'
+    dependencies, all the way down, but build scripts and proc-macro crates, which run while
+    it is built. Each by its crate's name."""
+    def skipped(unit):
+        kinds = set(unit["target"]["kind"])
+        return unit["mode"] == "run-custom-build" or bool({"custom-build", "proc-macro"} & kinds)
+    ids = {p["id"] for p in meta["packages"] if p["name"] == name}
+    starts = [i for i, u in enumerate(units)
+              if u["pkg_id"] in ids and "custom-build" not in u["target"]["kind"]
+              and u["mode"] != "run-custom-build"]
+    if not starts:
+        raise SystemExit(f"FAIL: the build's unit graph has no package {name}")
+    seen, todo, crates = set(starts), list(starts), []
     while todo:
-        node = nodes[todo.pop()]
-        for dep in node["deps"]:
-            if not any(kind["kind"] is None for kind in dep["dep_kinds"]):
+        unit = units[todo.pop()]
+        for dep in unit["dependencies"]:
+            index = dep["index"]
+            if index in seen or skipped(units[index]):
                 continue
-            package = packages[dep["pkg"]]
-            if any("proc-macro" in t["kind"] for t in package["targets"]):
-                continue
-            if dep["pkg"] not in seen:
-                seen.add(dep["pkg"])
-                todo.append(dep["pkg"])
-                crates.append(lib_name(package))
+            seen.add(index)
+            todo.append(index)
+            crate = units[index]["target"]["name"].replace("-", "_")
+            if crate not in crates:
+                crates.append(crate)
     return crates
 
 
@@ -260,7 +277,7 @@ def ra_jit(root, crates, out, *extra, env=None):
 
 
 def linked(ran, what):
-    said = re.search(r"^linked .* in (\S+), (\d+) functions in it ra-jit could not compile$",
+    said = re.search(r"^linked .* in (\S+), (\d+) functions in it blaze could not compile$",
                      ran.stderr, re.M)
     if not said:
         raise SystemExit(f"FAIL: {what}: ra-jit did not say it linked:\n{ran.stderr[-8000:]}")
@@ -269,9 +286,16 @@ def linked(ran, what):
                          f"{ran.stderr[-8000:]}")
 
 
+def libraries_in(target):
+    """The shared libraries cargo built in `target`: in `deps/`, or, in the build directory's
+    layout of cargo since nightly-2026-10-25, in each unit's `build/<package>/<hash>/out/`."""
+    return [lib for at in ("deps", "out")
+            for lib in glob.glob(os.path.join(target, "**", at, "lib*.so"), recursive=True)]
+
+
 def built_macros(target):
     """The proc-macro libraries the load's cargo built in `target`, ra-jit's ones apart."""
-    libraries = glob.glob(os.path.join(target, "**", "deps", "lib*.so"), recursive=True)
+    libraries = libraries_in(target)
     ours = {lib for lib in libraries if LIST in open(lib, "rb").read()}
     name = lambda lib: os.path.basename(lib)[3:].rsplit("-", 1)[0]
     return sorted(map(name, ours)), sorted(map(name, set(libraries) - ours))
@@ -280,13 +304,12 @@ def built_macros(target):
 def without_libc(target):
     """ra-jit's proc-macro libraries in `target` that do not name libc: glibc binds each libc
     symbol of such a library to its oldest version, a `realpath` that fails without a buffer."""
-    libraries = glob.glob(os.path.join(target, "**", "deps", "lib*.so"), recursive=True)
-    read = {lib: open(lib, "rb").read() for lib in libraries}
+    read = {lib: open(lib, "rb").read() for lib in libraries_in(target)}
     return sorted(os.path.basename(lib) for lib, data in read.items()
                   if LIST in data and b"libc.so" not in data)
 
 
-def wired(work, root, meta, server):
+def wired(work, root, meta, units, server):
     """The package built whole by ra-jit and run, its proc macros built by the load's cargo in
     ra-jit's own target directory (`--own-target`): by rustc, and then by ra-jit with the
     server named, which expands with its libraries."""
@@ -294,16 +317,12 @@ def wired(work, root, meta, server):
     cargo_target = os.path.join(work, "cargo-target")
     ran, _ = run(["cargo", "run", "-q"], root, "cargo run", env={"CARGO_TARGET_DIR": cargo_target})
     expected = ran.stdout
-    crates = with_std(["macrouse", *closure(meta, "macrouse")])
+    crates = with_std(["macrouse", *closure(meta, units, "macrouse")])
     lines, wanted = [], sorted(lib_name(p) for p in meta["packages"] if p["name"] in MACRO_CRATES)
     for named in (False, True):
         # A target directory of its own is seeded from cargo's, whose proc macros are rustc's.
         shutil.rmtree(os.path.join(root, "target"), ignore_errors=True)
-        # A store of its own: one the libraries were built into serves code over symbols of
-        # the standard library this build, which names its crates, does not link.
-        env = {"RA_JIT_CACHE": os.path.join(work, f"store-wired-{named}")}
-        if named:
-            env["RA_JIT_PROC_MACRO_SERVER"] = server
+        env = {"RA_JIT_PROC_MACRO_SERVER": server if named else "0"}
         ran, took = ra_jit(root, crates, os.path.join(work, "wired.o"), "--own-target",
                            "--exe", program, env=env)
         how = "with the server named" if named else "without it"
@@ -312,12 +331,14 @@ def wired(work, root, meta, server):
         if got != expected:
             raise SystemExit(f"FAIL: the package ({how}) printed otherwise than cargo's:\n"
                              f"cargo:  {expected}\nra-jit: {got}")
-        ours, theirs = built_macros(os.path.join(root, "target", "rust-analyzer"))
+        # A load without ra-jit's proc macros has a directory of its own (#460).
+        own = os.path.join(root, "target", "rust-analyzer" if named else "rust-analyzer-rustc")
+        ours, theirs = built_macros(own)
         if (ours, theirs) != ((wanted, []) if named else ([], wanted)):
             raise SystemExit(f"FAIL: the load ({how}) built the proc macros {ours} by ra-jit and "
                              f"{theirs} by rustc, not each of {wanted} by "
                              f"{'ra-jit' if named else 'rustc'}:\n{ran.stderr[-8000:]}")
-        bare = without_libc(os.path.join(root, "target", "rust-analyzer"))
+        bare = without_libc(own)
         if sys.platform == "linux" and bare:
             raise SystemExit(f"FAIL: ra-jit linked the proc macros {bare} without libc")
         lines.append(f"the package whole, its proc macros by {'ra-jit' if named else 'rustc'}: "
@@ -326,42 +347,52 @@ def wired(work, root, meta, server):
 
 
 def app(name, work, server):
-    """A bench app of bench.py built whole by ra-jit into its own target directory, twice,
-    each from an empty store. First with the server named, so the load's cargo has ra-jit link
-    every proc macro and ra-jit's server expands with them; then without it, rustc's libraries
-    expanded by the toolchain's server, and every call expanded again by ra-jit's server with
-    the library ra-jit linked of the same unit (`RA_JIT_PROC_MACRO_COMPARE`). Both programs
-    have to print the same. What each build took and what the comparison found, and the
-    comparison's counts."""
+    """A bench app of bench.py built whole by ra-jit into its own target directory, three
+    times. First from an empty store with the server named, so the load's cargo has ra-jit
+    link every proc macro and ra-jit's server expands with them; then again from that store
+    into an empty target directory, where every library ra-jit linked is the store's; then
+    from an empty store without the server, rustc's libraries expanded by the toolchain's
+    server, and every call expanded again by ra-jit's server with the library ra-jit linked of
+    the same unit (`RA_JIT_PROC_MACRO_COMPARE`). The programs have to print the same. What
+    each build took and what the comparison found, and the comparison's counts."""
     import bench
     spec, (crate, program) = bench.PROJECTS[name], APPS[name]
     root = os.path.join(work, name)
     run(["git", "clone", "-q", "--filter=blob:none", f"https://github.com/{spec['repo']}", root],
         work, f"git clone of {name}")
     run(["git", "-C", root, "checkout", "-q", "--detach", spec["rev"]], work, f"checkout of {name}")
-    own = os.path.join(root, "target", "rust-analyzer")
     libs = os.path.join(work, f"{name}-libs")
     os.makedirs(libs)
     lines, printed, counts = [], [], None
-    for named in (True, False):
+    for build in ("ours", "again", "theirs"):
+        named = build != "theirs"
+        # A load without ra-jit's proc macros has a directory of its own (#460).
+        own = os.path.join(root, "target", "rust-analyzer" if named else "rust-analyzer-rustc")
         shutil.rmtree(os.path.join(root, "target"), ignore_errors=True)
         store = os.path.join(work, f"{name}-store-{'ours' if named else 'theirs'}")
         env = {**spec.get("env", {}), "RA_JIT_CACHE": store}
         if named:
             env["RA_JIT_PROC_MACRO_SERVER"] = server
         else:
-            env.update(RA_JIT_PROC_MACRO_COMPARE=server, RA_JIT_PROC_MACRO_LIBS=libs)
-        # The same file name in both, which a program's usage line prints.
-        binary = os.path.join(work, f"{name}-{'ours' if named else 'theirs'}", program)
+            env.update(RA_JIT_PROC_MACRO_SERVER="0", RA_JIT_PROC_MACRO_COMPARE=server,
+                       RA_JIT_PROC_MACRO_LIBS=libs)
+        # The same file name in each, which a program's usage line prints.
+        binary = os.path.join(work, f"{name}-{build}", program)
         os.makedirs(os.path.dirname(binary), exist_ok=True)
         ran, took = ra_jit(root, [crate], os.path.join(work, f"{name}.o"), "--own-target",
                            "--exe", binary, env=env)
-        left = re.search(r"(\d+) functions in it ra-jit could not compile$", ran.stderr, re.M)
+        left = re.search(r"(\d+) functions in it blaze could not compile$", ran.stderr, re.M)
         ours, theirs = built_macros(own)
-        if named:
+        # A library the store had is written with no build of it, which leaves a log.
+        linked_now = {it for it in ours if glob.glob(
+            os.path.join(own, "**", ".ra-jit-units", f"{it}-*", "*", "ra-jit.log"), recursive=True)}
+        if build == "again" and linked_now:
+            raise SystemExit(f"FAIL: {name}: the second build linked {sorted(linked_now)} again, "
+                             "which the store had")
+        if build == "ours":
             # A proc macro rustc compiled again, for a crate of rustc's that links it, left
             # ra-jit's library beside its record.
-            for lib in [*glob.glob(os.path.join(own, "**", "deps", "lib*.so"), recursive=True),
+            for lib in [*libraries_in(own),
                         *glob.glob(os.path.join(own, "**", ".ra-jit-units", "*", "lib*.so"),
                                    recursive=True)]:
                 if LIST in open(lib, "rb").read():
@@ -370,9 +401,12 @@ def app(name, work, server):
                               timeout=60, env={**os.environ, **spec.get("env", {})})
         printed.append((said.returncode, said.stdout))
         start = len(lines)
-        lines.append(f"{name}, {'with' if named else 'without'} the server: {took:.1f} s; the "
-                     f"load's cargo built {len(theirs)} proc macros by rustc and {len(ours)} by "
-                     f"ra-jit; {left.group(1) if left else '?'} functions left; `{program} "
+        how = {"ours": "with the server", "again": "with the server and its store",
+               "theirs": "without the server"}[build]
+        lines.append(f"{name}, {how}: {took:.1f} s; the load's cargo built {len(theirs)} proc "
+                     f"macros by rustc and {len(ours)} by ra-jit"
+                     f"{f' ({len(ours) - len(linked_now)} from the store)' if named else ''}; "
+                     f"{left.group(1) if left else '?'} functions left; `{program} "
                      f"{' '.join(spec['run'])}` exited {said.returncode}")
         if named:
             lines += [f"  rustc's: {it}" for it in fallbacks(own, theirs)]
@@ -382,17 +416,18 @@ def app(name, work, server):
             lines += [f"  {it[:600]}" for it in re.findall(r"^proc macros: (`[^`]*`: .*)$",
                                                           ran.stderr, re.M)]
         print("\n".join(lines[start:]), flush=True)
-    if printed[0] != printed[1]:
-        lines.append(f"{name}: the program with ra-jit's proc macros printed otherwise:\n"
-                     f"  ra-jit's: {printed[0]}\n  rustc's:  {printed[1]}")
-        counts["printed otherwise"] = True
+    for at, which in ((0, "ra-jit's proc macros"), (1, "the store's proc macros")):
+        if printed[at] != printed[2]:
+            lines.append(f"{name}: the program with {which} printed otherwise:\n"
+                         f"  ra-jit's: {printed[at]}\n  rustc's:  {printed[2]}")
+            counts["printed otherwise"] = True
     shutil.rmtree(root, ignore_errors=True)
     return lines, counts
 
 
 def compared(stderr):
     """What `RA_JIT_PROC_MACRO_COMPARE` found, from the build's report."""
-    said = re.findall(r"compared with ra-jit's server: (\d+) calls \((\d+) derives, "
+    said = re.findall(r"compared with blaze's server: (\d+) calls \((\d+) derives, "
                       r"(\d+) attributes, (\d+) function-like\), (\d+) expanded otherwise, "
                       r"(\d+) failed by both, (\d+) not compared"
                       r"(?: \(expanded otherwise: ([^)]*)\))?(?: \(not compared: ([^)]*)\))?",
@@ -436,7 +471,8 @@ def built_server(work):
     server_root = os.path.realpath(SERVER)
     server = os.path.join(work, SERVER_BIN)
     crates = with_std([SERVER_BIN.replace("-", "_"),
-                       *closure(metadata(server_root), SERVER_PACKAGE)])
+                       *closure(metadata(server_root), unit_graph(server_root),
+                               SERVER_PACKAGE)])
     ran, took = ra_jit(server_root, crates, os.path.join(work, "server.o"), "--exe", server)
     linked(ran, "the server")
     return server, f"the server: built and linked by ra-jit in {took:.1f} s, {len(crates)} crates"
@@ -447,6 +483,10 @@ def main():
         print("not run: ra-jit links proc-macro libraries and the server on Linux so far")
         return
     work = scratch("ra-jit-macroserver-")
+    # One store for the run: the server and the libraries are built over the standard
+    # library's unit, and the package whole, which names its crates, must not take code from
+    # the store that calls into the unit (#328). An app's builds have stores of their own.
+    os.environ["RA_JIT_CACHE"] = os.path.join(work, "store")
     passed = False
     try:
         server, said = built_server(work)
@@ -486,6 +526,7 @@ def main():
             f.write(SOURCE)
         run(["cargo", "generate-lockfile", "-q"], root, "cargo generate-lockfile")
         meta = metadata(root)
+        units = unit_graph(root)
         libs = os.path.join(work, "libs")
         os.makedirs(libs)
         versions = []
@@ -494,7 +535,7 @@ def main():
                 continue
             name = lib_name(package)
             library = os.path.join(libs, f"lib{name}.so")
-            crates = with_std([name, *closure(meta, package["name"])])
+            crates = with_std([name, *closure(meta, units, package["name"])])
             ran, took = ra_jit(root, crates, os.path.join(work, f"{name}.o"), "--exe", library,
                                "--shared")
             linked(ran, package["name"])
@@ -521,7 +562,7 @@ def main():
         lines.append(f"the package: {calls} calls ({derives} derives, {attrs} attributes, "
                      f"{bangs} function-like) expanded by both servers, the same, "
                      f"in {took:.1f} s")
-        lines.extend(wired(work, root, meta, server))
+        lines.extend(wired(work, root, meta, units, server))
         print("\n".join(lines))
         print(f"PASS: ra-jit's server and libraries expand as the toolchain's, "
               f"{', '.join(versions)}")

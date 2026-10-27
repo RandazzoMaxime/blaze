@@ -19,27 +19,28 @@
 
 ## Install
 
-<!-- Once https://ix.dev/blaze/install.sh serves install.sh, it is the line to show here. -->
 ```sh
-curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh
+curl -fsSL https://ix.dev/blaze | sh
 ```
 
-For macOS on Apple silicon and Linux. Rather use crates.io or Nix? [Other ways to install](docs/install.md).
+For macOS on Apple silicon and Linux, with or without Rust installed: blaze downloads the Rust it
+builds with once (about 100 to 135 MB), or uses rustup's. Rather use crates.io or Nix?
+[Other ways to install](docs/install.md).
 
 ## Try it
 
 In any Rust project:
 
 ```text
-cargo blaze run     # like cargo run
-cargo blaze test    # like cargo test
-cargo blaze build   # like cargo build
+blaze run     # like cargo run
+blaze test    # like cargo test
+blaze build   # like cargo build
 ```
 
 The first build runs cargo, then waits a few seconds for blaze to load your project. Then change
-a function and build again: it's back in milliseconds, and the `Finished` line says `[ra-jit]`
-(blaze's engine). Every other cargo command passes
-straight through to cargo.
+a function and build again: it's back in milliseconds, and the `Finished` line says `[blaze]`.
+Every other cargo command passes straight through to cargo. Where cargo is
+installed, `cargo blaze run` is the same as `blaze run`.
 
 ## How fast
 
@@ -67,9 +68,13 @@ it again from scratch. A program that opts in can take the new code while it kee
 
 ## Good to know
 
-- **macOS on Apple silicon and Linux.** On Windows every build is cargo's.
-- **Stable Rust.** blaze builds your project with Rust 1.99.0 whatever toolchain it pins, so
-  code that needs a nightly's features isn't for blaze yet.
+- **macOS on Apple silicon and Linux.** Windows x86-64 (MSVC) builds and takes live edits
+  through blaze too, run by hand and not in CI, with no installer and no sandbox yet
+  ([platforms.md](docs/platforms.md#windows-x86-64-msvc)).
+- **blaze is its own toolchain.** It builds every project with its own Rust, `blaze-2026-10-25`
+  (today the nightly of that date), whatever the project pins; stable code and
+  `#![feature(...)]` code build. Your toolchain and CI stay the final word
+  ([why](docs/toolchain.md)).
 - **It trades memory for speed:** a few GB for a small project.
 - **It's young.** Keep `cargo check` or your CI as the final word, and
   [tell us](https://github.com/indexable-inc/blaze/issues) when something differs from cargo.
@@ -102,7 +107,7 @@ from source the first time.
 ## Updates
 
 <p align="center">
-  <a href="https://ra-jit.ix.dev/updates?src=readme">
+  <a href="https://ix.dev/blaze/updates?src=readme">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/brand/signup-on-dark.svg">
       <img alt="Tell us you use blaze" src="docs/brand/signup-on-light.svg" height="36">
@@ -111,6 +116,12 @@ from source the first time.
 </p>
 
 <p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
+
+## Using blaze at work?
+
+We're working with a few teams on fast Rust CI and remote builds, built on blaze. If your team
+waits on Rust builds, tell us what slows you down: [andrew@ix.dev](mailto:andrew@ix.dev). Teams
+we work with get early access and a direct say in what we build next.
 
 ## Contributing
 

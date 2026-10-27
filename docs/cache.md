@@ -40,10 +40,27 @@ first edit could be a patch (nushell: 73,586 functions, 9.4 s). A program that l
 rustc's code beside ra-jit's, an LLVM build and `#[ra_jit::cache]` functions keep no mark
 and still take that build ([#105](https://github.com/indexable-inc/ra-jit/issues/105)).
 
-Before a record is written, the store hashes that key together with the store format, a
-hash of the ra-jit executable and the toolchain's commit. An entry is therefore only ever
-found by the same ra-jit binary, for the same toolchain. Upgrading ra-jit makes the old
+Before a record is written, the store hashes that key together with the store format, what
+ra-jit was built from and the toolchain's commit. What it was built from is a hash
+`crates/ra-jit/build.rs` takes of every file of the workspace's crates and the vendored
+ones, of `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml` and `harness/toolchain`, of the
+features, the target and whether debug assertions are on. An entry is
+therefore found by any build of ra-jit from the same sources on any machine, for the same
+toolchain: a CI runner that builds ra-jit for a commit that changes only the harnesses or
+the docs reuses the store of the commit before (`harness/storebuilds.py`). A ra-jit built
+outside this workspace (the published crate) keys by the bytes of its executable, as every
+build did before. Upgrading ra-jit makes the old
 entries unreachable; they are removed over time as least recently used.
+
+A build script's run is kept under a key with the checkout and the target directory apart:
+its package's directory and the target directory its `OUT_DIR` is in are named by what stands
+for them in the key and in what it printed and wrote, and put back as the checkout that reads
+it has them. A run that wrote a file that is no text naming either is kept for its own place
+alone, since a path of another length would break that file. The key still hashes the
+script's executable, which differs between target directories (what ra-jit links differs
+with what the store had, and an rlib holds the `OUT_DIR` an `include!` named), so a second
+checkout runs its scripts again until a script is keyed by what it was built from
+([#105](https://github.com/indexable-inc/blaze/issues/105)).
 
 `harness/keys.py` tests the keying: it changes, one at a time, each thing code can depend
 on that is not the text of its file, and checks that a build with a store filled before the
@@ -162,9 +179,15 @@ These act on the store `cargo ra-jit status` names.
 
 ## The remote
 
-A remote is a directory, `s3://bucket/prefix`, or an `https://` address it is only read from,
+A remote is a directory, `s3://bucket/prefix`, an `https://` address it is only read from,
 whose files are named by their paths with `.` for `/` (a GitHub release's assets: see "The
-standard library" below). It holds sealed packs under the hash of
+standard library" below), or a tenant of blaze's cache gateway,
+`blaze+https://<gateway>/t/<tenant>/v3` ([remote-cache.md](remote-cache.md), the API in
+`worker/remote-cache/API-v0.md`). The gateway's token is read from `RA_JIT_REMOTE_TOKEN`, or
+from the variable `?token=env:NAME` names; without one the tenant is read anonymously, which a
+public tenant allows, and nothing is sent. Packs of 16 MB and more are fetched from it in ranges
+of 8 MB, `RA_JIT_REMOTE_JOBS` at a time, and objects over 90 MB go up in parts. A gateway is not
+listed, so `ra-jit cache gc --remote` does not apply to it. It holds sealed packs under the hash of
 their bytes, a list of the keys in each pack, and one manifest per project that lists the
 packs that project's builds were served from.
 
@@ -187,7 +210,10 @@ virtual-hosted addressing, IAM errors and role credentials are untested.
 
 `push` sends the packs the manifest lacks and adds them to it. `pull` fetches the packs the
 manifest lists that are not in the local store, as many as fit under `RA_JIT_CACHE_MAX`.
-`PROJECT` picks the manifest and defaults to `default`.
+`PROJECT` picks the manifest and defaults to `default`. Each prints one line of what it moved,
+whether it went through or not, for a CI job's summary:
+
+    pull: 12 objects, 48211022 bytes, 1.84 s, 25.0 MiB/s
 
 ### From the daemon
 
@@ -207,9 +233,18 @@ push. A daemon killed with SIGKILL pushes nothing on its way out; the next push 
 | `RA_JIT_REMOTE_TIMEOUT` | seconds a request may go without an answer | 30 |
 | `RA_JIT_REMOTE_SIGN` | file holding the key this machine signs manifests with | not set |
 | `RA_JIT_REMOTE_TRUST` | public keys this machine accepts manifests from, comma separated | not set |
+| `RA_JIT_REMOTE_TOKEN` | the bearer token of a `blaze+` gateway remote | not set |
+| `RA_JIT_REMOTE_REQUIRED` | a remote that fails fails the command (see below) | off |
 
 `RA_JIT_REMOTE` needs the local store (`RA_JIT_CACHE` not `off`): the remote fills and
-reads it.
+reads it. `RA_JIT_REMOTE=off` turns it off for one command.
+
+A remote that cannot be reached, answers 5xx after its retries, refuses the token (401, 403),
+or sends bytes that do not hash to their name does not stop a build: what it would have
+served is compiled, and every build's `Finished` line says so until an exchange with it
+succeeds again, as in `[ra-jit, remote down: <remote>: <why>]`. With `RA_JIT_REMOTE_REQUIRED=1`,
+which CI sets, each of those is an error that fails the command (`cache push`, `cache pull`,
+or the build), so a cache that stopped working is not a slowdown nobody sees.
 
 ### The standard library
 

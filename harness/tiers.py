@@ -36,6 +36,7 @@ BUILD_TIMEOUT = 900
 RUN_SECONDS = int(os.environ.get("TIERS_SECONDS", "30"))
 LEVEL_TIMEOUT = 20
 SIZE = os.environ.get("TIERS_SIZE", "160")
+PIN = (HERE / "toolchain").read_text().strip()
 
 
 class StepError(Exception):
@@ -67,11 +68,11 @@ async def serve(project: Path, env: dict[str, str]) -> None:
     after a daemon starts writes the whole object again."""
     await build("first build", project, env)
     for _ in range(120):
-        if "[ra-jit]" in await build("wait for the daemon", project, env):
+        if "[blaze]" in await build("wait for the daemon", project, env):
             break
         await asyncio.sleep(0.5)
     else:
-        raise StepError("wait for the daemon: no build said `[ra-jit]` in 120 tries")
+        raise StepError("wait for the daemon: no build said `[blaze]` in 120 tries")
     source = project / "src" / "main.rs"
     source.write_text(source.read_text() + "\n// the daemon's first edit\n")
     await build("first edit", project, env)
@@ -154,7 +155,7 @@ async def main() -> None:
         shutil.copytree(ROOT / "crates" / "ra-jit-live", work / "crates" / "ra-jit-live")
         shutil.copytree(ROOT / "demo" / "lifebench", work / "demo" / "lifebench", ignore=shutil.ignore_patterns("target"))
         project = work / "demo" / "lifebench"
-        base = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", RUSTUP_TOOLCHAIN="1.99.0")
+        base = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", RUSTUP_TOOLCHAIN=PIN)
         for name in ("CARGO_INCREMENTAL", "RA_JIT_TIER", "RA_JIT_BACKEND", "RA_JIT_OPT"):
             base.pop(name, None)
 
@@ -192,7 +193,8 @@ async def main() -> None:
         source.write_text(text.replace(needle, "if n == 3 || n == 2 { age + 1 } else { 0 }"))
         await build("edit of next_age while it runs", project, env)
         deadline = time.monotonic() + 10
-        demoted = lambda: [it for it in program.events[events_before:] if it.startswith("next_age: back to Cranelift")]
+        # A function is shown by its path: `lifebench::next_age`.
+        demoted = lambda: [it for it in program.events[events_before:] if re.match(r"(?:\S*::)?next_age: back to Cranelift", it)]
         while not demoted() and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
         if not demoted():

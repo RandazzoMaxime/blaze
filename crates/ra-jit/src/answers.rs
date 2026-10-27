@@ -19,7 +19,10 @@ use std::{
 
 use sha2::{Digest as _, Sha256};
 
+mod cargo;
 mod own;
+
+pub(crate) use cargo::{answer as cargo_answer, rustflags as cargo_rustflags};
 
 /// What rustc can be asked to print without compiling, whatever the input is.
 const ABOUT_RUSTC: [&str; 20] = [
@@ -136,20 +139,34 @@ pub(crate) fn is_question(args: &[OsString]) -> bool {
         && (kinds.iter().all(about_rustc) || (from_stdin && inputs == 0))
 }
 
+/// What ra-jit itself answers to what `command` asks rustc, given `stdin`, or `None` when it
+/// has no answer of its own. No rustc runs.
+pub(crate) fn own_answer(command: &Command, stdin: &[u8]) -> Option<Vec<u8>> {
+    let var = |name: &str| var_of(command, name);
+    let args: Vec<OsString> = command.get_args().map(OsStr::to_owned).collect();
+    let rustc = toolchain_rustc(command.get_program(), &var)?;
+    own::answer(&rustc, &args, stdin, &var)
+}
+
+/// What ra-jit itself answers to rustc of the toolchain `rustc` is, asked with `args` and
+/// `stdin` in this process's environment, or `None` when it has no answer of its own. No
+/// rustc runs.
+pub(crate) fn own_answer_of(rustc: &OsStr, args: &[OsString], stdin: &[u8]) -> Option<Vec<u8>> {
+    let var = |name: &str| std::env::var_os(name);
+    own::answer(&toolchain_rustc(rustc, &var)?, args, stdin, &var)
+}
+
 /// rustc's answer to what `command` asks it, given `stdin`: ra-jit's own, the kept answer, or
 /// rustc's now, kept when it is one. `command` runs rustc and asks a question ([`is_question`]).
 pub(crate) fn answer(command: &mut Command, stdin: &[u8]) -> io::Result<Output> {
     let given = std::env::var_os(OFF);
-    if given.as_ref().is_none_or(|it| it != "0") {
-        let var = |name: &str| var_of(command, name);
-        let args: Vec<OsString> = command.get_args().map(OsStr::to_owned).collect();
-        let rustc = toolchain_rustc(command.get_program(), &var);
-        if let Some(stdout) = rustc.and_then(|rustc| own::answer(&rustc, &args, stdin, &var)) {
-            return Ok(Output { status: ExitStatus::default(), stdout, stderr: Vec::new() });
-        }
+    if given.as_ref().is_none_or(|it| it != "0")
+        && let Some(stdout) = own_answer(command, stdin)
+    {
+        return Ok(Output { status: ExitStatus::default(), stdout, stderr: Vec::new() });
     }
     if given.is_some_and(|it| it == "own") {
-        return Err(io::Error::other("ra-jit has no answer of its own to this question"));
+        return Err(io::Error::other("blaze has no answer of its own to this question"));
     }
     let key = key(command, stdin);
     let file = key.as_ref().and_then(|key| Some(dir()?.join(key)));
@@ -186,6 +203,10 @@ pub(crate) fn ask(command: &mut Command) -> Option<io::Result<Output>> {
     let program = Path::new(command.get_program()).file_stem()?.to_str()?.to_owned();
     match program.as_str() {
         "cargo" => {
+            // What it asks of the toolchain and the configuration, ra-jit answers.
+            if let Some(answered) = cargo::answer(command) {
+                return Some(answered);
+            }
             ready_cargo(command);
             None
         }

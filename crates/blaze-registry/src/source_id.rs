@@ -3,8 +3,9 @@
 //! which hash it with `rustc-stable-hash` as cargo has since 1.85.
 
 use std::{
+    fmt,
     hash::{Hash, Hasher},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
@@ -41,6 +42,18 @@ impl GitReference {
             }
         }
         reference
+    }
+
+    /// The reference as a lock file's URL writes it in its query, none for the default branch.
+    pub fn pretty(&self) -> Option<String> {
+        let (key, value) = match self {
+            GitReference::Tag(it) => ("tag", it),
+            GitReference::Branch(it) => ("branch", it),
+            GitReference::Rev(it) => ("rev", it),
+            GitReference::DefaultBranch => return None,
+        };
+        let value: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+        Some(format!("{key}={value}"))
     }
 }
 
@@ -191,6 +204,43 @@ impl SourceId {
         let host = self.url.host_str().unwrap_or("");
         format!("{host}-{}", short_hash(self))
     }
+}
+
+/// As cargo shows a source in its messages.
+impl fmt::Display for SourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            SourceKind::Git(reference) => {
+                write!(f, "{}", self.url)?;
+                if let Some(pretty) = reference.pretty() {
+                    write!(f, "?{pretty}")?;
+                }
+                Ok(())
+            }
+            SourceKind::Path => write!(f, "{}", url_display(&self.url)),
+            SourceKind::Registry | SourceKind::SparseRegistry if self.is_crates_io() => {
+                write!(f, "registry `{CRATES_IO_REGISTRY}`")
+            }
+            SourceKind::Registry | SourceKind::SparseRegistry | SourceKind::LocalRegistry => {
+                write!(f, "registry `{}`", url_display(&self.url))
+            }
+            SourceKind::Directory => write!(f, "dir {}", url_display(&self.url)),
+        }
+    }
+}
+
+fn url_display(url: &Url) -> String {
+    match url.scheme() {
+        "file" => {
+            url.to_file_path().map_or_else(|()| url.to_string(), |it| it.display().to_string())
+        }
+        _ => url.to_string(),
+    }
+}
+
+/// The directory of a path, directory or local-registry source.
+pub(crate) fn path_of(id: &SourceId) -> anyhow::Result<PathBuf> {
+    id.url().to_file_path().map_err(|()| anyhow::anyhow!("{} is not a directory", id.url()))
 }
 
 /// Sixteen hex digits of a hash of `value` that are the same on every platform and release, as

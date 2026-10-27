@@ -1115,6 +1115,155 @@ fn main<'a, T: Foo + Bar + Baz>(
 }
 
 #[test]
+fn statement_macro_in_the_parentheses_of_another() {
+    // rustc parses `twice!(n += 1;)` with no `;` after it as an expression, so the outer
+    // call's expansion, two calls with nothing between, does not parse (#154).
+    check_error_with(
+        r#"
+macro_rules! twice {
+    ($($body:tt)*) => {
+        $($body)*
+        $($body)*
+    };
+}
+
+fn main() {
+    let mut n = 0u32;
+    twice!(twice!(n += 1;));
+}
+"#,
+        |e| {
+            matches!(
+                e,
+                MirEvalError::MirLowerError(_, MirLowerError::NotSupported(why))
+                    if why.starts_with("macro call in parentheses or brackets with no `;` after it")
+            )
+        },
+    );
+    // Braced, each call is a statement of its own, and both compile it.
+    check_pass(
+        r#"
+//- minicore: panic
+macro_rules! twice {
+    ($($body:tt)*) => {
+        $($body)*
+        $($body)*
+    };
+}
+
+fn main() {
+    let mut n = 0u32;
+    twice! { twice! { n += 1; } }
+    if n != 4 {
+        panic!();
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn expression_macro_of_one_expression_and_a_semicolon() {
+    // rustc parses `bail!(1)` last in a block as an expression and takes the `;` after the
+    // one expression it expands to: the call's value is that expression. It warns of it for
+    // another crate's macro.
+    check_pass(
+        r#"
+//- minicore: panic, result
+//- /m.rs crate:m
+#[macro_export]
+macro_rules! val { () => { 5u32; } }
+#[macro_export]
+macro_rules! bail { ($e:expr) => { return Err($e); } }
+#[macro_export]
+macro_rules! inner { () => { $crate::val!() } }
+//- /main.rs crate:main deps:m
+fn f(c: bool) -> Result<u32, u32> {
+    if c { m::bail!(1) } else { Ok(m::val!()) }
+}
+
+fn main() {
+    let v: u32 = { m::val!() };
+    let w: u32 = { m::inner!() };
+    let ok = match f(false) { Ok(it) => it, Err(_) => 0 };
+    let err = match f(true) { Ok(_) => 0, Err(it) => it };
+    if v != 5 || w != 5 || ok != 5 || err != 1 {
+        panic!();
+    }
+}
+"#,
+    );
+    // A macro of the crate's own: rustc's `semicolon_in_expressions_from_macros` is an error.
+    check_error_with(
+        r#"
+macro_rules! val { () => { 5u32; } }
+
+fn main() {
+    let _v: u32 = { val!() };
+}
+"#,
+        |e| {
+            matches!(
+                e,
+                MirEvalError::MirLowerError(_, MirLowerError::NotSupported(why))
+                    if why.contains("semicolon_in_expressions_from_macros")
+            )
+        },
+    );
+}
+
+#[test]
+fn statement_macro_last_in_another_statement_macro() {
+    // A call last in another's expansion ends where the expansion does: it is a statement
+    // macro where the outer call was one (`m!(..);`), and its expansion may be statements,
+    // as rustc accepts.
+    check_pass(
+        r#"
+//- minicore: panic
+macro_rules! two { ($($t:tt)*) => { $($t)* $($t)* } }
+macro_rules! outer { ($n:ident) => { two!($n += 1;) } }
+macro_rules! bind { ($n:ident) => { let $n = 42u32; } }
+macro_rules! binds { ($n:ident) => { bind!($n) } }
+macro_rules! nop { () => {} }
+macro_rules! nops { () => { let _x = 1; nop!() } }
+
+fn main() {
+    let mut n = 0u32;
+    outer!(n);
+    if n != 2 {
+        panic!();
+    }
+    binds!(x);
+    if x != 42 {
+        panic!();
+    }
+    nops!();
+}
+"#,
+    );
+    // Where the outer call is an expression, so is one last in its expansion: rustc rejects
+    // `outer!()` as the value of a block when it expands to a call of several statements.
+    check_error_with(
+        r#"
+macro_rules! two { ($($t:tt)*) => { $($t)* $($t)* } }
+macro_rules! outer { () => { two!(n += 1;) } }
+
+fn main() {
+    let mut n = 0u32;
+    let _ = { outer!() };
+}
+"#,
+        |e| {
+            matches!(
+                e,
+                MirEvalError::MirLowerError(_, MirLowerError::NotSupported(why))
+                    if why.starts_with("macro call in parentheses or brackets with no `;` after it")
+            )
+        },
+    );
+}
+
+#[test]
 fn format_args_pass() {
     check_pass(
         r#"

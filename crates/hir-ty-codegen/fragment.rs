@@ -180,8 +180,19 @@ pub(super) struct Variable {
 /// Of everything `eq` compares.
 impl Hash for Code {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let Code { signature, bytes, align, relocs, elf_types, unwind, lines, slots } = self;
-        (signature, bytes, align, elf_types, lines, slots).hash(state);
+        self.hash_with(state, true);
+    }
+}
+
+impl Code {
+    /// Its [`Hash`], leaving out where the named locals are unless `slots`.
+    pub(super) fn hash_with<H: Hasher>(&self, state: &mut H, slots: bool) {
+        let Code { signature, bytes, align, relocs, elf_types, unwind, lines, slots: places } =
+            self;
+        (signature, bytes, align, elf_types, lines).hash(state);
+        if slots {
+            places.hash(state);
+        }
         // Cranelift's unwind rules have no `Hash`: what they print is all of them.
         format!("{unwind:?}").hash(state);
         relocs.len().hash(state);
@@ -251,14 +262,26 @@ pub(super) struct Inlinable {
 
 impl Inlinable {
     /// `func` with `requests`, if a caller can ask for the same: each blob points only at
-    /// what was asked for before it.
+    /// what was asked for before it, and none has a `TypeId` to hash. A hash that can't be
+    /// had fails the function that has it, whose callers then call rustc's copy of it.
     pub(super) fn of(
         func: ir::Function,
         requests: Requests,
         pointees: Vec<(u32, Pointee)>,
         seen: Vec<Seen>,
     ) -> Option<Inlinable> {
-        requests.ordered().then_some(Inlinable { func, requests, pointees, seen })
+        let hashed_later = requests.datas.iter().any(|it| match it {
+            DataRequest::Blob { blob, .. } | DataRequest::Vtable { blob, .. } => {
+                !blob.type_ids.is_empty()
+            }
+            _ => false,
+        });
+        (requests.ordered() && !hashed_later).then_some(Inlinable {
+            func,
+            requests,
+            pointees,
+            seen,
+        })
     }
 }
 
@@ -326,6 +349,8 @@ pub(super) struct Recorder<'db> {
     span_ids: FxHashMap<MirSpan, u32>,
     /// The locals written with a name that a stack slot of their own tells where they are.
     pub(super) named: Vec<Named>,
+    /// The slots of the locals of the body, for [`overlap`](super::overlap) to share.
+    pub(super) frame_locals: Option<super::overlap::FrameLocals>,
     /// The bodies of the callees that are built into their callers, which call them by their
     /// place here in [`INLINED`] until [`inline`](super::inline) puts the bodies there.
     pub(super) inlined: Vec<ir::Function>,
@@ -372,21 +397,20 @@ impl Wants {
     /// by its place among the requests: what a load from it is known to give.
     #[cfg(feature = "llvm")]
     pub(super) fn constants(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
-        self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
-            DataRequest::Blob { blob, identity }
-                if blob.points_nowhere() && *identity != DataIdentity::Writable =>
-            {
-                Some((index as u32, blob.bytes()))
-            }
-            _ => None,
-        })
+        self.readonly()
+            .filter(|it| it.1.points_nowhere())
+            .map(|(index, blob)| (index, blob.bytes()))
     }
 
     /// Each data object asked for so far that is read-only, by its place among the requests.
+    /// One with a `TypeId` is left out: its bytes are const eval's ids until the object's data
+    /// has the hashes written in their place.
     #[cfg(feature = "llvm")]
     pub(super) fn readonly(&self) -> impl Iterator<Item = (u32, &ConstBlob)> + '_ {
         self.requests.datas.iter().enumerate().filter_map(|(index, data)| match data {
-            DataRequest::Blob { blob, identity } if *identity != DataIdentity::Writable => {
+            DataRequest::Blob { blob, identity }
+                if *identity != DataIdentity::Writable && blob.type_ids.is_empty() =>
+            {
                 Some((index as u32, blob))
             }
             _ => None,
@@ -426,6 +450,17 @@ impl Wants {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The texts of the `asm!` wrappers it asks for, by their places among the requests:
+    /// what LLVM puts in place of a call of one ([`Self::asm_blocks`]).
+    #[cfg(feature = "llvm")]
+    pub(super) fn asm_texts(&self) -> impl Iterator<Item = (u32, &str)> {
+        let funcs = self.requests.funcs.iter().enumerate();
+        funcs.filter_map(|(at, it)| match &it.target {
+            FuncTarget::Asm(text) => Some((at as u32, text.as_str())),
+            _ => None,
+        })
     }
 
     #[cfg(feature = "llvm")]
@@ -547,7 +582,12 @@ impl Wants {
         self.func(FuncTarget::Path(path.to_owned()), sig)
     }
 
+    /// A function of assembly. The text is assembled here, on the thread compiling the caller,
+    /// into the cache [`super::asm::assemble`] keeps: the one thread that puts functions in the
+    /// object would otherwise run the assembler for each block in turn. An error is not kept,
+    /// so that thread meets it again and refuses the caller with it as before.
     pub(super) fn assembly(&mut self, text: String, sig: &Signature) -> FuncId {
+        _ = super::asm::assemble(&self.isa.triple().to_string(), &text);
         self.func(FuncTarget::Asm(text), sig)
     }
 
@@ -665,6 +705,7 @@ impl<'db> Recorder<'db> {
             spans: Vec::new(),
             span_ids: FxHashMap::default(),
             named: Vec::new(),
+            frame_locals: None,
             inlined: Vec::new(),
             unlocated: false,
             opaque: false,
@@ -855,6 +896,7 @@ impl<'db> Recorder<'db> {
                     .map(|&(offset, target)| (offset, funcs[target.as_u32() as usize]))
                     .collect(),
                 align: blob.align,
+                type_ids: blob.type_ids.clone(),
             };
             let id = match request {
                 DataRequest::Blob { blob, identity } => self.define_data_as(moved(blob), *identity),

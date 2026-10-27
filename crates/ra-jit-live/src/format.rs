@@ -130,6 +130,12 @@ pub struct Code {
     /// The rest put back what the executable had, where an earlier edit wrote.
     pub redirected: u64,
     pub statics: u64,
+    /// The first value of each static new since the executable that the code refers to, in
+    /// the room the program set aside: the program writes one the first time a patch has it
+    /// and never again, so it keeps what was written to it across the patches after, which
+    /// all refer to it there. Each patch has all it refers to: one the program did not take
+    /// (an older one the newest was written over) is nothing to the next.
+    pub lasting: Vec<Write>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -161,12 +167,17 @@ impl Patch {
                 list(&mut out, &code.pointers);
                 put(&mut out, code.redirected);
                 put(&mut out, code.statics);
-                put(&mut out, code.writes.len() as u64);
-                for write in &code.writes {
+                // The statics' first values go with the writes, ahead of them, and their count
+                // at the end: a program of an older `ra-jit-live` writes them as it does the
+                // others, where it has nothing mapped, and declines the patch before it
+                // redirects anything to code that refers to them.
+                put(&mut out, (code.lasting.len() + code.writes.len()) as u64);
+                for write in code.lasting.iter().chain(&code.writes) {
                     put(&mut out, write.address);
                     bytes(&mut out, &write.bytes);
                     list(&mut out, &write.pointers);
                 }
+                put(&mut out, code.lasting.len() as u64);
             }
         }
         out
@@ -175,7 +186,7 @@ impl Patch {
     pub fn decode(bytes: &[u8]) -> Result<Patch, String> {
         let mut reader = Reader(bytes);
         if reader.take(8)? != MAGIC {
-            return Err("not a patch of this version of ra-jit".to_owned());
+            return Err("not a patch of this version of blaze".to_owned());
         }
         let uuid = reader.take(16)?.try_into().map_err(|_| "a short patch")?;
         let sequence = reader.u64()?;
@@ -195,7 +206,25 @@ impl Patch {
                     let bytes = reader.bytes()?.to_vec();
                     writes.push(Write { address, bytes, pointers: reader.list()? });
                 }
-                Body::Code(Code { base, text, data, frames, pointers, writes, redirected, statics })
+                // The first of them are the statics' first values, when there are any.
+                let lasting = if reader.0.is_empty() { 0 } else { reader.u64()? };
+                let lasting = usize::try_from(lasting).map_err(|_| "a patch too large")?;
+                if lasting > writes.len() {
+                    return Err("a short patch".to_owned());
+                }
+                let rest = writes.split_off(lasting);
+                let lasting = std::mem::replace(&mut writes, rest);
+                Body::Code(Code {
+                    base,
+                    text,
+                    data,
+                    frames,
+                    pointers,
+                    writes,
+                    redirected,
+                    statics,
+                    lasting,
+                })
             }
             other => return Err(format!("a patch of kind {other}")),
         };
@@ -521,6 +550,7 @@ mod tests {
             writes: vec![Write { address: 0x1_0000_4000, bytes: vec![9; 4], pointers: vec![] }],
             redirected: 1,
             statics: 0,
+            lasting: vec![Write { address: 0x1_7fff_fff0, bytes: vec![1; 8], pointers: vec![0] }],
         };
         let patch = Patch { uuid: [7; 16], sequence: 3, body: Body::Code(code) };
         assert_eq!(Patch::decode(&patch.encode()).unwrap(), patch);

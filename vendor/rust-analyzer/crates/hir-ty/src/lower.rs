@@ -387,6 +387,24 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
         self
     }
 
+    /// The lifetime of a trait object written without one where `region` would be its
+    /// default. In a body a lifetime left to inference (`&dyn Trait`, `Ref<'_, dyn Trait>`)
+    /// resolves to nothing, so rustc's `resolve_object_lifetime_default` gives the object a
+    /// lifetime inferred on its own, not the reference's.
+    fn object_default(&mut self, region: Region<'db>) -> Region<'db> {
+        if self.infers_object_lifetimes() && matches!(region.kind(), RegionKind::ReVar(_)) {
+            return self.next_region_var(Span::Dummy);
+        }
+        region
+    }
+
+    /// Lowering a type written in a body with region variables, where a trait object no
+    /// enclosing type gives a lifetime (`Box<dyn Trait>`, `*const dyn Trait`) has an inferred
+    /// one, not `'static`.
+    fn infers_object_lifetimes(&self) -> bool {
+        self.elided_region_vars && matches!(self.def, ExpressionStoreOwnerId::Body(_))
+    }
+
     fn push_infer_vars_not_allowed(&mut self, span: Span) {
         if !span.is_dummy() {
             self.push_diagnostic(TyLoweringDiagnostic::InferVarsNotAllowed { source: span });
@@ -808,7 +826,8 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
                 let inner_ty = match &self.store[ref_.ty] {
                     // `&'a dyn Trait` is `&'a (dyn Trait + 'a)`.
                     TypeRef::DynTrait(bounds) if !lifetime.is_error() || self.impl_header => {
-                        self.lower_dyn_trait(bounds, lifetime)
+                        let object = self.object_default(lifetime);
+                        self.lower_dyn_trait(bounds, object)
                     }
                     _ => self.lower_ty(ref_.ty),
                 };
@@ -816,7 +835,14 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
             }
             TypeRef::Placeholder => self.next_ty_var(type_ref_id.into()),
             TypeRef::Fn(fn_) => self.lower_fn_ptr(fn_),
-            TypeRef::DynTrait(bounds) => self.lower_dyn_trait(bounds, Region::new_static(interner)),
+            TypeRef::DynTrait(bounds) => {
+                let object = if self.infers_object_lifetimes() {
+                    self.next_region_var(Span::Dummy)
+                } else {
+                    Region::new_static(interner)
+                };
+                self.lower_dyn_trait(bounds, object)
+            }
             TypeRef::ImplTrait(bounds) => {
                 match self.impl_trait_mode.mode {
                     ImplTraitLoweringMode::Opaque => {
@@ -960,6 +986,22 @@ impl<'db, 'a> TyLoweringContext<'db, 'a> {
             }
         };
         Some(Pattern::new(self.interner, pat_kind))
+    }
+
+    /// The types a closure's parameters are written with, and what their signature binds: as
+    /// rustc, a lifetime they leave out is a late-bound one of it, `|h: &H|` takes a `&H` of
+    /// any lifetime.
+    pub(crate) fn lower_closure_params(
+        &mut self,
+        params: &[Option<TypeRefId>],
+    ) -> (Vec<Option<Ty<'db>>>, BoundVarKinds<'db>) {
+        let (lowered, _) = self.with_shifted_in(&[], |ctx: &mut TyLoweringContext<'_, '_>| {
+            ctx.with_elision(true, |ctx| {
+                let params = params.iter().map(|&it| it.map(|it| ctx.lower_ty(it))).collect();
+                (params, ctx.bound_vars_with_elided())
+            })
+        });
+        lowered
     }
 
     fn lower_fn_ptr(&mut self, fn_: &FnType) -> Ty<'db> {
@@ -3431,6 +3473,69 @@ impl ElidedLifetimes {
     }
 }
 
+/// The signature `sig` of `function` with each lifetime its parameters leave out, an error, a
+/// late-bound one of its own, and one its return type leaves out the one the elision rules give
+/// it: the fn pointer rustc reifies `function` to, `fn(&T) -> &U` as `for<'a> fn(&'a T) -> &'a U`.
+/// `sig` as it is where the lifetimes left out are not known.
+pub(crate) fn bind_elided_lifetimes<'db>(
+    db: &'db dyn HirDatabase,
+    function: FunctionId,
+    sig: PolyFnSig<'db>,
+) -> PolyFnSig<'db> {
+    let interner = DbInterner::new_no_crate(db);
+    let elided = elided_lifetimes(db, function);
+    let inputs = sig.skip_binder().inputs();
+    if inputs.len() != elided.params.len() || !sig.skip_binder().references_error() {
+        return sig;
+    }
+    let mut vars: Vec<BoundVariableKind<'db>> = sig.bound_vars().iter().collect();
+    let mut of_params = Vec::new();
+    let mut tys = Vec::with_capacity(inputs.len() + 1);
+    for (&input, count) in inputs.iter().zip(&elided.params) {
+        let Some(count) = *count else { return sig };
+        let (start, mut seen) = (of_params.len(), 0);
+        let input = rustc_type_ir::fold_regions(interner, input, |region, depth| {
+            if !region.is_error() {
+                return region;
+            }
+            seen += 1;
+            let var = match (count, of_params.get(start)) {
+                (1, Some(&var)) => var,
+                _ => {
+                    let var = BoundVar::from_usize(vars.len());
+                    vars.push(BoundVariableKind::Region(BoundRegionKind::Anon));
+                    of_params.push(var);
+                    var
+                }
+            };
+            Region::new_bound(interner, depth, BoundRegion { var, kind: BoundRegionKind::Anon })
+        });
+        if (of_params.len() - start) as u32 != count.min(seen) {
+            return sig;
+        }
+        tys.push(input);
+    }
+    let output =
+        rustc_type_ir::fold_regions(interner, sig.skip_binder().output(), |region, depth| {
+            match elided.output {
+                Some(ElidedOutput::Elided(index)) if region.is_error() => {
+                    let Some(&var) = of_params.get(index as usize) else { return region };
+                    Region::new_bound(
+                        interner,
+                        depth,
+                        BoundRegion { var, kind: BoundRegionKind::Anon },
+                    )
+                }
+                _ => region,
+            }
+        });
+    tys.push(output);
+    Binder::bind_with_vars(
+        FnSig { inputs_and_output: Tys::new_from_slice(&tys), ..sig.skip_binder() },
+        BoundVarKinds::new_from_iter(vars),
+    )
+}
+
 /// `ty` with the arguments an `impl Trait` `function` returns has for the lifetimes its
 /// parameters leave out, errors, the `regions` [`ElidedLifetimes::regions`] gives.
 pub fn with_elided_regions<'db>(
@@ -3564,52 +3669,79 @@ fn input_lifetimes(
         }
         TypeRef::Array(it) => input_lifetimes(db, resolver, store, it.ty, found, self_references),
         TypeRef::Never | TypeRef::TypeParam(_) => Some(()),
-        TypeRef::Path(path) => {
-            if path.type_anchor().is_some() {
-                return None;
-            }
-            let params = match resolver.resolve_path_in_type_ns_fully(db, path)? {
-                TypeNs::AdtId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
-                TypeNs::TypeAliasId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
-                TypeNs::BuiltinType(_)
-                | TypeNs::GenericParam(_)
-                | TypeNs::SelfType(_)
-                | TypeNs::AdtSelfType(_) => 0,
-                _ => return None,
-            };
-            let args: Vec<_> = path.generic_args().into_iter().flatten().flatten().collect();
-            if args.iter().any(|it| {
-                !it.bindings.is_empty()
-                    || !matches!(
-                        it.parenthesized,
-                        hir_def::expr_store::path::GenericArgsParentheses::No
-                    )
-            }) {
-                return None;
-            }
-            let args = || args.iter().flat_map(|it| it.args.iter());
-            let written: Vec<_> = args()
-                .filter_map(|it| match it {
-                    hir_def::expr_store::path::GenericArg::Lifetime(it) => Some(*it),
-                    _ => None,
-                })
-                .collect();
-            if written.is_empty() {
-                found.extend(iter::repeat_n(None, params));
-            } else {
-                for it in written {
-                    found.push(lifetime(Some(it))?);
+        TypeRef::Path(path) => path_lifetimes(db, resolver, store, path, found, self_references),
+        // What the bounds write, not the object lifetime `dyn Trait` leaves out: that is its
+        // default, which rustc's elision does not count.
+        TypeRef::DynTrait(bounds) => {
+            for bound in bounds {
+                match bound {
+                    TypeBound::Lifetime(it) => found.push(lifetime(Some(*it))?),
+                    TypeBound::Path(path, _) => {
+                        path_lifetimes(db, resolver, store, &store[*path], found, self_references)?
+                    }
+                    _ => return None,
                 }
             }
-            args().try_for_each(|it| match it {
-                hir_def::expr_store::path::GenericArg::Type(it) => {
-                    input_lifetimes(db, resolver, store, *it, found, self_references)
-                }
-                _ => Some(()),
-            })
+            Some(())
         }
         _ => None,
     }
+}
+
+/// [`input_lifetimes`] of the type or trait `path` names.
+fn path_lifetimes(
+    db: &dyn HirDatabase,
+    resolver: &Resolver<'_>,
+    store: &ExpressionStore,
+    path: &Path,
+    found: &mut Vec<Option<LifetimeRefId>>,
+    self_references: &mut Vec<usize>,
+) -> Option<()> {
+    let lifetime = |it: Option<LifetimeRefId>| match it.map(|it| (it, &store[it])) {
+        None | Some((_, LifetimeRef::Placeholder)) => Some(None),
+        Some((_, LifetimeRef::Error)) => None,
+        Some((it, _)) => Some(Some(it)),
+    };
+    if path.type_anchor().is_some() {
+        return None;
+    }
+    let params = match resolver.resolve_path_in_type_ns_fully(db, path)? {
+        TypeNs::AdtId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
+        TypeNs::TypeAliasId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
+        TypeNs::TraitId(it) => GenericParams::of(db, it.into()).len_lifetimes(),
+        TypeNs::BuiltinType(_)
+        | TypeNs::GenericParam(_)
+        | TypeNs::SelfType(_)
+        | TypeNs::AdtSelfType(_) => 0,
+        _ => return None,
+    };
+    let args: Vec<_> = path.generic_args().into_iter().flatten().flatten().collect();
+    if args.iter().any(|it| {
+        !it.bindings.is_empty()
+            || !matches!(it.parenthesized, hir_def::expr_store::path::GenericArgsParentheses::No)
+    }) {
+        return None;
+    }
+    let args = || args.iter().flat_map(|it| it.args.iter());
+    let written: Vec<_> = args()
+        .filter_map(|it| match it {
+            hir_def::expr_store::path::GenericArg::Lifetime(it) => Some(*it),
+            _ => None,
+        })
+        .collect();
+    if written.is_empty() {
+        found.extend(iter::repeat_n(None, params));
+    } else {
+        for it in written {
+            found.push(lifetime(Some(it))?);
+        }
+    }
+    args().try_for_each(|it| match it {
+        hir_def::expr_store::path::GenericArg::Type(it) => {
+            input_lifetimes(db, resolver, store, *it, found, self_references)
+        }
+        _ => Some(()),
+    })
 }
 
 /// The lifetime parameter of the `impl Trait` `function` returns for the `index`th lifetime its

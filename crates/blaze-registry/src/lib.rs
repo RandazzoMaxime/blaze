@@ -1,15 +1,19 @@
 //! Registries read and sources fetched as cargo 1.99 reads and fetches them, with no cargo:
 //! the sparse index with cargo's cache of it, `.crate` files checked by their sha256, kept in
-//! blaze's store by that hash and unpacked where cargo unpacks them, so that the paths a
-//! build sees (`file!()`, panics, `CARGO_MANIFEST_DIR`) are cargo's and cargo and blaze share
-//! `$CARGO_HOME`. What is ported from where is said at the top of each module; the plan is
-//! `docs/self-contained.md`.
+//! blaze's store by that hash and unpacked where cargo unpacks them, `[source]` replacement,
+//! vendored directories and git checkouts, so that the paths a build sees (`file!()`, panics,
+//! `CARGO_MANIFEST_DIR`) are cargo's and cargo and blaze share `$CARGO_HOME`. What is ported
+//! from where is said at the top of each module; the plan is `docs/self-contained.md`.
 
+pub mod api;
+pub mod directory;
 pub mod download;
+pub mod git;
 pub mod http;
 pub mod index;
 pub mod registry;
 mod source_id;
+pub mod sources;
 pub mod sparse;
 
 use std::{
@@ -25,6 +29,7 @@ pub use source_id::{
     CRATES_IO_HTTP_INDEX, CRATES_IO_INDEX, CRATES_IO_REGISTRY, GitReference, SourceId, SourceKind,
     short_hash,
 };
+pub use sources::{Locked, SourceConfig, SourceDef, SourceMap, Sources};
 
 /// What fetching reads of cargo's configuration (`[net]`, `[http]`, `--offline`), as a plain
 /// struct: `crates/blaze-manifest` fills it from `.cargo/config.toml`, `CARGO_*` variables and

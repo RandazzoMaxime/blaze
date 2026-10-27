@@ -13,8 +13,9 @@ use std::{
 
 use serde_derive::Deserialize;
 
-/// What each release of rustc ra-jit has the answers of says.
-const RELEASES: [&str; 1] = [include_str!("rustc-1.99.0.json")];
+/// What the rustc of the toolchain in `harness/toolchain` says (`harness/answers.py --write`
+/// writes it when the toolchain moves).
+const RELEASES: [&str; 1] = [include_str!("rustc.json")];
 
 #[derive(Deserialize)]
 struct Release {
@@ -83,6 +84,21 @@ impl Toolchain {
     }
 }
 
+/// What `cargo --version` says after `cargo ` for the toolchain at `sysroot`, from rustup's
+/// channel manifest there: the release of its rustc (cargo's `CFG_RELEASE`) with the commit
+/// and date of its cargo.
+pub(super) fn cargo_version(sysroot: &Path) -> Option<String> {
+    let manifest = sysroot.join("lib/rustlib/multirust-channel-manifest.toml");
+    let manifest = std::fs::read_to_string(manifest).ok()?;
+    let version = |package: &str| {
+        let (_, rest) = manifest.split_once(&format!("\n[pkg.{package}]\nversion = \""))?;
+        rest.split_once('"').map(|(version, _)| version)
+    };
+    let (release, _) = version("rustc")?.split_once(' ')?;
+    let (_, commit) = version("cargo")?.split_once(' ')?;
+    Some(format!("{release} {commit}"))
+}
+
 /// How cfgs follow from `-C` and `--cfg`.
 #[derive(Default)]
 struct Given<'a> {
@@ -91,6 +107,8 @@ struct Given<'a> {
     debug_assertions: Option<bool>,
     overflow_checks: Option<bool>,
     panic: Option<&'a str>,
+    /// `-C target-feature=±crt-static`, the one target feature that implies no other.
+    crt_static: Option<bool>,
     cfgs: Vec<&'a str>,
     crate_name: Option<&'a str>,
     crate_types: Vec<&'a str>,
@@ -130,8 +148,10 @@ const LINTS: [&str; 10] = [
     "--cap-lints",
 ];
 
-/// The codegen options that change no answer.
-const IGNORED_CODEGEN: [&str; 16] = [
+/// The codegen options that change no answer. `linker-features` is how
+/// rustc links (cargo's `-Clinker-features=-lld`), not the target it prints;
+/// `symbol-mangling-version` how it names symbols (zed's `-C symbol-mangling-version=v0`).
+const IGNORED_CODEGEN: [&str; 18] = [
     "embed-bitcode",
     "debuginfo",
     "metadata",
@@ -141,6 +161,7 @@ const IGNORED_CODEGEN: [&str; 16] = [
     "prefer-dynamic",
     "lto",
     "linker",
+    "linker-features",
     "link-arg",
     "link-args",
     "split-debuginfo",
@@ -148,6 +169,7 @@ const IGNORED_CODEGEN: [&str; 16] = [
     "rpath",
     "force-frame-pointers",
     "force-unwind-tables",
+    "symbol-mangling-version",
 ];
 
 fn yes(value: Option<&str>) -> Option<bool> {
@@ -195,12 +217,23 @@ impl<'a> Given<'a> {
                         "overflow-checks" => given.overflow_checks = Some(yes(value)?),
                         "panic" => given.panic = Some(value?),
                         "extra-filename" => given.extra_filename = true,
+                        "target-feature" => {
+                            for feature in value?.split(',') {
+                                given.crt_static = Some(match feature {
+                                    "+crt-static" => true,
+                                    "-crt-static" => false,
+                                    _ => return None,
+                                });
+                            }
+                        }
                         name if IGNORED_CODEGEN.contains(&name) => {}
                         _ => return None,
                     }
                 }
-                "-Z" => match value()? {
-                    "unstable-options" => given.unstable_options = true,
+                "-Z" => match crate::unstable::flag(value()?) {
+                    flag if flag.name == "unstable-options" => given.unstable_options = true,
+                    // One that changes only how rustc works changes no answer.
+                    flag if matches!(flag.treatment(), crate::unstable::Treatment::Ignored(_)) => {}
                     _ => return None,
                 },
                 _ if LINTS.contains(&flag) || IGNORED_VALUED.contains(&flag) => {
@@ -219,10 +252,14 @@ impl<'a> Given<'a> {
     }
 }
 
-/// The variables rustc reads for a question that ra-jit answers only when unset.
-const UNSET: [&str; 8] = [
-    "RUSTC_OVERRIDE_VERSION_STRING",
-    "RUST_TARGET_PATH",
+/// The variables rustc reads for any question, which ra-jit answers only when they are unset.
+const UNSET: [&str; 2] = ["RUSTC_OVERRIDE_VERSION_STRING", "RUST_TARGET_PATH"];
+
+/// The variables of Apple's SDK and deployment targets, which a shell of nixpkgs on macOS
+/// sets. rustc reads them to link and for the target's spec, which says the deployment
+/// target; its version, cfgs, sysroot and file names are the same with them, and are
+/// answered with them set.
+const APPLE: [&str; 6] = [
     "SDKROOT",
     "MACOSX_DEPLOYMENT_TARGET",
     "IPHONEOS_DEPLOYMENT_TARGET",
@@ -279,11 +316,6 @@ pub(super) fn answer(
     if UNSET.iter().any(|it| var(it).is_some()) {
         return None;
     }
-    let nightly = match var("RUSTC_BOOTSTRAP") {
-        None => false,
-        Some(it) if it == "1" => true,
-        Some(_) => return None,
-    };
     let args = args.iter().map(|it| it.to_str()).collect::<Option<Vec<_>>>()?;
     // A driver of rustc's (clippy's) may answer otherwise.
     if rustc.file_stem()? != "rustc" {
@@ -291,6 +323,15 @@ pub(super) fn answer(
     }
     let toolchain = Toolchain::of(rustc)?;
     let release = toolchain.release;
+    // Whether unstable features are allowed: always on a nightly (the toolchain ra-jit is
+    // pinned to), unless `RUSTC_BOOTSTRAP=-1` makes it act as a stable release; a list of
+    // crates is not answered.
+    let nightly = match var("RUSTC_BOOTSTRAP") {
+        None => release.version.contains("-nightly") || release.version.contains("-dev"),
+        Some(it) if it == "1" => true,
+        Some(it) if it == "-1" => false,
+        Some(_) => return None,
+    };
     if !args.is_empty()
         && args.iter().all(|it| matches!(*it, "-V" | "-v" | "-vV" | "--version" | "--verbose"))
     {
@@ -348,6 +389,12 @@ pub(super) fn answer(
                 if nightly {
                     cfgs.extend(target.nightly_cfg.iter().cloned());
                 }
+                // Whether a target respects `crt-static` is its spec's, so only asking for
+                // what it has already is answered.
+                let static_default = cfgs.iter().any(|it| it == "target_feature=\"crt-static\"");
+                if given.crt_static.is_some_and(|it| it != static_default) {
+                    return None;
+                }
                 let debug_assertions = given.debug_assertions();
                 if debug_assertions {
                     cfgs.push("debug_assertions".to_owned());
@@ -376,7 +423,11 @@ pub(super) fn answer(
                 cfgs.dedup();
                 cfgs.iter().for_each(|it| out += &format!("{it}\n"));
             }
-            "target-spec-json" if given.unstable_options && nightly => {
+            "target-spec-json"
+                if given.unstable_options
+                    && nightly
+                    && APPLE.iter().all(|it| var(it).is_none()) =>
+            {
                 out += target.target_spec_json.get(&toolchain.host)?;
             }
             _ => return None,
@@ -416,6 +467,19 @@ mod tests {
         // What may change the target's features is rustc's to answer.
         assert!(Given::of(&["-C", "target-cpu=native", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Ctarget-feature=+avx2", "--print", "cfg"]).is_none());
+        assert!(Given::of(&["-Ctarget-feature=-crt-static,+avx2", "--print", "cfg"]).is_none());
+        // helix's `-C target-feature=-crt-static`.
+        let given = Given::of(&["-C", "target-feature=-crt-static", "--print", "cfg"]).unwrap();
+        assert_eq!(given.crt_static, Some(false));
         assert!(Given::of(&["-Z", "ub-checks", "--print", "cfg"]).is_none());
+        assert!(Given::of(&["-Zthreads=8", "--print", "cfg"]).is_some());
+        // cargo's `-Clinker-features=-lld` is how rustc links (rust-analyzer's `cargo rustc
+        // --print cfg`, cargo's question of its targets).
+        assert!(Given::of(&["-Clinker-features=-lld", "-O", "--print", "cfg"]).is_some());
+        // zed's rustflags.
+        let zed = ["-C", "link-arg=-fuse-ld=lld", "-C", "symbol-mangling-version=v0"];
+        let zed = [&zed[..], &["--cfg", "tokio_unstable", "--print", "cfg"]].concat();
+        let given = Given::of(&zed).unwrap();
+        assert_eq!(given.cfgs, ["tokio_unstable"]);
     }
 }

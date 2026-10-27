@@ -20,7 +20,7 @@ pub(crate) mod split;
 /// Links `objects` into the executable `exe`, with the native libraries of the crates `program`
 /// links. A shared library instead when `exports` names what it exports: the rest of it is
 /// its own, and the link leaves out what that does not reach, as rustc's of a `cdylib` does.
-/// How long `cc` took.
+/// `user` is what the flags pass the linker (`-C link-arg`). How long `cc` took.
 pub(crate) fn executable(
     db: &RootDatabase,
     program: &[Crate],
@@ -28,9 +28,15 @@ pub(crate) fn executable(
     sysroot: Option<&Path>,
     exe: &Path,
     exports: Option<&[String]>,
+    user: &[String],
+    debug: crate::plan::Level,
 ) -> anyhow::Result<Duration> {
-    let mut line = Line::of(db, program, sysroot, exports.is_some())?;
+    let mut line = Line::of(db, program, sysroot, exports.is_some(), user, debug)?;
     let Some(exports) = exports else { return line.link(objects, exe) };
+    if line.wasm {
+        line.after.extend(exports.iter().map(|it| format!("--export={it}")));
+        return line.link(objects, exe);
+    }
     let mut listed = exe.as_os_str().to_owned();
     listed.push(".exports");
     let listed = PathBuf::from(listed);
@@ -51,24 +57,76 @@ pub(crate) fn executable(
     took
 }
 
-/// The arguments `cc` links the program of some crates with, around its objects.
+/// The command that links `objects` into the executable `exe` as [`executable`] does, for a
+/// shell: the daemon's line, which its edits are spliced after.
+pub(crate) fn command(
+    db: &RootDatabase,
+    program: &[Crate],
+    objects: &[&Path],
+    sysroot: Option<&Path>,
+    exe: &Path,
+    user: &[String],
+    debug: crate::plan::Level,
+) -> anyhow::Result<String> {
+    let line = Line::of(db, program, sysroot, false, user, debug)?;
+    let mut args = vec![line.program.display().to_string()];
+    args.extend(line.before.iter().cloned());
+    for &object in objects {
+        let path = object.display().to_string();
+        // An object the build has yet to write is none.
+        if object.exists() && split::is_archive(&leading_bytes(object)?) {
+            let [whole, no_whole] = line.whole_archive();
+            args.extend([whole.to_owned(), path, no_whole.to_owned()]);
+        } else {
+            args.push(path);
+        }
+    }
+    args.extend(line.after.iter().cloned());
+    args.extend(["-o".to_owned(), exe.display().to_string()]);
+    if line.apple {
+        // Last, as on rustc's line: the room the splice wants, which a link made short of it
+        // tells the file, and the link again reads. It is no less than the flags ask for.
+        let asked = user.iter().filter_map(|it| crate::cargo::plan::headerpad_in(it)).last();
+        args.push(crate::cargo::plan::headerpad_read(exe, asked)?);
+    }
+    shlex::try_join(args.iter().map(String::as_str)).context("a link argument has a NUL in it")
+}
+
+/// The arguments `cc` links the program of some crates with, around its objects: of a wasm
+/// program, the toolchain's `rust-lld` as `wasm-ld`, which rustc runs itself.
 pub(crate) struct Line {
+    program: PathBuf,
     before: Vec<String>,
     after: Vec<String>,
     apple: bool,
+    wasm: bool,
 }
 
 impl Line {
+    /// The line of `program`, with `user`, what the flags pass the linker (`-C link-arg`),
+    /// after the native libraries as rustc has them.
     pub(crate) fn of(
         db: &RootDatabase,
         program: &[Crate],
         sysroot: Option<&Path>,
         shared: bool,
+        user: &[String],
+        debug: crate::plan::Level,
     ) -> anyhow::Result<Line> {
         let Some(&first) = program.first() else { bail!("nothing to link") };
         let target = Target { shared, ..Target::of(db, first.into()) };
         let mut before = Vec::new();
-        if !target.apple
+        let mut linker = PathBuf::from("cc");
+        if target.wasm {
+            let sysroot = sysroot.context(
+                "a wasm program is linked by the toolchain's rust-lld, and there is no toolchain",
+            )?;
+            linker = rust_lld(sysroot).with_context(|| {
+                format!("a wasm program is linked by rust-lld, which {} has not", sysroot.display())
+            })?;
+            before.extend(["-flavor", "wasm"].map(str::to_owned));
+            before.extend(target.wasm_start(sysroot)?);
+        } else if !target.apple
             && let Some(gcc_ld) = sysroot.and_then(lld_dir)
         {
             before.extend([format!("-B{}", gcc_ld.display()), "-fuse-ld=lld".to_owned()]);
@@ -76,21 +134,41 @@ impl Line {
         before.extend(target.leading());
         let native = native(db, program, &target);
         let mut after = native.search;
+        if target.wasm
+            && let Some(dir) = sysroot.and_then(|it| target.self_contained(it))
+        {
+            after.push(format!("-L{}", dir.display()));
+        }
         for lib in &native.libs {
             after.extend(target.lib(lib));
         }
         after.extend(native.args);
+        after.extend(user.iter().cloned());
         after.extend(target.trailing());
-        Ok(Line { before, after, apple: target.apple })
+        // As cargo's profile has it of a build with no debuginfo (`strip = "debuginfo"`), which
+        // rustc tells `wasm-ld`: ELF objects keep the lines of the standard library's unit.
+        if target.wasm && debug == crate::plan::Level::Nothing {
+            after.push("--strip-debug".to_owned());
+        }
+        Ok(Line { program: linker, before, after, apple: target.apple, wasm: target.wasm })
     }
 
-    /// Links `objects` into the executable `exe`. How long `cc` took.
+    /// How the linker is told to take every member of an archive, and to stop.
+    fn whole_archive(&self) -> [&'static str; 2] {
+        match self.wasm {
+            true => ["--whole-archive", "--no-whole-archive"],
+            false => ["-Wl,--whole-archive", "-Wl,--no-whole-archive"],
+        }
+    }
+
+    /// Links `objects` into the executable `exe`. How long the linker took.
     pub(crate) fn link(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<Duration> {
-        let mut cmd = Command::new("cc");
+        let mut cmd = Command::new(&self.program);
         cmd.args(&self.before);
         for &object in objects {
             if split::is_archive(&leading_bytes(object)?) {
-                cmd.arg("-Wl,--whole-archive").arg(object).arg("-Wl,--no-whole-archive");
+                let [whole, no_whole] = self.whole_archive();
+                cmd.arg(whole).arg(object).arg(no_whole);
             } else {
                 cmd.arg(object);
             }
@@ -125,16 +203,84 @@ fn leading_bytes(path: &Path) -> anyhow::Result<[u8; 8]> {
 }
 
 /// What the stand-ins left in the executable say: the functions ra-jit could not compile that
-/// the program can reach, as the link leaves out every one it can't.
+/// the program can reach, as the link leaves out every one it can't. They are the lines of the
+/// section that holds them alone ([`hir_ty_codegen::stand_in_section`]), so what else the
+/// program has in its data (blaze has the words of the message) is never taken for one.
 pub(crate) fn stand_ins(exe: &Path) -> anyhow::Result<Vec<String>> {
+    use object::{Object, ObjectSection};
     let bytes = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let said =
-        memchr::memmem::find_iter(&bytes, hir_ty_codegen::STAND_IN_SAYS.as_bytes()).map(|at| {
-            let rest = &bytes[at..];
-            let end = memchr::memchr(b'\n', rest).unwrap_or(rest.len());
-            String::from_utf8_lossy(&rest[..end]).into_owned()
-        });
-    Ok(said.collect())
+    if wasmparser::Parser::is_core_wasm(&bytes) {
+        let (_, name) = hir_ty_codegen::stand_in_section(object::BinaryFormat::Wasm);
+        let segments = wasm_segments_named(&bytes, name)
+            .with_context(|| format!("reading the data of {}", exe.display()))?;
+        return messages(segments, name, exe);
+    }
+    let file =
+        object::File::parse(&*bytes).with_context(|| format!("reading {}", exe.display()))?;
+    let (_, name) = hir_ty_codegen::stand_in_section(file.format());
+    let mut sections = Vec::new();
+    for section in file.sections().filter(|it| it.name() == Ok(name)) {
+        sections
+            .push(section.data().with_context(|| format!("reading {name} of {}", exe.display()))?);
+    }
+    messages(sections, name, exe)
+}
+
+/// The data segments of the wasm module `bytes` that the name section calls `name`. `wasm-ld`
+/// merges the segments of the objects by name, and names what it merged in the module: the
+/// stand-ins' messages are one segment of what nothing else is in.
+fn wasm_segments_named<'a>(bytes: &'a [u8], name: &str) -> anyhow::Result<Vec<&'a [u8]>> {
+    use wasmparser::{KnownCustom, Name, Payload};
+    let mut segments = Vec::new();
+    let (mut named, mut names_data) = (Vec::new(), false);
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::DataSection(reader) => {
+                for data in reader {
+                    segments.push(data?.data);
+                }
+            }
+            Payload::CustomSection(custom) => {
+                let KnownCustom::Name(names) = custom.as_known() else { continue };
+                for names in names {
+                    let Name::Data(names) = names? else { continue };
+                    names_data = true;
+                    for naming in names {
+                        let naming = naming?;
+                        if naming.name == name {
+                            named.push(naming.index as usize);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Stripped of its names, a module could have stand-ins no one could tell from its data.
+    if !segments.is_empty() && !names_data {
+        bail!("the module names none of its data segments (was it linked with --strip-all?)");
+    }
+    named.into_iter().map(|it| segments.get(it).copied().context("a name of no segment")).collect()
+}
+
+/// The messages of the stand-ins in the `sections` of `exe` that [`stand_ins`] reads.
+fn messages(sections: Vec<&[u8]>, name: &str, exe: &Path) -> anyhow::Result<Vec<String>> {
+    let mut said = Vec::new();
+    for data in sections {
+        for line in data.split(|&it| it == b'\n') {
+            // What a linker pads the section with between messages is not a message.
+            let line = String::from_utf8_lossy(line);
+            let line = line.trim_matches(|it: char| it == '\0' || it.is_ascii_whitespace());
+            if line.is_empty() {
+                continue;
+            }
+            if !line.starts_with(hir_ty_codegen::STAND_IN_SAYS) {
+                bail!("{name} of {} has what is not a stand-in's message: {line:?}", exe.display());
+            }
+            said.push(line.to_owned());
+        }
+    }
+    Ok(said)
 }
 
 /// The toolchain's directory with lld as `ld.lld`, for `cc -B`: the `gcc-ld` of the host's
@@ -144,6 +290,15 @@ fn lld_dir(sysroot: &Path) -> Option<PathBuf> {
         .ok()?
         .filter_map(|it| Some(it.ok()?.path().join("bin/gcc-ld")))
         .find(|it| it.join("ld.lld").is_file())
+}
+
+/// The toolchain's `rust-lld`, in the host's `lib/rustlib/<host>/bin`.
+fn rust_lld(sysroot: &Path) -> Option<PathBuf> {
+    let lld = format!("rust-lld{}", std::env::consts::EXE_SUFFIX);
+    std::fs::read_dir(sysroot.join("lib/rustlib"))
+        .ok()?
+        .filter_map(|it| Some(it.ok()?.path().join("bin").join(&lld)))
+        .find(|it| it.is_file())
 }
 
 /// What the link line has of the crates `program` links beyond their objects.
@@ -174,7 +329,10 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
             .flat_map(|(_, module)| module.scope(db).extern_blocks())
             .flat_map(|block| AttrFlags::native_libs(db, block).iter().cloned());
         native.libs.extend(attributes.collect::<Vec<_>>());
-        let asked = asked_by_script(db, krate, target);
+        // A `cdylib` takes `rustc-cdylib-link-arg`; a proc macro is linked shared too, but
+        // is not one.
+        let cdylib = target.shared && !krate.data(db).target_kind.is_proc_macro();
+        let asked = asked_by_script(db, krate, target, cdylib);
         native.libs.extend(asked.libs);
         native.search.extend(asked.search);
         // As cargo has it: a script's arguments are for its own package's targets.
@@ -192,8 +350,14 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
 }
 
 /// What the build script of `krate`'s package printed for the link, as cargo passes it to
-/// rustc: `rustc-link-lib`, `rustc-link-search`, `rustc-flags` and `rustc-link-arg`.
-fn asked_by_script(db: &RootDatabase, krate: base_db::Crate, target: &Target) -> Native {
+/// rustc: `rustc-link-lib`, `rustc-link-search`, `rustc-flags`, `rustc-link-arg`, and
+/// `rustc-link-arg-bins` for a binary or `rustc-cdylib-link-arg` for a `cdylib`.
+fn asked_by_script(
+    db: &RootDatabase,
+    krate: base_db::Crate,
+    target: &Target,
+    cdylib: bool,
+) -> Native {
     let mut asked = Native::default();
     let Some(out_dir) = krate.env(db).get("OUT_DIR") else { return asked };
     let printed = crate::cargo::script::printed(Path::new(&out_dir));
@@ -205,7 +369,11 @@ fn asked_by_script(db: &RootDatabase, krate: base_db::Crate, target: &Target) ->
         match key {
             "rustc-link-lib" => asked.libs.extend(lib_of(value)),
             "rustc-link-search" => asked.search.extend(target.search(value)),
-            "rustc-link-arg" | "rustc-link-arg-bins" => asked.args.push(value.to_owned()),
+            "rustc-link-arg" => asked.args.push(value.to_owned()),
+            "rustc-link-arg-bins" if !cdylib => asked.args.push(value.to_owned()),
+            "rustc-cdylib-link-arg" | "rustc-link-arg-cdylib" if cdylib => {
+                asked.args.push(value.to_owned())
+            }
             "rustc-flags" => {
                 let mut flags = value.split_whitespace();
                 while let Some(flag) = flags.next() {
@@ -286,7 +454,10 @@ fn depth_first(
 /// What the link line is made of for the target, from the cfgs of the program's crate.
 struct Target {
     apple: bool,
+    /// WebAssembly, which `wasm-ld` links with no `cc` in front of it.
+    wasm: bool,
     arch: String,
+    os: String,
     /// A shared library is linked, not an executable.
     shared: bool,
 }
@@ -298,25 +469,80 @@ impl Target {
             cfg.get_cfg_values(key).next().map(|it| it.as_str().to_owned()).unwrap_or_default()
         };
         let (apple, arch) = (value("target_vendor") == "apple", value("target_arch"));
-        Target { apple, arch, shared: false }
+        let wasm = value("target_family") == "wasm" || arch.starts_with("wasm");
+        Target { apple, wasm, arch, os: value("target_os"), shared: false }
+    }
+
+    /// The directory of the C runtime the rust project builds for the target and ships with
+    /// the toolchain, which rustc links a WASI program with (`link-self-contained`):
+    /// wasi-libc's `crt1-*.o` and `libc.a`.
+    fn self_contained(&self, sysroot: &Path) -> Option<PathBuf> {
+        let triple = hir_ty_codegen::Target::selected().ok()?.triple();
+        let dir = sysroot.join("lib/rustlib").join(triple).join("lib/self-contained");
+        dir.is_dir().then_some(dir)
+    }
+
+    /// What rustc puts before the objects of a wasm program: the entry of an executable,
+    /// exported, the arguments of the target's `pre-link-args`, and the C runtime's start of
+    /// a WASI program, whose `_start` (or a library's `_initialize`) calls the entry once the
+    /// C library is set up.
+    fn wasm_start(&self, sysroot: &Path) -> anyhow::Result<Vec<String>> {
+        let mut args = Vec::new();
+        if !self.shared && self.os == "wasi" {
+            let (entry, _) = hir_ty_codegen::Target::current().entry();
+            args.push(format!("--export={entry}"));
+        }
+        args.extend(
+            ["-z", "stack-size=1048576", "--stack-first", "--no-demangle"].map(str::to_owned),
+        );
+        if self.os != "wasi" {
+            args.push("--no-entry".to_owned());
+        }
+        if self.os == "wasi" {
+            let dir = self.self_contained(sysroot).with_context(|| {
+                format!(
+                    "{} has no wasi-libc for the target (`rustup target add`)",
+                    sysroot.display()
+                )
+            })?;
+            let start = if self.shared { "crt1-reactor.o" } else { "crt1-command.o" };
+            args.push(dir.join(start).display().to_string());
+        }
+        Ok(args)
     }
 
     fn leading(&self) -> Vec<String> {
+        if self.wasm {
+            return Vec::new();
+        }
         if self.apple {
             let arch = if self.arch == "aarch64" { "arm64" } else { &self.arch };
-            ["-arch", arch].map(str::to_owned).to_vec()
+            // Edits are spliced into what this links, and the splice reads fixups in tables.
+            ["-arch", arch, crate::cargo::plan::NO_FIXUP_CHAINS].map(str::to_owned).to_vec()
         } else {
             let width = match &*self.arch {
                 "x86_64" => Some("-m64"),
                 "x86" => Some("-m32"),
                 _ => None,
             };
-            width.into_iter().chain(["-Wl,--as-needed"]).map(str::to_owned).collect()
+            // A program that takes edits while it runs is known by its build ID.
+            let args = ["-Wl,--as-needed", "-Wl,--build-id"];
+            width.into_iter().chain(args).map(str::to_owned).collect()
         }
     }
 
     fn lib(&self, lib: &NativeLib) -> Vec<String> {
         let name = lib.name.as_str();
+        if self.wasm {
+            // `wasm-ld` links archives alone, and has no `-B`.
+            let l = if lib.verbatim { format!("-l:{name}") } else { format!("-l{name}") };
+            return match lib.kind {
+                NativeLibKind::Static if lib.whole_archive => {
+                    vec!["--whole-archive".to_owned(), l, "--no-whole-archive".to_owned()]
+                }
+                _ => vec![l],
+            };
+        }
         if self.apple {
             return match lib.kind {
                 NativeLibKind::Framework => vec!["-framework".to_owned(), name.to_owned()],
@@ -364,6 +590,13 @@ impl Target {
     /// The rest of rustc's arguments: what is not reached is left out, and nothing is linked
     /// that the crates did not ask for.
     fn trailing(&self) -> Vec<String> {
+        if self.wasm {
+            let mut args = vec!["--gc-sections".to_owned()];
+            if self.shared {
+                args.push("--no-entry".to_owned());
+            }
+            return args;
+        }
         let args: &[&str] = match (self.apple, self.shared) {
             (true, false) => &["-Wl,-dead_strip", "-nodefaultlibs"],
             (true, true) => &["-dynamiclib", "-Wl,-dead_strip", "-nodefaultlibs"],
@@ -418,9 +651,56 @@ mod tests {
             Some(("libz.so.1".to_owned(), NativeLibKind::Dylib, true, false))
         );
         assert_eq!(lib("bogus=x"), None);
-        let linux = Target { apple: false, arch: "x86_64".to_owned(), shared: false };
+        let linux = Target {
+            apple: false,
+            wasm: false,
+            arch: "x86_64".to_owned(),
+            os: "linux".to_owned(),
+            shared: false,
+        };
         assert_eq!(linux.search("native=/a/out").as_deref(), Some("-L/a/out"));
         assert_eq!(linux.search("/b").as_deref(), Some("-L/b"));
         assert_eq!(linux.search("dependency=/c"), None);
+    }
+
+    #[test]
+    fn an_apple_link_has_fixups_in_tables_for_the_splice() {
+        for shared in [false, true] {
+            let mac = Target {
+                apple: true,
+                wasm: false,
+                arch: "aarch64".to_owned(),
+                os: "macos".to_owned(),
+                shared,
+            };
+            assert_eq!(mac.leading(), ["-arch", "arm64", "-Wl,-no_fixup_chains"]);
+        }
+    }
+
+    #[test]
+    fn a_wasm_modules_stand_ins_are_the_segment_named_for_them() {
+        let (_, name) = hir_ty_codegen::stand_in_section(object::BinaryFormat::Wasm);
+        let said = format!("{} f: unsupported", hir_ty_codegen::STAND_IN_SAYS);
+        let message = format!("{said}\n\0\0").into_bytes();
+        let module = |named: bool| {
+            let mut data = wasm_encoder::DataSection::new();
+            data.passive(*b"what the program says\n");
+            data.passive(message.iter().copied());
+            let mut module = wasm_encoder::Module::new();
+            module.section(&data);
+            if named {
+                let mut names = wasm_encoder::NameMap::new();
+                names.append(0, ".rodata");
+                names.append(1, name);
+                let mut section = wasm_encoder::NameSection::new();
+                section.data(&names);
+                module.section(&section);
+            }
+            module.finish()
+        };
+        let named = module(true);
+        let segments = wasm_segments_named(&named, name).unwrap();
+        assert_eq!(messages(segments, name, Path::new("m.wasm")).unwrap(), [said]);
+        assert!(wasm_segments_named(&module(false), name).is_err());
     }
 }

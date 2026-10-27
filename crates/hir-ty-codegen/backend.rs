@@ -59,6 +59,21 @@ pub(super) fn edits_follow() -> bool {
     BUILDS_EDITS.load(Ordering::Relaxed)
 }
 
+/// Whether the process links its programs into executables of their own, which no edit is
+/// spliced into: a whole build's daemon worker (docs/no-rustc.md, step K) relinks each edit.
+static LINKS_OWN: AtomicBool = AtomicBool::new(false);
+
+/// Says the process links what it builds into executables of its own. Before its first build.
+pub fn links_own() {
+    LINKS_OWN.store(true, Ordering::Relaxed);
+}
+
+/// Whether each function and static of an object is in a section of its own, for the linker
+/// to leave out what nothing reaches. The links a daemon splices edits into keep everything.
+pub fn sections_of_their_own() -> bool {
+    !edits_follow() || LINKS_OWN.load(Ordering::Relaxed)
+}
+
 /// Whether every function of the build under way keeps its frame pointer, as the program asks
 /// with `-C force-frame-pointers`: one answer for all the code a build writes, as the debug
 /// level is.
@@ -70,6 +85,18 @@ pub(super) fn keep_frame_pointers(keep: bool) {
 
 pub(super) fn frame_pointers() -> bool {
     FRAME_POINTERS.load(Ordering::Relaxed)
+}
+
+/// Whether rustc's build of the program has `-C link-dead-code`
+/// ([`rustc_links_dead_code`](super::rustc_links_dead_code)).
+static LINKS_DEAD_CODE: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn link_dead_code(links: bool) {
+    LINKS_DEAD_CODE.store(links, Ordering::Relaxed);
+}
+
+pub(super) fn links_dead_code() -> bool {
+    LINKS_DEAD_CODE.load(Ordering::Relaxed)
 }
 
 /// Says the build under way is of a whole program.
@@ -150,9 +177,7 @@ impl Backend {
         match std::env::var(BACKEND).as_deref() {
             Ok("cranelift") | Err(_) => Ok(Backend::Cranelift),
             Ok("llvm") if cfg!(feature = "llvm") => Ok(Backend::Llvm(optimization)),
-            Ok("llvm") => {
-                Err(format!("{BACKEND}=llvm: ra-jit was built without `--features llvm`"))
-            }
+            Ok("llvm") => Err(format!("{BACKEND}=llvm: blaze was built without `--features llvm`")),
             Ok(other) => Err(format!("{BACKEND}={other}: expected `cranelift` or `llvm`")),
         }
     }
@@ -201,10 +226,14 @@ impl Backend {
         }
         let _span = tracing::info_span!(target: "ra_jit", "cranelift").entered();
         let start = Instant::now();
+        if let Some(frame) = recorder.frame_locals.take() {
+            super::overlap::share(&mut context.func, &frame, &mut recorder.named);
+        }
         let pairs = super::float_pair::lower(recorder, &mut context.func);
         let mut code = super::emit(context)?;
         if let Some(frame) = context.compiled_code().and_then(|it| it.buffer.frame_layout()) {
-            code.slots = SlotPlaces::of_frame(recorder.isa, frame, recorder.named_slots());
+            code.slots =
+                SlotPlaces::of_frame(recorder.isa, frame, &context.func, recorder.named_slots());
         }
         if let Some(pairs) = pairs {
             pairs.hold(context, &mut code)?;
@@ -242,7 +271,12 @@ impl Backend {
             llvm::Unhandled,
             store::Store,
         };
-        let named: Vec<_> = recorder.named_slots().collect();
+        let mut named: Vec<_> = recorder.named_slots().collect();
+        let shared = recorder
+            .frame_locals
+            .as_ref()
+            .map(|frame| super::overlap::share_escaping(func, frame, &mut named));
+        let func = shared.as_ref().unwrap_or(func);
         let imports = match super::imports::enabled() {
             true => super::imports::chosen(recorder),
             false => Vec::new(),
@@ -262,6 +296,7 @@ impl Backend {
             func,
             named.iter().copied(),
             recorder.constants(),
+            recorder.asm_texts(),
             &recorder.pointees,
         )) else {
             return super::llvm::emit(recorder, &named, func, optimization, None, &[]);

@@ -60,6 +60,9 @@ fn memory_max() -> Result<Option<u64>, String> {
     }
 }
 
+/// The setting of when the daemon has a spare worker.
+pub(crate) const SPARE: &str = "RA_JIT_SPARE";
+
 /// When the daemon has a spare worker, from `RA_JIT_SPARE`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Spares {
@@ -75,7 +78,7 @@ enum Spares {
 }
 
 fn spares() -> Result<Spares, String> {
-    match std::env::var("RA_JIT_SPARE") {
+    match std::env::var(SPARE) {
         Err(_) => Ok(Spares::Asked),
         Ok(text) if text == "0" => Ok(Spares::Never),
         Ok(text) if text == "ready" => Ok(Spares::Ready),
@@ -164,6 +167,9 @@ pub(crate) enum Request {
     /// `cargo ra-jit check` of a build the daemon has no programs of: what a checker that
     /// loaded the workspace as it would finds in its crates, with no rustc.
     Check(Ahead),
+    /// `cargo blaze clippy`: what blaze's lints find in the crates the checker of the build
+    /// loads, asked with a [`blaze_lints::serve::Ask`] in JSON.
+    Lint(Ahead, String),
     Status,
     Stop,
 }
@@ -190,6 +196,11 @@ pub(crate) enum Reply {
     /// What the checker of a [`Request::Check`] found: no error, or the errors.
     Checked {
         errors: Option<crate::errors::Said>,
+    },
+    /// What the checker of a [`Request::Lint`] found: a [`blaze_lints::serve::Answer`] in
+    /// JSON.
+    Linted {
+        answer: String,
     },
     Status(Status),
     Stopping,
@@ -261,6 +272,9 @@ pub(crate) struct WorkerConfig {
     pub(crate) selection: crate::plan::Selection,
     /// The variables the worker runs with that decide what it compiles and with what.
     pub(crate) env: BTreeMap<String, String>,
+    /// Whether its programs are built whole, with nothing of rustc's ([`Plan::whole`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) whole: bool,
 }
 
 impl WorkerConfig {
@@ -283,6 +297,9 @@ impl WorkerConfig {
         }
         if self.selection.dev_deps {
             args.push("--dev-deps".into());
+        }
+        if let Some(asked_in) = &self.selection.asked_in {
+            args.extend(["--asked-in".into(), asked_in.into()]);
         }
         for krate in crates {
             args.push("--crate".into());
@@ -308,8 +325,14 @@ pub(crate) struct Checkout {
     /// The build this is: the checkout, the command and its flags.
     pub(crate) key: String,
     /// The newest of rustc's output the programs are linked against. A worker that loaded
-    /// the checkout with another one starts again.
+    /// the checkout with another one starts again, unless it is `kept`.
     pub(crate) generation: u128,
+    /// Whether cargo built only programs the daemon did not, given the daemon's executables
+    /// of the others, whose plans are the ones the worker built them by: a running worker
+    /// loads the checkout again in place, keeping what it built of those, rather than start
+    /// again and link every program anew under the programs running them.
+    #[serde(default)]
+    pub(crate) kept: bool,
     /// When cargo started, as a stamp: source newer than this is not what rustc compiled.
     pub(crate) built_at: u128,
     pub(crate) config: WorkerConfig,
@@ -345,14 +368,23 @@ impl Checkout {
             |path: &PathBuf| path.strip_prefix(&self.root).unwrap_or(path).display().to_string();
         // Each with a comma after it: the program is of these crates and no others.
         let crates: String = plan.crates.iter().map(|it| named(it) + ",").collect();
+        // A program built whole is linked by blaze into `binary`, with a line of the
+        // worker's own, and its edits are spliced into that.
+        let (splice, exe) = match plan.whole {
+            true => (String::new(), plan.binary.display().to_string()),
+            false => (plan.binary.display().to_string(), String::new()),
+        };
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let (shared, patch) = match plan.shared {
+            true => ("shared", String::new()),
+            false => ("", plan.patch.display().to_string()),
+        };
         let mut line = format!(
-            "sync\t{}\t{}\t{}\t{}\t{}\t{}",
+            "sync\t{}\t{}\t{}\t{patch}\t{}\t{splice}\t{exe}\t{shared}",
             self.project().display(),
             crates,
             plan.object.display(),
-            plan.patch.display(),
             plan.link_cmd,
-            plan.binary.display()
         );
         for file in &plan.symbol_files {
             line.push('\t');
@@ -439,16 +471,28 @@ impl Worker {
         let _ = std::fs::remove_file(errors_beside(&socket));
         let config = &checkout.config;
         let mut args = config.args(&checkout.root, &first.crates);
-        let named: [(&str, &Path); 5] = [
+        let rustcs: [(&str, &Path); 5] = [
             ("--out", &first.object),
             ("--patch", &first.patch),
             ("--link-cmd", Path::new(&first.link_cmd)),
             ("--splice", &first.binary),
             ("--socket", &socket),
         ];
-        for (flag, path) in named {
+        let whole: [(&str, &Path); 4] = [
+            ("--out", &first.object),
+            ("--patch", &first.patch),
+            ("--exe", &first.binary),
+            ("--socket", &socket),
+        ];
+        let named: &[(&str, &Path)] = if first.whole { &whole } else { &rustcs };
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let patched = |flag: &str| !(first.shared && flag == "--patch");
+        for &(flag, path) in named.iter().filter(|(flag, _)| patched(flag)) {
             args.push(flag.into());
             args.push(path.into());
+        }
+        if first.shared {
+            args.push("--shared".into());
         }
         if let Some(rustcs) = &first.rustc_binary {
             args.push("--rustc-binary".into());
@@ -479,7 +523,17 @@ impl Worker {
             env.set(name, value);
         }
         env.set(ENDS_WITH_INPUT, "1");
-        let told = spare.and_then(|it| it.told(&args, &checkout.config, &checkout.root, false));
+        // What `env!` reads of the places cargo set, as each request has them: the load
+        // compiles the crates before the first request is read, and an integration test
+        // that names a program (`CARGO_BIN_EXE_<name>`) would not compile without them.
+        let mut started: BTreeMap<String, String> = checkout
+            .env
+            .iter()
+            .filter(|(name, _)| super::wrapper::names_a_place(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        started.extend(config.env.clone());
+        let told = spare.and_then(|it| it.told(&args, &started, &checkout.root, false));
         let child = match told {
             Some(spare) => {
                 log = spare.log;
@@ -494,7 +548,8 @@ impl Worker {
                 };
                 let output =
                     private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
-                command.envs(&config.env).env(ENDS_WITH_INPUT, "1");
+                command.envs(&started).env(ENDS_WITH_INPUT, "1");
+                exact_env(&mut command, &config.env);
                 command.current_dir(&checkout.root);
                 command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
                 own_group(&mut command);
@@ -584,8 +639,11 @@ impl Worker {
         self.stop();
     }
 
-    fn set(&self, key: &str, warmth: Warmth) {
-        if let Some(loaded) = lock(&self.checkouts).get_mut(key) {
+    /// Says how loading `checkout` went, unless another generation of it is loading since.
+    fn set(&self, checkout: &Checkout, warmth: Warmth) {
+        if let Some(loaded) = lock(&self.checkouts).get_mut(&checkout.key)
+            && loaded.generation == checkout.generation
+        {
             loaded.warmth = warmth;
         }
     }
@@ -595,8 +653,10 @@ impl Worker {
         let warmth = match self.warmed(checkout) {
             Ok(None) => Warmth::Ready,
             Ok(Some(said)) => Warmth::Broken(said, SystemTime::now()),
+            // The worker leaves the errors before it ends, which under load can be after the
+            // daemon has stopped waiting for it to; `start` took away those of any before it.
             Err(why) => match std::fs::read(errors_beside(&self.socket)) {
-                Ok(said) if self.ended().is_some() => match serde_json::from_slice(&said) {
+                Ok(said) => match serde_json::from_slice(&said) {
                     Ok(said) => Warmth::Broken(said, SystemTime::now()),
                     Err(_) => Warmth::Failed(format!("{why:#}"), SystemTime::now()),
                 },
@@ -604,7 +664,7 @@ impl Worker {
             },
         };
         eprintln!("{}: {}", checkout.root.display(), warmth.describe());
-        self.set(&checkout.key, warmth);
+        self.set(checkout, warmth);
         // Nobody could ask it for a build until now.
         *lock(&self.asked) = Instant::now();
     }
@@ -621,14 +681,21 @@ impl Worker {
         // every function and static of the workspace from what it reads. The program the
         // worker was started on is built already, and is asked for too: what the worker then
         // compiles again by itself, for the first edit to be a patch, is part of warming up.
+        // A program the worker does not build is cargo's, and the others are still its own:
+        // the checkout failed to load only when it builds none.
+        let mut not_built = None;
+        let mut built = false;
         for plan in &checkout.programs {
             match self.ask(checkout, plan)? {
-                Ok(_) => {}
+                Ok(_) => built = true,
                 Err(NotBuilt::Error(said)) => return Ok(Some(said)),
-                Err(why) => anyhow::bail!(why.why()),
+                Err(why) => _ = not_built.get_or_insert(why),
             }
         }
-        Ok(None)
+        match not_built {
+            Some(why) if !built => anyhow::bail!(why.why()),
+            _ => Ok(None),
+        }
     }
 
     /// A connection to the process, once it has loaded the workspace and listens.
@@ -756,6 +823,16 @@ struct Spare {
     log: PathBuf,
 }
 
+/// Takes away from a worker's `command` each variable [`super::cli::WORKER_ENV_EXACT`] names
+/// that its build, `env`, does not set, which it would otherwise have from the daemon.
+fn exact_env(command: &mut Command, env: &BTreeMap<String, String>) {
+    for name in super::cli::WORKER_ENV_EXACT {
+        if !env.contains_key(*name) {
+            command.env_remove(name);
+        }
+    }
+}
+
 impl Spare {
     /// Starts one with its files in `dir`.
     fn start(dir: &Path) -> anyhow::Result<Spare> {
@@ -775,22 +852,21 @@ impl Spare {
         Ok(Spare { child, log })
     }
 
-    /// Tells it to be the worker `args` start for `checkout`. `None` when it can't be
-    /// told: it has ended, or a path of the build is not text.
+    /// Tells it to be the worker `args` start, with the variables `env`. `None` when it
+    /// can't be told: it has ended, or a path of the build is not text.
     /// One told a build `ahead` has what cargo has not built yet left out of `args`, and
     /// is told them whole afterwards.
     fn told(
         mut self,
         args: &[OsString],
-        config: &WorkerConfig,
+        env: &BTreeMap<String, String>,
         cwd: &Path,
         ahead: bool,
     ) -> Option<Spare> {
         let told = || {
             let args: Option<Vec<String>> =
                 args.iter().map(|it| it.to_str().map(str::to_owned)).collect();
-            let told =
-                crate::Told { args: args?, env: config.env.clone(), cwd: cwd.to_owned(), ahead };
+            let told = crate::Told { args: args?, env: env.clone(), cwd: cwd.to_owned(), ahead };
             let mut line = serde_json::to_string(&told).ok()?;
             line.push('\n');
             Some(line)
@@ -852,6 +928,7 @@ impl Checker {
         let output =
             private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
         command.envs(&ahead.config.env).env(ENDS_WITH_INPUT, "1");
+        exact_env(&mut command, &ahead.config.env);
         command.current_dir(&ahead.root);
         command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
         own_group(&mut command);
@@ -872,7 +949,7 @@ impl Checker {
 
     /// Its answer: `ok`, the errors, or [`crate::check::RELOAD`]. Waits for it to have loaded
     /// the workspace and to listen.
-    fn ask(&mut self) -> anyhow::Result<String> {
+    fn ask(&mut self, request: &str) -> anyhow::Result<String> {
         let mut stream = loop {
             match socket::connect(&self.socket) {
                 Ok(stream) => break stream,
@@ -889,7 +966,7 @@ impl Checker {
                 }
             }
         };
-        stream.write_all(b"check\n")?;
+        stream.write_all(format!("{request}\n").as_bytes())?;
         let mut reply = String::new();
         BufReader::new(stream).read_line(&mut reply)?;
         match reply.trim_end() {
@@ -1166,7 +1243,10 @@ impl Daemon {
                 Ok(()) => self.built(&checkout),
                 Err(why) => Reply::Cold { reason: format!("{why:#}") },
             },
-            Request::Check(ahead) => self.check(&ahead),
+            Request::Check(ahead) => self.check(&ahead, "check"),
+            Request::Lint(ahead, ask) => {
+                self.check(&ahead, &format!("{}{ask}", crate::check::LINT))
+            }
             Request::Status => Reply::Status(Status {
                 pid: std::process::id(),
                 version: self.version.clone(),
@@ -1264,9 +1344,15 @@ impl Daemon {
             let mut checkouts = lock(&worker.checkouts);
             match checkouts.get(&checkout.key) {
                 Some(loaded) if loaded.generation == checkout.generation => return Ok(()),
-                // What it linked against is not what cargo has now.
-                Some(_) => {}
-                None => {
+                // What it linked against is not what cargo has now, and one it could not load
+                // is started again.
+                Some(Loaded { warmth: Warmth::Failed(..), .. }) => {}
+                Some(_) if !checkout.kept => {}
+                // rustc built only what the daemon did not: the worker keeps the programs it
+                // built, the executables running programs take edits into, and starts over
+                // with the others (`Program::start_over`). A new worker would link each
+                // program again, and every program running would be told to restart.
+                _ => {
                     let loading = Loaded {
                         generation: checkout.generation,
                         root: checkout.root.clone(),
@@ -1283,7 +1369,12 @@ impl Daemon {
             old.stop();
         }
         let ahead = lock(&self.ahead).remove(&id);
-        let spare = ahead.or_else(|| lock(&self.spare).take());
+        // A spare loads its library before it is told the build, which a whole build that
+        // asks at once would wait for.
+        let spare = match checkout.config.whole {
+            true => ahead,
+            false => ahead.or_else(|| lock(&self.spare).take()),
+        };
         let worker =
             Arc::new(Worker::start(&checkout, self.home.join("workers").join(&id), spare)?);
         eprintln!(
@@ -1381,8 +1472,8 @@ impl Daemon {
     /// Has the checker of `ahead` say what it finds in the source, started when there is
     /// none of its build or it ended, and started again when it can only take the source in
     /// by loading it again. The one asked longest ago makes way for it when there are
-    /// [`CHECKERS`].
-    fn check(&self, ahead: &Ahead) -> Reply {
+    /// [`CHECKERS`]. `request` is the line the checker is asked with.
+    fn check(&self, ahead: &Ahead, request: &str) -> Reply {
         let id = ahead.config.id();
         let mut held = lock(&self.checkers);
         held.retain_mut(|it| {
@@ -1411,8 +1502,11 @@ impl Daemon {
             };
             let checker = &mut held[at];
             checker.asked = Instant::now();
-            match checker.ask() {
+            match checker.ask(request) {
                 Ok(reply) if reply == "ok" => return Reply::Checked { errors: None },
+                Ok(reply) if reply.starts_with(crate::check::LINT) => {
+                    return Reply::Linted { answer: reply[crate::check::LINT.len()..].to_owned() };
+                }
                 Ok(reply) if reply == crate::check::RELOAD => held.remove(at).stop(),
                 Ok(reply) => match NotBuilt::of(&reply) {
                     NotBuilt::Error(said) => return Reply::Checked { errors: Some(said) },
@@ -1439,7 +1533,7 @@ impl Daemon {
         let Some(spare) = waiting.or_else(|| self.new_spare()) else { return };
         let mut args = ahead.config.args(&ahead.root, &ahead.crates);
         args.extend(["--out".into(), "none".into()]);
-        if let Some(spare) = spare.told(&args, &ahead.config, &ahead.root, true)
+        if let Some(spare) = spare.told(&args, &ahead.config.env, &ahead.root, true)
             && let Some(mut other) = lock(&self.ahead).insert(id, spare)
         {
             other.stop();

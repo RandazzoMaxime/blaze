@@ -1,7 +1,10 @@
 //! `ra-jit enable` and `ra-jit disable`: whether plain cargo builds the crates of the user's
 //! workspaces through ra-jit. Cargo is told in its own configuration, the file in its home
 //! directory, as `build.rustc-workspace-wrapper`. What the file was before is kept next to
-//! it, and `disable` puts it back.
+//! it, and `disable` puts it back. `cargo fmt` and `cargo clippy`, which cargo does not build
+//! in, are linked to blaze's ([`links`]).
+
+mod links;
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +35,9 @@ pub(crate) struct Enabled {
     pub(crate) chained: Option<String>,
     /// The wrapper cargo is told now.
     pub(crate) wrapper: PathBuf,
+    /// The commands linked to blaze's.
+    #[serde(default)]
+    links: Vec<links::Link>,
 }
 
 /// Cargo's home directory, as cargo finds it.
@@ -61,12 +67,6 @@ pub(crate) fn is_wrapper(path: &Path) -> bool {
     stem.is_some_and(|it| it == "ra-jit-rustc" || it == "ra-jit-rustc-first")
 }
 
-/// The same wrapper under the path it has in the first build of a workspace.
-pub(crate) fn first_wrapper_path() -> std::io::Result<PathBuf> {
-    let this = std::env::current_exe()?;
-    Ok(this.with_file_name(format!("ra-jit-rustc-first{}", std::env::consts::EXE_SUFFIX)))
-}
-
 impl Enabled {
     fn path() -> anyhow::Result<PathBuf> {
         Ok(cargo_home().context("no CARGO_HOME or HOME")?.join("ra-jit-enabled.json"))
@@ -94,10 +94,19 @@ pub(crate) fn enable() -> anyhow::Result<i32> {
         "{} is not installed next to ra-jit; plain cargo is not changed",
         wrapper.display()
     );
-    if let Some(enabled) = Enabled::read() {
+    let home = cargo_home().context("no CARGO_HOME or HOME")?;
+    if let Some(mut enabled) = Enabled::read() {
         if enabled.wrapper == wrapper && wrapper_in(&enabled.config).as_deref() == wrapper.to_str()
         {
-            println!("ra-jit is enabled already in {}", enabled.config.display());
+            let mut made = Vec::new();
+            let lines = links::make(&home, &enabled.links, &mut made);
+            if made.is_empty() && lines.as_ref().is_ok_and(Vec::is_empty) {
+                println!("blaze is enabled already in {}", enabled.config.display());
+            }
+            enabled.links.retain(|it| !made.iter().any(|made| made.path == it.path));
+            enabled.links.extend(made);
+            enabled.write()?;
+            lines?.iter().for_each(|it| println!("{it}"));
             return Ok(0);
         }
         // Another ra-jit, or a configuration that was changed since: start over from what
@@ -119,21 +128,27 @@ pub(crate) fn enable() -> anyhow::Result<i32> {
     let named = named.as_str();
     let written = with_wrapper(&text, named).with_context(|| {
         format!(
-            "{} sets `{TABLE}` in a way ra-jit does not edit; add `{KEY} = \"{named}\"` to it",
+            "{} sets `{TABLE}` in a way blaze does not edit; add `{KEY} = \"{named}\"` to it",
             config.display()
         )
     })?;
-    let enabled = Enabled { config: config.clone(), before, written, chained, wrapper };
+    let mut enabled =
+        Enabled { config: config.clone(), before, written, chained, wrapper, links: Vec::new() };
     enabled.write()?;
     if let Some(dir) = config.parent() {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(&config, &enabled.written)
         .with_context(|| format!("writing {}", config.display()))?;
-    println!("ra-jit is enabled: {} has `{TABLE}.{KEY} = \"{named}\"`", config.display());
+    println!("blaze is enabled: {} has `{TABLE}.{KEY} = \"{named}\"`", config.display());
     if let Some(chained) = &enabled.chained {
-        println!("rustc runs through `{chained}` as before, under ra-jit");
+        println!("rustc runs through `{chained}` as before, under blaze");
     }
+    let mut made = Vec::new();
+    let lines = links::make(&home, &[], &mut made);
+    enabled.links = made;
+    enabled.write()?;
+    lines?.iter().for_each(|it| println!("{it}"));
     let cwd = std::env::current_dir()?;
     for line in around(&cwd).into_iter().chain(overrides(&cwd)) {
         println!("{line}");
@@ -146,9 +161,10 @@ pub(crate) fn enable() -> anyhow::Result<i32> {
 /// one key is put back.
 pub(crate) fn disable() -> anyhow::Result<i32> {
     let Some(enabled) = Enabled::read() else {
-        println!("ra-jit is not enabled");
+        println!("blaze is not enabled");
         return Ok(0);
     };
+    links::undo(&enabled.links)?.iter().for_each(|it| println!("{it}"));
     let config = &enabled.config;
     let now = std::fs::read_to_string(config).ok();
     match (&now, &enabled.before) {
@@ -159,7 +175,7 @@ pub(crate) fn disable() -> anyhow::Result<i32> {
             let line = parsed(before).ok().and_then(|_| wrapper_line(before).map(|it| it.1));
             let text = without_wrapper(now, line.as_deref()).with_context(|| {
                 format!(
-                    "{} was changed in a way ra-jit does not edit; remove `{KEY}` from it",
+                    "{} was changed in a way blaze does not edit; remove `{KEY}` from it",
                     config.display()
                 )
             })?;
@@ -168,7 +184,7 @@ pub(crate) fn disable() -> anyhow::Result<i32> {
         (None, _) => {}
     }
     std::fs::remove_file(Enabled::path()?)?;
-    println!("ra-jit is disabled: {} is as it was", config.display());
+    println!("blaze is disabled: {} is as it was", config.display());
     Ok(0)
 }
 
@@ -176,17 +192,20 @@ pub(crate) fn disable() -> anyhow::Result<i32> {
 /// what in `cwd` has it not.
 pub(crate) fn status(cwd: &Path) -> Vec<String> {
     let Some(enabled) = Enabled::read() else {
-        return vec!["plain cargo: not through ra-jit (`ra-jit enable` turns it on)".to_owned()];
+        return vec!["plain cargo: not through blaze (`blaze enable` turns it on)".to_owned()];
     };
     let mut lines = vec![format!(
-        "plain cargo: through ra-jit, by `{TABLE}.{KEY}` in {}",
+        "plain cargo: through blaze, by `{TABLE}.{KEY}` in {}",
         enabled.config.display()
     )];
     if let Some(chained) = &enabled.chained {
         lines.push(format!("  rustc runs through `{chained}`, the wrapper there before"));
     }
     if wrapper_in(&enabled.config).as_deref() != enabled.wrapper.to_str() {
-        lines.push(format!("  but {} no longer names ra-jit", enabled.config.display()));
+        lines.push(format!("  but {} no longer names blaze", enabled.config.display()));
+    }
+    if let Some(home) = cargo_home() {
+        lines.extend(links::status(&home, &enabled.links).into_iter().map(|it| format!("  {it}")));
     }
     lines.extend(around(cwd).into_iter().chain(overrides(cwd)).map(|it| format!("  {it}")));
     lines
@@ -208,7 +227,48 @@ fn around(dir: &Path) -> Option<String> {
         })
     };
     let outer = set.or_else(configured)?;
-    Some(format!("`{outer}` stays cargo's `{OUTER_KEY}`: it runs ra-jit's wrapper as it ran rustc"))
+    Some(format!("`{outer}` stays cargo's `{OUTER_KEY}`: it runs blaze's wrapper as it ran rustc"))
+}
+
+/// The variable `cargo ra-jit` names the workspace's own `rustc-workspace-wrapper` in, for
+/// ra-jit's wrapper to run rustc through: the one it puts in that wrapper's place.
+pub(crate) const CHAINED: &str = "RA_JIT_CHAINED_WRAPPER";
+
+/// The variables cargo reads the workspace's wrapper from, ahead of every configuration
+/// file: its own, then the one that stands for the key of its configuration.
+const WRAPPER_VARIABLES: [&str; 2] = [VARIABLE, "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"];
+
+/// The `rustc-workspace-wrapper` cargo would run in `dir`, which `cargo ra-jit` overrides
+/// with its own. An empty one is the project saying rustc runs through no wrapper, as cargo
+/// reads it; `None` is that it names none, or names ra-jit's, and leaves it to `ra-jit enable`.
+pub(crate) fn project_wrapper(dir: &Path) -> Option<std::ffi::OsString> {
+    let set = WRAPPER_VARIABLES.iter().find_map(|it| std::env::var(it).ok());
+    wrapper_for(dir, set, &home_configs())
+}
+
+/// The wrapper cargo would run in `dir`, in cargo's order: the variable `set` ahead of every
+/// file, a file nearer `dir` ahead of one further up, and the files of cargo's home, `home`,
+/// last. A path with a separator is relative to `dir` when a variable names it and to the
+/// directory that holds `.cargo` when a file does; a bare name is looked up in `PATH`.
+fn wrapper_for(dir: &Path, set: Option<String>, home: &[PathBuf]) -> Option<std::ffi::OsString> {
+    let (root, named) = match set {
+        Some(set) => (dir.to_owned(), set),
+        None => {
+            let nearer = dir.ancestors().flat_map(|it| CONFIGS.map(|name| it.join(name)));
+            let mut configs = nearer.filter(|it| !home.contains(it)).chain(home.iter().cloned());
+            configs.find_map(|config| {
+                let named = wrapper_in(&config)?;
+                Some((config.parent()?.parent()?.to_owned(), named))
+            })?
+        }
+    };
+    if is_wrapper(Path::new(&named)) {
+        return None;
+    }
+    if !named.contains('/') && !named.contains(std::path::MAIN_SEPARATOR) {
+        return Some(named.into());
+    }
+    Some(root.join(named).into_os_string())
 }
 
 /// Whether the user has cargo run every rustc through a wrapper of their own in `dir`.
@@ -414,5 +474,54 @@ mod tests {
                 .unwrap()
                 .ends_with("[build]\nrustc-workspace-wrapper = \"/opt/ra-jit/ra-jit-rustc\"\n")
         );
+    }
+
+    #[test]
+    fn the_project_wrapper_is_relative_to_the_directory_above_its_config() {
+        let root = std::env::temp_dir().join(format!("ra-jit-wrapper-{}", std::process::id()));
+        let inner = root.join("crates").join("a");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let config = root.join(".cargo").join("config.toml");
+        let write = |text: &str| std::fs::write(&config, text).unwrap();
+        let found = |set: Option<&str>, home: &[std::path::PathBuf]| {
+            super::wrapper_for(&inner, set.map(str::to_owned), home)
+        };
+        write("[build]\nrustc-workspace-wrapper = \"scripts/frontend\"\n");
+        let relative = Some(root.join("scripts/frontend").into_os_string());
+        assert_eq!(found(None, &[]), relative);
+        write("[build]\nrustc-workspace-wrapper = \"frontend\"\n");
+        assert_eq!(found(None, &[]), Some("frontend".into()));
+        write("[build]\njobs = 4\n");
+        assert_eq!(found(None, &[]), None);
+        // An empty wrapper is none, which is not the same as naming none.
+        write("[build]\nrustc-workspace-wrapper = \"\"\n");
+        assert_eq!(found(None, &[]), Some("".into()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_variable_comes_first_and_cargo_home_last() {
+        let root = std::env::temp_dir().join(format!("ra-jit-order-{}", std::process::id()));
+        let inner = root.join("project").join("crates").join("a");
+        let home = root.join("cargo-home");
+        std::fs::create_dir_all(root.join("project").join(".cargo")).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let project = root.join("project").join(".cargo").join("config.toml");
+        let homes = [home.join("config.toml"), home.join("config")];
+        let wrapper = |named: &str| format!("[build]\nrustc-workspace-wrapper = \"{named}\"\n");
+        let found = |set: Option<&str>| super::wrapper_for(&inner, set.map(str::to_owned), &homes);
+        std::fs::write(&homes[0], wrapper("home-wrapper")).unwrap();
+        assert_eq!(found(None), Some("home-wrapper".into()));
+        std::fs::write(&project, wrapper("project-wrapper")).unwrap();
+        assert_eq!(found(None), Some("project-wrapper".into()));
+        assert_eq!(found(Some("bin/set")), Some(inner.join("bin/set").into_os_string()));
+        assert_eq!(found(Some("")), Some("".into()));
+        assert_eq!(found(Some("/opt/ra-jit/ra-jit-rustc")), None);
+        std::fs::remove_file(&project).unwrap();
+        std::fs::write(&homes[0], wrapper("/opt/ra-jit/ra-jit-rustc")).unwrap();
+        assert_eq!(found(None), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

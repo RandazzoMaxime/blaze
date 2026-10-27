@@ -12,17 +12,12 @@ use std::{
 };
 
 use anyhow::Context as _;
-use cargo_metadata::{
-    Artifact, BuildScript, CrateType, DependencyKind, Message, Metadata, MetadataCommand, Package,
-    Target, TargetKind,
-};
+use cargo_metadata::{Artifact, BuildScript, Message, Metadata, Package, TargetKind};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Request, Start,
     cli::{Invocation, Subcommand, worker_env},
-    client,
     daemon::{self, Checkout, WorkerConfig},
     package,
     plan::Plan,
@@ -111,6 +106,40 @@ pub(crate) struct Program {
     /// program.
     #[serde(default)]
     pub(crate) default_run: bool,
+}
+
+impl Program {
+    /// A test the daemon built whole, the program `asked_as` of its checkouts, which runs in
+    /// `package_dir` with `env`.
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn of_whole(
+        name: String,
+        kind: Kind,
+        package: String,
+        source: PathBuf,
+        package_dir: PathBuf,
+        executable: PathBuf,
+        asked_as: (usize, usize),
+        env: Vec<(String, String)>,
+    ) -> Program {
+        Program {
+            name,
+            kind,
+            package,
+            test: true,
+            source,
+            package_dir,
+            executable,
+            names: Vec::new(),
+            cargos: PathBuf::new(),
+            unit: None,
+            asked_as: Some(asked_as),
+            left_to_cargo: None,
+            inputs: Vec::new(),
+            env,
+            default_run: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -345,91 +374,6 @@ pub(crate) struct Built {
     said: Vec<String>,
 }
 
-/// The crates of a workspace the first build of it leaves to the daemon.
-pub(crate) struct Staged {
-    /// The root file of each.
-    roots: Vec<PathBuf>,
-    /// What the daemon is told of the workspace before cargo starts, so that it loads it
-    /// while cargo builds. `None` when the build is of no one project of it.
-    pub(crate) ahead: Option<daemon::Ahead>,
-}
-
-impl Staged {
-    /// `Err` is why rustc builds every crate of the build `asked` for. The crates that
-    /// run during the build are rustc's, and so are the ones those depend on: a build
-    /// script, a proc macro, and what either is declared to need under any feature.
-    pub(crate) fn of(asked: &Invocation) -> anyhow::Result<Result<Staged, String>> {
-        if asked.subcommand == Subcommand::Test || asked.flags.selects_targets {
-            return Ok(Err("the build picks its targets".to_owned()));
-        }
-        let metadata = metadata(asked)?;
-        let members: Vec<&Package> = metadata.workspace_packages();
-        let needs = |package: &Package, kinds: &[DependencyKind]| -> Vec<usize> {
-            let needed = package.dependencies.iter().filter(|it| kinds.contains(&it.kind));
-            let dirs = needed.filter_map(|it| it.path.as_ref());
-            dirs.filter_map(|dir| members.iter().position(|it| package_dir(it) == *dir)).collect()
-        };
-        let is_macro = |it: &&Package| it.targets.iter().any(|it| it.is_proc_macro());
-        let mut at_build: Vec<usize> =
-            members.iter().flat_map(|it| needs(it, &[DependencyKind::Build])).collect();
-        at_build.extend((0..members.len()).filter(|&at| is_macro(&&members[at])));
-        let mut reached = FxHashSet::default();
-        while let Some(member) = at_build.pop() {
-            if reached.insert(member) {
-                let kinds = [DependencyKind::Normal, DependencyKind::Build];
-                at_build.extend(needs(members[member], &kinds));
-            }
-        }
-        let mut roots = Vec::new();
-        for (at, member) in members.iter().enumerate() {
-            if reached.contains(&at) {
-                continue;
-            }
-            let of_build = |it: &&Target| {
-                let apart = [
-                    TargetKind::CustomBuild,
-                    TargetKind::Example,
-                    TargetKind::Test,
-                    TargetKind::Bench,
-                ];
-                !it.kind.iter().any(|it| apart.contains(it))
-            };
-            for target in member.targets.iter().filter(of_build) {
-                let alone = matches!(
-                    *target.crate_types,
-                    [CrateType::Lib | CrateType::RLib | CrateType::Bin]
-                );
-                if !alone {
-                    return Ok(Err(format!(
-                        "`{}` is linked into more than a program of the workspace",
-                        target.name
-                    )));
-                }
-                roots.push(target.src_path.clone().into_std_path_buf());
-            }
-        }
-        if roots.is_empty() {
-            return Ok(Err("every crate of the workspace runs during the build".to_owned()));
-        }
-        // Before cargo builds what would then be built again.
-        if let Some(why) = other_toolchain() {
-            return Ok(Err(why));
-        }
-        let root = metadata.workspace_root.clone().into_std_path_buf();
-        let ahead = project(asked, &std::env::current_dir()?, &metadata).ok().map(|project| {
-            let config = WorkerConfig {
-                repository: repository(&root),
-                project: project.strip_prefix(&root).unwrap_or(Path::new("")).to_owned(),
-                cfg_test: false,
-                selection: asked.selection(),
-                env: worker_env(),
-            };
-            daemon::Ahead { config, crates: roots.clone(), root }
-        });
-        Ok(Ok(Staged { roots, ahead }))
-    }
-}
-
 /// What the checker of `cargo ra-jit check` with the flags of `asked` loads: the workspace
 /// as a build of those flags has it, with the crates of every package of it. A flag that
 /// picks the tests checks them as `cargo check --tests` does, with `cfg(test)`.
@@ -437,7 +381,7 @@ pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
     if let Some(why) = other_toolchain() {
         anyhow::bail!(why);
     }
-    let metadata = metadata(asked)?;
+    let metadata = metadata(asked);
     let root = metadata.workspace_root.clone().into_std_path_buf();
     let project =
         project(asked, &std::env::current_dir()?, &metadata).map_err(anyhow::Error::msg)?;
@@ -455,6 +399,7 @@ pub(crate) fn checked(asked: &Invocation) -> anyhow::Result<daemon::Ahead> {
         cfg_test: asked.flags.dev_targets,
         selection: asked.selection(),
         env: worker_env(),
+        whole: false,
     };
     Ok(daemon::Ahead { config, crates, root })
 }
@@ -463,29 +408,7 @@ impl Built {
     /// Runs cargo on what `asked` builds, with ra-jit as the wrapper of the workspace's
     /// crates. Progress and diagnostics are cargo's own. `Err` is cargo's exit status when
     /// it failed.
-    /// `ahead` is what the daemon was told of the build before cargo started, for the
-    /// worker that loads it meanwhile to hear what the scripts said.
-    pub(crate) fn by_cargo(
-        asked: &Invocation,
-        ahead: Option<&daemon::Ahead>,
-    ) -> anyhow::Result<Result<Built, i32>> {
-        Built::by(asked, None, ahead)
-    }
-
-    /// The same, with rustc building of the crates rooted at `staged` only what stands in
-    /// for them: the code of those is the daemon's to compile.
-    pub(crate) fn staged(
-        asked: &Invocation,
-        staged: &Staged,
-    ) -> anyhow::Result<Result<Built, i32>> {
-        Built::by(asked, Some(staged), staged.ahead.as_ref())
-    }
-
-    fn by(
-        asked: &Invocation,
-        staged: Option<&Staged>,
-        ahead: Option<&daemon::Ahead>,
-    ) -> anyhow::Result<Result<Built, i32>> {
+    pub(crate) fn by_cargo(asked: &Invocation) -> anyhow::Result<Result<Built, i32>> {
         let started = stamp_now();
         let mut cargo = Command::new(cargo_path());
         match asked.subcommand {
@@ -494,40 +417,20 @@ impl Built {
         };
         cargo.args(&asked.build_args).arg("--message-format=json-render-diagnostics");
         as_built(&mut cargo)?;
-        if let Some(staged) = staged {
-            cargo.env(switch::VARIABLE, switch::first_wrapper_path()?);
-            cargo.env(wrapper::STAGED, std::env::join_paths(&staged.roots)?);
-        }
         cargo.stdout(Stdio::piped());
         let mut cargo = cargo.spawn().context("running cargo")?;
         let said = cargo.stdout.take().context("cargo has no output")?;
         let mut built =
             Built { started, artifacts: Vec::new(), scripts: Vec::new(), said: Vec::new() };
-        let ahead = ahead.map(|it| it.config.id());
-        // Cargo waits while its output is unread, so the daemon is told on a thread of its own.
-        let (tell, told) = std::sync::mpsc::channel::<Request>();
-        let telling = std::thread::spawn(move || {
-            for said in told {
-                let _ = client::ask(said, Start::Never);
-            }
-        });
         for message in Message::parse_stream(BufReader::new(said)) {
             let message = message?;
-            // The worker that loads the workspace meanwhile reads what the scripts said and
-            // where the proc macros are from cargo's one build of them, and the symbols of
-            // each library as it is built.
+            // The worker that loads the build reads what the scripts said and where the proc
+            // macros are from cargo's one build of them.
             let scripted = match &message {
                 Message::BuildScriptExecuted(_) => true,
                 Message::CompilerArtifact(it) => it.target.is_proc_macro(),
                 _ => false,
             };
-            let loads = scripted
-                || matches!(&message, Message::CompilerArtifact(it)
-                    if it.filenames.iter().any(|it| it.extension() == Some("rlib")));
-            if loads && let Some(id) = &ahead {
-                let said = Request::Said { id: id.clone(), line: serde_json::to_string(&message)? };
-                let _ = tell.send(said);
-            }
             if scripted {
                 built.said.push(serde_json::to_string(&message)?);
             }
@@ -541,9 +444,6 @@ impl Built {
                 _ => {}
             }
         }
-        // What cargo said reaches the worker before it is told the build is over.
-        drop(tell);
-        let _ = telling.join();
         let status = cargo.wait()?;
         if !status.success() {
             super::toolchain::note_failed();
@@ -561,20 +461,23 @@ impl State {
         Ok(daemon::home()?.join("states").join(format!("{key}.json")))
     }
 
-    /// The state of the build `key`. `Err` is why what is there is not read, when there
-    /// is something.
-    pub(crate) fn read(key: &str) -> Result<State, Option<&'static str>> {
-        let path = State::path(key).map_err(|_| None)?;
-        let text = std::fs::read_to_string(path).map_err(|_| None)?;
-        let another = "this build's state was written by another build of ra-jit";
-        let state = serde_json::from_str::<State>(&text).map_err(|_| another)?;
-        if state.version != daemon::version() {
-            return Err(Some(another));
+    /// The state of the build `key`. One another build of ra-jit wrote, or whose programs
+    /// cargo built are no longer in the target directory, is forgotten: nothing of it is
+    /// what this build would have been. What it kept of cargo's stays ([`State::give_back`]).
+    pub(crate) fn read(key: &str) -> Option<State> {
+        State::read_at(&State::path(key).ok()?, &daemon::version())
+    }
+
+    /// The state at `path`, when `version` of ra-jit wrote it and its programs are there.
+    fn read_at(path: &Path, version: &str) -> Option<State> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let state = serde_json::from_str::<State>(&text).ok().filter(|state| {
+            state.version == version && state.programs.iter().all(|it| it.cargos.exists())
+        });
+        if state.is_none() {
+            let _ = std::fs::remove_file(path);
         }
-        if !state.programs.iter().all(|it| it.cargos.exists()) {
-            return Err(Some("what cargo built is no longer in the target directory"));
-        }
-        Ok(state)
+        state
     }
 
     /// The states that have the program rustc linked from the unit recorded in `unit`, by
@@ -648,7 +551,7 @@ impl State {
             let key = name.to_str()?.strip_suffix(".json")?;
             (!key.contains('.')).then(|| key.to_owned())
         });
-        keys.filter_map(|it| State::read(&it).ok()).collect()
+        keys.filter_map(|it| State::read(&it)).collect()
     }
 
     /// Why the next build is cargo's: something cargo acts on changed since it built.
@@ -663,38 +566,6 @@ impl State {
             let file = program.newer_input(self.built_at)?;
             Some(format!("`{}`: {why}, and {} changed", program.name, file.display()))
         })
-    }
-
-    /// `said`, the errors the daemon found in the source, ended as cargo ends a build rustc
-    /// turned down: with the program the build is of.
-    pub(crate) fn turned_down(&self, said: &crate::errors::Said) -> String {
-        let Some(program) = self.programs.iter().find(|it| it.asked_as.is_some()) else {
-            return said.to_string();
-        };
-        let name = &program.name;
-        let target = match (program.kind, program.test) {
-            (Kind::Lib, false) => "lib".to_owned(),
-            (Kind::Lib, true) => "lib test".to_owned(),
-            (Kind::Bin, false) => format!("bin \"{name}\""),
-            (Kind::Bin, true) => format!("bin \"{name}\" test"),
-            (Kind::Example, _) => format!("example \"{name}\""),
-            (Kind::Test, _) => format!("test \"{name}\""),
-            (Kind::Bench, _) => format!("bench \"{name}\""),
-        };
-        let errors = match said.count() {
-            0 | 1 => "1 previous error".to_owned(),
-            n => format!("{n} previous errors"),
-        };
-        let package = &program.package;
-        let mut notes = said.notes().join("\n");
-        if !notes.is_empty() {
-            notes.push('\n');
-        }
-        let toolchain =
-            super::toolchain::failed_note().map_or(String::new(), |it| format!("\nnote: {it}"));
-        format!(
-            "{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}{toolchain}"
-        )
     }
 
     /// Counts a build that went to cargo.
@@ -780,20 +651,33 @@ impl State {
         Ok(cargos)
     }
 
-    /// Has each program be, where cargo's own is kept, a copy of the one the daemon
-    /// built: the daemon writes an edit into its own.
-    pub(crate) fn keep_daemons(&self) -> anyhow::Result<()> {
-        for program in &self.programs {
-            let Some((checkout, at)) = program.asked_as else { continue };
-            let mut new = program.cargos.as_os_str().to_owned();
-            new.push(format!(".{}.new", std::process::id()));
-            std::fs::copy(&self.checkouts[checkout].programs[at].binary, &new)?;
-            std::fs::rename(&new, &program.cargos)?;
+    /// The directory the daemon builds `program` in, when it is asked for it.
+    /// What a whole build of the tests `programs` by the daemon's `checkouts` leaves for their
+    /// run: nothing of it is cargo's.
+    pub(crate) fn of_whole(
+        key: String,
+        root: PathBuf,
+        profile: String,
+        programs: Vec<Program>,
+        checkouts: Vec<Checkout>,
+        configured: Vec<Configured>,
+    ) -> State {
+        State {
+            version: daemon::version(),
+            key,
+            root,
+            built_at: 0,
+            profile,
+            programs,
+            guards: Vec::new(),
+            checkouts,
+            refusal: None,
+            doc_tests: false,
+            counts: Counts::default(),
+            configured,
         }
-        Ok(())
     }
 
-    /// The directory the daemon builds `program` in, when it is asked for it.
     pub(crate) fn plan_dir(&self, program: &Program) -> Option<&Path> {
         let (checkout, at) = program.asked_as?;
         self.checkouts.get(checkout)?.programs.get(at)?.object.parent()
@@ -819,7 +703,7 @@ impl State {
         built: Built,
         counts: Counts,
     ) -> anyhow::Result<State> {
-        let metadata = metadata(asked)?;
+        let metadata = metadata(asked);
         // By its real path, as rustc's working directory and so the sources of the units
         // are: a workspace reached through a link is the one it links to.
         let root = metadata.workspace_root.as_std_path();
@@ -868,18 +752,20 @@ impl State {
             cfg_test: unit_test,
             selection: asked.selection(),
             env: worker_env(),
+            whole: false,
         };
         let sysroot_libraries = sysroot_libraries();
         let scripts = match kept_said(&dir, &built.said) {
             Ok(file) => Some(file),
             Err(why) => {
-                eprintln!("ra-jit: what the build scripts said is not kept: {why}");
+                eprintln!("blaze: what the build scripts said is not kept: {why}");
                 None
             }
         };
         let checkout = |unit_test: bool| Checkout {
             key: format!("{key}{}", if unit_test { "-unit" } else { "" }),
             generation: 0,
+            kept: false,
             built_at: built.started,
             config: config(unit_test),
             root: root.clone(),
@@ -912,7 +798,7 @@ impl State {
             let plan = match unit {
                 Some(unit) => Plan::of(unit, &used, &files, unit_test)?,
                 None => Err(format!(
-                    "cargo built `{name}` before ra-jit recorded what it is linked from; \
+                    "cargo built `{name}` before blaze recorded what it is linked from; \
                      `cargo clean -p {}` has it built again",
                     package.name
                 )),
@@ -951,6 +837,7 @@ impl State {
                 inputs: inputs.into_iter().collect(),
                 env: run_env(package, &built.scripts)
                     .into_iter()
+                    .chain(programs_named(kind, unit))
                     .chain(library_path(executable.as_std_path(), sysroot_libraries.as_deref()))
                     .collect(),
             });
@@ -1017,9 +904,11 @@ impl Program {
 /// locks from putting its programs in place until they have started. A directory cargo
 /// keeps no lock in, on NFS, has none to hold.
 fn build_locks<'a>(executables: impl Iterator<Item = &'a Path>) -> Vec<std::fs::File> {
-    // `debug/app`, `debug/examples/app` and `debug/deps/app-…` are all of `debug`.
+    // `debug/app`, `debug/examples/app`, `debug/deps/app-…` and, in cargo's second layout,
+    // `debug/build/app/<hash>/out/app-…` are all of `debug`.
     let lock_of = |executable: &Path| {
-        let above = executable.ancestors().skip(1).take(2);
+        let profile = super::layout::unit_dir(executable).and_then(|it| it.profile());
+        let above = profile.into_iter().chain(executable.ancestors().skip(1).take(2));
         above.map(|dir| dir.join(".cargo-lock")).find(|it| it.is_file())
     };
     let mut locks: Vec<PathBuf> = executables.filter_map(lock_of).collect();
@@ -1101,7 +990,11 @@ pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
     if cfg!(target_os = "macos") || std::fs::hard_link(from, &new).is_err() {
         std::fs::copy(from, &new)?;
     }
-    std::fs::rename(&new, to)
+    std::fs::rename(&new, to)?;
+    // A rename onto another name of the same file, as `to` is after the first build, leaves
+    // both names.
+    let _ = std::fs::remove_file(&new);
+    Ok(())
 }
 
 /// Gives `command` the environment cargo built in, so that a cargo it runs, or is, has the
@@ -1110,6 +1003,14 @@ pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
 /// program that is running.
 pub(crate) fn as_built(command: &mut Command) -> std::io::Result<()> {
     command.env(switch::VARIABLE, switch::wrapper_path()?).env(wrapper::DRIVEN, "1");
+    // The project's own wrapper still runs rustc, from inside ra-jit's, as cargo finds it from
+    // the directory it runs in.
+    let dir =
+        command.get_current_dir().map_or_else(std::env::current_dir, |it| Ok(it.to_owned()))?;
+    match switch::project_wrapper(&dir) {
+        Some(theirs) => command.env(switch::CHAINED, theirs),
+        None => command.env_remove(switch::CHAINED),
+    };
     every_crate(command)
 }
 
@@ -1148,22 +1049,17 @@ pub(super) fn rustc_named() -> Option<OsString> {
     std::env::var_os("RUSTC")
 }
 
-/// What `rustc` prints for `flag` (`--version`, `--print=sysroot`), when it starts.
-pub(super) fn rustc_says(rustc: &OsStr, flag: &str) -> Option<String> {
-    let output = crate::answers::answer(Command::new(rustc).arg(flag), &[]).ok()?;
+/// What `rustc` prints when given `args` (`--version`, `--print=sysroot`), when it starts.
+pub(super) fn rustc_says(rustc: &OsStr, args: &[&str]) -> Option<String> {
+    let output = crate::answers::answer(Command::new(rustc).args(args), &[]).ok()?;
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-pub(super) fn metadata(asked: &Invocation) -> anyhow::Result<Metadata> {
-    let mut command = MetadataCommand::new();
-    command.cargo_path(cargo_path()).no_deps();
-    if let Some(manifest) = &asked.flags.manifest_path {
-        command.manifest_path(manifest);
-    }
-    command.exec().context("running `cargo metadata`")
+pub(super) fn metadata(asked: &Invocation) -> Metadata {
+    super::metadata::no_deps(asked.flags.manifest_path.as_deref(), &asked.flags.config)
 }
 
-fn package_dir(package: &Package) -> PathBuf {
+pub(super) fn package_dir(package: &Package) -> PathBuf {
     package.manifest_path.parent().map(|it| it.as_std_path().to_owned()).unwrap_or_default()
 }
 
@@ -1217,16 +1113,17 @@ fn project(asked: &Invocation, cwd: &Path, metadata: &Metadata) -> Result<PathBu
 /// library, which the daemon compiles from, is not installed. `cargo blaze` has made it
 /// blaze's (`toolchain::settle`); plain cargo after `blaze enable` builds with the project's.
 ///
-/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another release anyway, for a project pinned to a
-/// toolchain near ours (a nightly of the next release): the layouts, symbol names, ABI and
-/// `TypeId`s are still 1.99.0's, and nothing checks that the other rustc agrees with them.
+/// `RA_JIT_OTHER_TOOLCHAIN=1` takes another toolchain anyway, for a project pinned to a
+/// nightly near ours: the layouts, symbol names, ABI and `TypeId`s are still the pinned
+/// nightly's, and nothing checks that the other rustc agrees with them.
 fn other_toolchain() -> Option<String> {
     let rustc = rustc_path();
-    let said = |flag: &str| rustc_says(&rustc, flag);
+    let said = |flag: &str| rustc_says(&rustc, &[flag]);
     let version = said("--version")?;
-    let version = version.split_whitespace().nth(1).unwrap_or_default();
+    let version = version.lines().next().unwrap_or_default().trim();
+    let version = version.strip_prefix("rustc ").unwrap_or(version);
     let ours = super::toolchain::OURS.trim();
-    if version != ours && !other_toolchain_allowed() {
+    if version != super::toolchain::ours_says() && !other_toolchain_allowed() {
         return Some(format!(
             "rustc {version} is not the {ours} blaze compiles, and plain cargo builds with the \
              project's toolchain; `cargo blaze` builds with {ours}"
@@ -1247,7 +1144,7 @@ pub(super) fn other_toolchain_allowed() -> bool {
 /// What the checkouts of one repository share: the repository's own directory, which is
 /// `.git` in the first checkout and is named by the `.git` file of a worktree. A directory
 /// that is no checkout is its own.
-fn repository(root: &Path) -> PathBuf {
+pub(super) fn repository(root: &Path) -> PathBuf {
     // git names the directory its own way, on Windows with other separators than the
     // checkout's path has: both are spelled as the file system spells them.
     let spelled = |dir: &Path| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
@@ -1275,7 +1172,7 @@ const LIBRARY_PATH: &str = if cfg!(windows) {
 
 /// Where the toolchain cargo builds with has the libraries of the host, `libstd` as a
 /// dynamic library among them. `None` when rustc does not say.
-fn sysroot_libraries() -> Option<PathBuf> {
+pub(super) fn sysroot_libraries() -> Option<PathBuf> {
     let rustc = rustc_path();
     let output =
         crate::answers::answer(Command::new(rustc).arg("--print=target-libdir"), &[]).ok()?;
@@ -1285,21 +1182,50 @@ fn sysroot_libraries() -> Option<PathBuf> {
 
 /// Where cargo has the dynamic linker look when it runs `executable`: the dependencies of
 /// the profile, the profile's own directory, the toolchain's libraries, and then wherever
-/// it looked already. A test of a proc macro is linked with the toolchain's `libstd`.
-fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
+/// it looked already. A test of a proc macro is linked with the toolchain's `libstd`. The
+/// dependencies are `deps` in cargo's first layout and, in its second, the directory of each
+/// unit that is a `dylib` ([`super::layout::dylib_dirs`]).
+pub(super) fn library_path(executable: &Path, sysroot: Option<&Path>) -> Option<(String, String)> {
     let inside = |it: &&Path| it.file_name().is_some_and(|it| it == "deps" || it == "examples");
     let dir = executable.parent()?;
-    let profile = if inside(&dir) { dir.parent()? } else { dir };
+    let unit = super::layout::unit_dir(dir);
+    let profile = match &unit {
+        Some(unit) => unit.profile()?,
+        None if inside(&dir) => dir.parent()?,
+        None => dir,
+    };
     let already = std::env::var_os(LIBRARY_PATH);
     let already = already.iter().flat_map(std::env::split_paths);
-    let dirs =
-        [profile.join("deps"), profile.to_owned()].into_iter().chain(sysroot.map(Path::to_owned));
+    // The layout is the executable's, not what is in the target directory yet: before the
+    // first build of a fresh one there is neither `deps` nor `build`, and a test's environment
+    // would differ from the next build's (a test's cached pass is keyed by it).
+    let deps = match unit.is_some() && !profile.join("deps").is_dir() {
+        true => super::layout::dylib_dirs(profile),
+        false => vec![profile.join("deps")],
+    };
+    let dirs = deps.into_iter().chain([profile.to_owned()]).chain(sysroot.map(Path::to_owned));
     let joined = std::env::join_paths(dirs.chain(already)).ok()?;
     Some((LIBRARY_PATH.to_owned(), joined.into_string().ok()?))
 }
 
+/// The variables a cargo since rust-lang/cargo#16421 also sets when it runs an integration
+/// test or a benchmark: `CARGO_BIN_EXE_<name>` for each program of its package, as it gave
+/// them to rustc for the unit. A test that looks for a program by them at run time (assert_cmd's
+/// `cargo_bin`) finds none beside it in cargo's second layout, where the test is in its unit's
+/// own directory and not in the profile's.
+fn programs_named(kind: Kind, unit: Option<&Record>) -> Vec<(String, String)> {
+    if !matches!(kind, Kind::Test | Kind::Bench) {
+        return Vec::new();
+    }
+    let named = unit.into_iter().flat_map(|it| &it.env);
+    named
+        .filter(|(name, _)| name.starts_with("CARGO_BIN_EXE_"))
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect()
+}
+
 /// The variables cargo sets for a program of `package` when it runs it.
-fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> {
+pub(super) fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> {
     let version = &package.version;
     let text = |it: &Option<String>| it.clone().unwrap_or_default();
     let mut env = vec![
@@ -1341,7 +1267,7 @@ fn run_env(package: &Package, scripts: &[BuildScript]) -> Vec<(String, String)> 
 /// directory of each directory up from it, the nearest first, then from cargo's home. Of two
 /// files in one directory cargo reads `config`, not `config.toml`. A `relative` value is a
 /// path from the directory its `.cargo` is in.
-fn configured_env(cwd: &Path) -> Vec<Configured> {
+pub(super) fn configured_env(cwd: &Path) -> Vec<Configured> {
     let in_dir = |dir: &Path| {
         ["config", "config.toml"].map(|it| dir.join(it)).into_iter().find(|it| it.is_file())
     };
@@ -1517,6 +1443,26 @@ fn rerun_guards(package: &Package, script: &BuildScript) -> Vec<Guard> {
     files
 }
 
+/// `said`, the errors the daemon found in the source of the target `target` (`bin "app"`,
+/// `lib test`) of `package`, as rustc writes them and cargo ends the build: with the line
+/// naming what did not compile, and the note of the toolchain blaze built with in place of the
+/// project's.
+pub(crate) fn turned_down(said: &crate::errors::Said, package: &str, target: &str) -> String {
+    let errors = match said.count() {
+        0 | 1 => "1 previous error".to_owned(),
+        n => format!("{n} previous errors"),
+    };
+    let mut notes = said.notes().join("\n");
+    if !notes.is_empty() {
+        notes.push('\n');
+    }
+    let toolchain =
+        super::toolchain::failed_note().map_or(String::new(), |it| format!("\nnote: {it}"));
+    format!(
+        "{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}{toolchain}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1537,6 +1483,19 @@ mod tests {
         assert_eq!(dirs("/t/debug/deps/unit-0123"), expected);
         assert_eq!(dirs("/t/debug/app"), expected);
         assert_eq!(dirs("/t/debug/examples/one"), expected);
+        // cargo's second layout, with no `deps`: a test in its unit's directory.
+        let second = std::env::temp_dir().join(format!("ra-jit-state-{}", std::process::id()));
+        let unit = second.join("debug/build/app/0123456789abcdef/out");
+        std::fs::create_dir_all(&unit).unwrap();
+        let test = unit.join("app-0123456789abcdef");
+        let dirs = |executable: &Path| {
+            let (_, value) = library_path(executable, Some(sysroot)).unwrap();
+            std::env::split_paths(&value).take(2).collect::<Vec<PathBuf>>()
+        };
+        assert_eq!(dirs(&test), [second.join("debug"), sysroot.to_owned()]);
+        let _ = std::fs::remove_dir_all(&second);
+        // Before the first build of a fresh target directory, the same.
+        assert_eq!(dirs(&test), [second.join("debug"), sysroot.to_owned()]);
     }
 
     #[test]
@@ -1576,6 +1535,44 @@ mod tests {
         assert_ne!(print(&base.replace("    1\n", "    2\n")), was);
         assert_ne!(print(&format!("\n{base}")), was);
         assert_ne!(print(&format!("{base}\n#[cfg(not(test))]\nfn other() {{}}\n")), was);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_state_another_ra_jit_wrote_is_forgotten() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("key.json");
+        let cargos = dir.join("app.cargos");
+        let write = |version: &str| {
+            let program = serde_json::json!({
+                "name": "app", "kind": "Bin", "package": "app", "test": false,
+                "source": "src/main.rs", "package_dir": dir, "executable": dir.join("app"),
+                "cargos": cargos, "asked_as": null, "left_to_cargo": null, "inputs": [],
+                "env": [],
+            });
+            let state = serde_json::json!({
+                "version": version, "key": "key", "root": dir, "built_at": 0,
+                "profile": "release", "programs": [program], "guards": [], "checkouts": [],
+                "refusal": null, "doc_tests": false, "counts": {"served": 0, "cargo": {}},
+            });
+            std::fs::write(&path, state.to_string()).unwrap();
+        };
+        std::fs::write(&cargos, "").unwrap();
+        write("this");
+        assert!(State::read_at(&path, "this").is_some());
+        assert!(path.exists());
+        // A state of an older ra-jit, an unreadable one, and one whose program cargo built
+        // is gone are each a build no build has loaded: read as nothing, and gone.
+        assert!(State::read_at(&path, "newer").is_none());
+        assert!(!path.exists());
+        std::fs::write(&path, "{\"version\": 1").unwrap();
+        assert!(State::read_at(&path, "this").is_none());
+        assert!(!path.exists());
+        write("this");
+        std::fs::remove_file(&cargos).unwrap();
+        assert!(State::read_at(&path, "this").is_none());
+        assert!(!path.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

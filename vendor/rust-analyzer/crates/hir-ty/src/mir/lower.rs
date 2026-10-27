@@ -7,7 +7,11 @@ use base_db::Crate;
 use hir_def::{
     AdtId, DefWithBodyId, EnumVariantId, ExpressionStoreOwnerId, GenericParamId, HasModule,
     ItemContainerId, LocalFieldId, Lookup, TraitId,
-    expr_store::{Body, ExpressionStore, HygieneId, body::Param, path::Path},
+    expr_store::{
+        Body, ExpressionStore, HygieneId,
+        body::{Param, body_syntax},
+        path::Path,
+    },
     hir::{
         ArithOp, Array, AsmOperand, BinaryOp, BindingAnnotation, BindingId, ClosureKind,
         CoroutineKind, CoroutineSource, ExprId, ExprOrPatId, LabelId, Literal, LoopSource,
@@ -66,6 +70,7 @@ use crate::{
 use super::{OperandKind, Place};
 
 mod as_place;
+mod deref_pattern;
 mod match_tree;
 mod pattern_matching;
 
@@ -201,6 +206,9 @@ struct MirLowerCtx<'a, 'db> {
     guarded_moves: Option<Vec<GuardedMove<'db>>>,
     /// The reference a guard reads each binding of `guarded_moves` through.
     guard_refs: FxHashMap<BindingId, LocalId>,
+    /// The reference each deref pattern through a smart pointer that is not a `Box` was
+    /// tested through, for binding after the test.
+    deref_temps: FxHashMap<deref_pattern::DerefKey, LocalId>,
     /// While the pattern of a destructuring assignment is lowered: what it assigns, and the
     /// value it destructures, where a part that cannot be moved out of it is reported.
     assigned: Vec<Assigned>,
@@ -228,7 +236,6 @@ pub enum MirLowerError<'db> {
     RecordLiteralWithoutPath,
     UnresolvedMethod(String),
     UnresolvedField,
-    UnsizedTemporary(StoredTy),
     MissingFunctionDefinition(InferBodyId<'db>, ExprId),
     HasErrors,
     /// This should never happen. Type mismatch should catch everything.
@@ -385,6 +392,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             or_choices: FxHashMap::default(),
             guarded_moves: None,
             guard_refs: FxHashMap::default(),
+            deref_temps: FxHashMap::default(),
             assigned: Vec::new(),
             assigned_from: MirSpan::Unknown,
             copy: FxHashMap::default(),
@@ -403,10 +411,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         self.infcx.interner.lang_items()
     }
 
+    /// A temporary of type `ty`. It may be unsized, as rustc's `as_temp` makes one of a value
+    /// that is moved out of an unsized place (`*s;`, `[a[..]]`): borrow checking reports the
+    /// move (E0507, E0508), and nothing that compiles has one.
     fn temp(&mut self, ty: Ty<'db>, current: BasicBlockId, span: MirSpan) -> Result<'db, LocalId> {
-        if matches!(ty.kind(), TyKind::Slice(_) | TyKind::Dynamic(..)) {
-            return Err(MirLowerError::UnsizedTemporary(ty.store()));
-        }
         let l = self.result.locals.alloc(Local { ty: ty.store() });
         self.push_storage_live_for_local(l, current, span)?;
         Ok(l)
@@ -543,8 +551,17 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         else {
             return Ok(None);
         };
-        // `CONST.len()` borrows a promoted constant just as `(&CONST).len()` does.
-        if bk == BorrowKind::Shared
+        // `CONST.len()` borrows a promoted constant just as `(&CONST).len()` does, and
+        // `[][..]` mutably an empty array just as `&mut []` does (rustc's `validate_ref`).
+        let promotable_kind = match bk {
+            BorrowKind::Shared => true,
+            BorrowKind::Mut {
+                kind: super::MutBorrowKind::Default | super::MutBorrowKind::TwoPhasedBorrow,
+            } => self.is_empty_array(expr_id),
+            BorrowKind::Shallow
+            | BorrowKind::Mut { kind: super::MutBorrowKind::ClosureCapture } => false,
+        };
+        if promotable_kind
             && rest.is_empty()
             && p.local.into_raw().into_u32() as usize >= locals
             && p.projection.as_slice().is_empty()
@@ -595,13 +612,13 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 Ok(Some(current))
             }
             // A register only written to has no value the block could leave in it, so such an
-            // operand is lowered as assembly would be.
+            // operand is lowered as assembly would be, and so is a `sym`, whose function's
+            // where clauses the borrow checker proves.
             Expr::InlineAsm(asm)
                 if asm.comment_only
-                    && !asm
-                        .operands
-                        .iter()
-                        .any(|(_, it)| matches!(it, AsmOperand::Out { expr: Some(_), .. })) =>
+                    && !asm.operands.iter().any(|(_, it)| {
+                        matches!(it, AsmOperand::Out { expr: Some(_), .. } | AsmOperand::Sym(_))
+                    }) =>
             {
                 // The block emits nothing, so a register it reads and writes keeps the value it
                 // was given: the borrow checker sees the write to the variable as a mutation.
@@ -638,7 +655,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 };
                 let mut labels = Vec::new();
                 let mut operands = Vec::with_capacity(asm.operands.len());
-                for (_, operand) in &asm.operands {
+                for (index, (_, operand)) in asm.operands.iter().enumerate() {
                     let written = !matches!(operand, AsmOperand::In { .. });
                     let (reg, input, output) = match operand {
                         AsmOperand::In { reg, expr } => (reg, Some(*expr), None),
@@ -648,13 +665,29 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             (reg, Some(*in_expr), *out_expr)
                         }
                         AsmOperand::Const(value) => {
-                            let Some((value, next)) =
-                                self.lower_expr_to_some_operand(*value, current)?
-                            else {
-                                return Ok(None);
+                            // rustc's `const` operand is an anonymous constant, evaluated for
+                            // each instance as a `const { .. }` block is: a value of the
+                            // operand's type, never a temporary of the function, whatever the
+                            // expression (`const 0x0100_0000`, `const SHIFT_BITS`,
+                            // `const size_of::<T>()`). A literal is one as it is.
+                            let operand = match &self.store[*value] {
+                                Expr::Literal(l) if !self.has_adjustments(*value) => {
+                                    let ty = self.expr_ty_without_adjust(*value);
+                                    self.lower_literal_to_operand(ty, l)?
+                                }
+                                _ => {
+                                    let Some(konst) = self.inline_const(*value) else {
+                                        not_supported!("an `asm!` constant of no known type");
+                                    };
+                                    let subst = GenericArgs::identity_for_item(
+                                        self.interner(),
+                                        self.owner.generic_def(self.db).into(),
+                                    );
+                                    self.lower_const_to_operand(subst, konst.into())?
+                                }
                             };
-                            current = next;
-                            operands.push(super::AsmOperand::Const(value));
+                            let span = Some((*value).into());
+                            operands.push(super::AsmOperand::Const(Operand { span, ..operand }));
                             continue;
                         }
                         AsmOperand::Label(block) => {
@@ -678,16 +711,13 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 Some(ValueNs::StaticId(id)) => {
                                     Operand { kind: OperandKind::Static(id), span: None }
                                 }
-                                // FIXME: one with parameters, whose arguments inference
-                                // does not record for a `sym`.
-                                Some(ValueNs::FunctionId(func))
-                                    if generics(self.db, func.into()).len(true) == 0 =>
+                                // The function item with the generic arguments the path
+                                // spells out, as inference typed it.
+                                Some(ValueNs::FunctionId(_))
+                                    if let Some(ty) =
+                                        self.infer.asm_sym_tys.get(&(expr_id, index as u32)) =>
                                 {
-                                    Operand::const_zst(Ty::new_fn_def(
-                                        self.interner(),
-                                        CallableDefId::FunctionId(func).into(),
-                                        GenericArgs::empty(),
-                                    ))
+                                    Operand::const_zst(ty.as_ref())
                                 }
                                 _ => not_supported!(
                                     "inline assembly with a `sym` that is not a static or a                                      function without parameters"
@@ -1087,9 +1117,12 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         let func = Operand::from_bytes(Box::default(), callee_ty);
                         // `#[rustc_legacy_const_generics]`: those are generic arguments.
                         let consts = match def.0 {
-                            CallableDefId::FunctionId(func) => FunctionSignature::of(self.db, func)
-                                .legacy_const_generics_indices(self.db, func)
-                                .filter(|consts| args.len() > consts.len()),
+                            CallableDefId::FunctionId(func) => {
+                                let signature = FunctionSignature::of(self.db, func);
+                                signature
+                                    .legacy_const_generics_indices(self.db, func)
+                                    .filter(|_| args.len() > signature.params.len())
+                            }
                             _ => None,
                         }
                         .unwrap_or_default();
@@ -1189,6 +1222,8 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         for (expansion, choice) in expansions.into_iter().enumerate() {
                             self.or_choices = choice.into_iter().collect();
                             let outer = self.guarded_moves.replace(Vec::new());
+                            // A nested guard must preserve the enclosing guard's references.
+                            let outer_refs = self.guard_refs.clone();
                             self.arm_unreached = !reached;
                             let matched = match last_arm && expansion + 1 == count {
                                 true => self.pattern_match(current, None, cond_place, *pat),
@@ -1202,7 +1237,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             let otherwise = otherwise.unwrap_or_else(|| self.new_basic_block());
                             let bound = self.drop_scopes.last().map_or(0, |it| it.locals.len());
                             let guarded = self.lower_guard(guard, then, expr_id.into());
-                            self.guard_refs.clear();
+                            self.guard_refs = outer_refs;
                             if let Some((held, failed)) = guarded? {
                                 let failed = self.guard_failed(failed, bound, guard.into());
                                 self.set_goto(failed, otherwise, expr_id.into());
@@ -1224,6 +1259,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         Some(_) => self.guarded_moves.replace(Vec::new()),
                         None => self.guarded_moves.take(),
                     };
+                    let outer_refs = self.guard_refs.clone();
                     self.arm_unreached = !reached;
                     let matched = match last_arm {
                         true => self.pattern_match(current, None, cond_place, *pat),
@@ -1238,7 +1274,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         let o = *otherwise.get_or_insert_with(|| self.new_basic_block());
                         let bound = self.drop_scopes.last().map_or(0, |it| it.locals.len());
                         let guarded = self.lower_guard(guard, then, expr_id.into());
-                        self.guard_refs.clear();
+                        self.guard_refs = outer_refs;
                         if let Some((held, failed)) = guarded? {
                             let failed = self.guard_failed(failed, bound, guard.into());
                             self.set_goto(failed, o, expr_id.into());
@@ -2254,24 +2290,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     /// block of a constant's own body is lowered in place, as it is already evaluated. The
     /// constant is the `const { .. }` expression, which owns the block's bindings.
     fn inline_const(&self, expr: ExprId) -> Option<AnonConstId<'db>> {
-        let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(_)) = self.owner else {
-            return None;
-        };
-        let ty = self.expr_ty_without_adjust(expr);
-        if ty.references_non_lt_error() || ty.has_infer() {
-            return None;
-        }
-        let token = LoweringMode::Analysis.allow_tracked_structs()?;
-        Some(AnonConstId::new(
-            self.db,
-            AnonConstLoc {
-                owner: self.store_owner,
-                expr,
-                ty: StoredEarlyBinder::bind(ty.store()),
-                allow_using_generic_params: true,
-            },
-            token,
-        ))
+        inline_const_at(self.db, self.owner, self.infer, expr)
     }
 
     fn lower_const_to_operand(
@@ -2552,7 +2571,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         let declared = self.declared_locals();
         let Some(args) = args
             .map(|arg| {
-                if let Some((temp, c)) = self.lower_expr_to_some_operand(arg, current)? {
+                if let Some((temp, c)) = self.lower_call_operand(arg, current)? {
                     current = c;
                     // What unwinds from the next argument drops this one first.
                     self.declare_operands_last(call, declared, std::iter::once(&temp));
@@ -2583,6 +2602,61 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             self.end_arguments(declared, &temps, after, call.into());
         }
         Ok(after)
+    }
+
+    /// An argument of a call, as rustc's `as_call_operand`. An unsized one (`unsized_fn_params`)
+    /// has no temporary: the call takes it where it is, out of the box a builtin deref of it
+    /// reads, which is moved into a temporary first, or else out of the place it is.
+    fn lower_call_operand(
+        &mut self,
+        arg: ExprId,
+        current: BasicBlockId,
+    ) -> Result<'db, Option<(Operand, BasicBlockId)>> {
+        let ty = self.expr_ty_after_adjustments(arg);
+        if self.infcx.type_is_sized_modulo_regions(self.env, ty) {
+            return self.lower_expr_to_some_operand(arg, current);
+        }
+        let adjustments = self.infer.expr_adjustments.get(&arg).map_or(&[][..], |it| &it[..]);
+        let boxed = match adjustments.split_last() {
+            Some((Adjustment { kind: Adjust::Deref(None), .. }, rest)) => {
+                self.lower_expr_to_some_place_with_adjust(arg, current, rest)?
+            }
+            None => match &self.store[arg] {
+                &Expr::UnaryOp { expr, op: hir_def::hir::UnaryOp::Deref }
+                    if match self.expr_ty_without_adjust(expr).kind() {
+                        TyKind::Ref(..) | TyKind::RawPtr(..) => true,
+                        TyKind::Adt(id, _) => id.is_box(),
+                        _ => false,
+                    } =>
+                {
+                    self.lower_expr_to_fresh_place(expr, current)?
+                }
+                _ => return self.lower_unsized_place_operand(arg, current),
+            },
+            Some(_) => return self.lower_unsized_place_operand(arg, current),
+        };
+        let Some((temp, current)) = boxed else {
+            return Ok(None);
+        };
+        let place = temp.project(ProjectionElem::Deref);
+        Ok(Some((
+            Operand { kind: OperandKind::Copy(place.store()), span: Some(arg.into()) },
+            current,
+        )))
+    }
+
+    fn lower_unsized_place_operand(
+        &mut self,
+        arg: ExprId,
+        current: BasicBlockId,
+    ) -> Result<'db, Option<(Operand, BasicBlockId)>> {
+        let Some((place, current)) = self.lower_expr_as_place(current, arg, true)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            Operand { kind: OperandKind::Copy(place.store()), span: Some(arg.into()) },
+            current,
+        )))
     }
 
     /// Ends the storage of the temporaries a call that returned took as arguments, as rustc
@@ -3517,18 +3591,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 }
                 &hir_def::hir::Statement::Expr { expr, has_semi: _ } => {
                     let scope2 = self.push_drop_scope();
-                    // A place used as a statement (`*x;`) is moved out of, and the value
-                    // dropped at the end of the statement.
-                    let unsized_place = matches!(
-                        self.expr_ty_after_adjustments(expr).kind(),
-                        TyKind::Slice(_) | TyKind::Str | TyKind::Dynamic(..)
-                    );
-                    let lowered = if unsized_place {
-                        self.lower_expr_as_place(current, expr, true)?
-                    } else {
-                        self.lower_expr_to_fresh_place(expr, current)?
-                    };
-                    let Some((p, c)) = lowered else {
+                    // A place used as a statement (`*x;`, `S[0];`) is moved out of into a
+                    // temporary, as rustc's `stmt_expr` does with `as_temp`, sized or not, and
+                    // the value dropped at the end of the statement.
+                    let Some((p, c)) = self.lower_expr_to_fresh_place(expr, current)? else {
                         scope2.pop_assume_dropped(self);
                         scope.pop_assume_dropped(self);
                         return Ok(None);
@@ -4065,7 +4131,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
 
     /// The way out of a match arm whose guard was false. What the guard bound is dropped, and
     /// what the pattern took out of the matched value goes back, for the arms that follow and
-    /// for whoever drops that value.
+    /// for whoever drops that value. The storage of what the pattern bound ends too, as rustc
+    /// leaves the arm's scope there (`in_if_then_scope`): its bindings are references to the
+    /// value matched on, or bound by value only once the guard holds, so the next way the arm
+    /// can match binds them afresh.
     fn guard_failed(
         &mut self,
         mut current: BasicBlockId,
@@ -4073,11 +4142,15 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         span: MirSpan,
     ) -> BasicBlockId {
         if let Some(arm) = self.drop_scopes.last() {
+            let by_pattern = arm.locals.get(..bound_by_pattern).unwrap_or_default().to_vec();
             let by_guard = DropScope {
                 locals: arm.locals.get(bound_by_pattern..).unwrap_or_default().to_vec(),
                 ..Default::default()
             };
             self.emit_drop_and_storage_dead_for_scope(&by_guard, &mut current, span);
+            for &local in by_pattern.iter().rev() {
+                self.push_statement(current, StatementKind::StorageDead(local).with_span(span));
+            }
         }
         current
     }
@@ -4302,7 +4375,35 @@ fn cast_kind<'db>(
     })
 }
 
-#[salsa::tracked(returns(as_ref), cycle_result = mir_body_for_closure_cycle_result)]
+/// The constant a `const { .. }` block `expr` of `owner` is lowered to, a body of its own; `None`
+/// where it is lowered in place, as an inline const of a constant's or static's value is.
+pub fn inline_const_at<'db>(
+    db: &'db dyn HirDatabase,
+    owner: InferBodyId<'db>,
+    infer: &InferenceResult<'db>,
+    expr: ExprId,
+) -> Option<AnonConstId<'db>> {
+    let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(_)) = owner else {
+        return None;
+    };
+    let ty = infer.expr_ty(expr);
+    if ty.references_non_lt_error() || ty.has_infer() {
+        return None;
+    }
+    let token = LoweringMode::Analysis.allow_tracked_structs()?;
+    Some(AnonConstId::new(
+        db,
+        AnonConstLoc {
+            owner: owner.expression_store_owner(db),
+            expr,
+            ty: StoredEarlyBinder::bind(ty.store()),
+            allow_using_generic_params: true,
+        },
+        token,
+    ))
+}
+
+#[salsa::tracked(returns(as_ref), cycle_result = mir_body_for_closure_cycle_result, lru = 0)]
 pub fn mir_body_for_closure_query<'db>(
     db: &'db dyn HirDatabase,
     closure: InternedClosureId<'db>,
@@ -4311,7 +4412,7 @@ pub fn mir_body_for_closure_query<'db>(
 }
 
 /// The body of an `async` block, as the `Future::poll` of the block's type.
-#[salsa::tracked(returns(as_ref), cycle_result = mir_body_for_coroutine_cycle_result)]
+#[salsa::tracked(returns(as_ref), cycle_result = mir_body_for_coroutine_cycle_result, lru = 0)]
 pub fn mir_body_for_coroutine_query<'db>(
     db: &'db dyn HirDatabase,
     coroutine: InternedCoroutineId<'db>,
@@ -4322,7 +4423,7 @@ pub fn mir_body_for_coroutine_query<'db>(
 /// The body of the `async` block of an `async` closure that is called by value though it could
 /// be called again: the future that makes owns what the closure captured, where the block
 /// itself borrows from the closure.
-#[salsa::tracked(returns(as_ref), cycle_result = mir_body_for_coroutine_cycle_result)]
+#[salsa::tracked(returns(as_ref), cycle_result = mir_body_for_coroutine_cycle_result, lru = 0)]
 pub fn mir_body_for_coroutine_by_move_query<'db>(
     db: &'db dyn HirDatabase,
     coroutine: InternedCoroutineId<'db>,
@@ -4365,27 +4466,141 @@ fn mir_body_for_coroutine_cycle_result<'db>(
     Err(MirLowerError::Loop)
 }
 
-/// Refuses a body with a macro call that failed to expand: what stands in for the expansion
-/// is a guess, where rustc stops.
+/// Refuses a body with a macro call that failed to expand, or whose expansion is not what
+/// rustc parses it as: what stands in for the expansion is a guess, where rustc stops.
 fn check_expansions<'db>(db: &'db dyn HirDatabase, owner: InferBodyId<'db>) -> Result<'db, ()> {
     if let Some(message) = failed_expansion(db, owner) {
-        not_supported!("macro call that failed to expand: {message}");
+        not_supported!("{message}");
     }
     Ok(())
 }
 
-/// Why the first macro call of the body that failed to expand did. A query of its own: the
-/// source map it reads changes with every edit above the body, and what it finds does not.
+/// What is wrong with the first macro call of the body that failed to expand or whose
+/// expansion is not what rustc parses it as. A query of its own: the source map it reads
+/// changes with every edit above the body, and what it finds does not.
 #[salsa::tracked(returns(ref))]
 fn failed_expansion<'db>(db: &'db dyn HirDatabase, owner: InferBodyId<'db>) -> Option<String> {
-    let source_map = match owner.expression_store_owner(db) {
-        ExpressionStoreOwnerId::Body(def) => &Body::unmoved_source_map(db, def).store,
-        owner => ExpressionStore::with_source_map(db, owner).1,
+    use syntax::AstNode;
+    let (source_map, own) = match owner.expression_store_owner(db) {
+        ExpressionStoreOwnerId::Body(def) => {
+            // The map of [`Body::relative`] is of the body's own tree, which an edit elsewhere
+            // in its file leaves as it is: a call in the file is found in that tree.
+            let own = match Body::relative(db, def) {
+                Some(_) => body_syntax(db, def).as_ref().map(|it| (it.file_id, it.root(db))),
+                None => None,
+            };
+            (&Body::unmoved_source_map(db, def).store, own)
+        }
+        owner => (ExpressionStore::with_source_map(db, owner).1, None),
     };
-    source_map.macro_calls().find_map(|(_, call)| {
-        let error = call.parse_macro_expansion(db).err.as_ref()?;
-        Some(error.render_to_string(db).message)
+    let root_of = |file: hir_expand::HirFileId| match &own {
+        Some((own_file, root)) if *own_file == file => root.clone(),
+        _ => file.parse_or_expand(db),
+    };
+    let site_of = |ptr: hir_expand::InFile<hir_def::expr_store::MacroCallPtr>| {
+        let site = ptr.value.syntax_node_ptr().try_to_node(&root_of(ptr.file_id))?;
+        syntax::ast::MacroCall::cast(site)
+    };
+    // The call each macro file of the body is the expansion of, for one last in it.
+    let calls: rustc_hash::FxHashMap<_, _> =
+        source_map.macro_calls().map(|(ptr, call)| (call, ptr)).collect();
+    let enclosing = |file: hir_expand::MacroCallId| {
+        let ptr = *calls.get(&file)?;
+        Some((site_of(ptr)?, ptr.file_id))
+    };
+    source_map.macro_calls().find_map(|(ptr, call)| {
+        let expansion = call.parse_macro_expansion(db);
+        if let Some(error) = &expansion.err {
+            let message = error.render_to_string(db).message;
+            return Some(format!("macro call that failed to expand: {message}"));
+        }
+        // A builtin's expansion is rust-analyzer's own stand-in (`builtin #asm (..)`), not
+        // what rustc parses: the rule is of what a macro is written to expand to.
+        let written = matches!(
+            call.loc(db).def.kind,
+            hir_expand::MacroDefKind::Declarative(..) | hir_expand::MacroDefKind::ProcMacro(..)
+        );
+        if !written {
+            return None;
+        }
+        // rustc parses a call in parentheses or brackets with no `;` after it as an
+        // expression, so its expansion is to be one expression (`parse_stmt_mac`); the
+        // parser here takes it as statements, which a call of a macro of several statements
+        // in the parentheses of another's expands to (#154).
+        let Some(call_site) = site_of(ptr) else {
+            return Some("macro call whose site is not in its tree".to_owned());
+        };
+        if !is_expression_call(&call_site, ptr.file_id, &enclosing) {
+            return None;
+        }
+        let statements = syntax::ast::MacroStmts::cast(expansion.value.0.syntax_node())?;
+        let count = statements.statements().count();
+        if count == 0 && statements.expr().is_some() {
+            return None;
+        }
+        // One expression and a `;`: rustc takes the `;` (`ParserAnyMacro::make`) and the
+        // expression is the call's value, as the body is lowered. Its lint
+        // `semicolon_in_expressions_from_macros` is denied by default for a macro of the
+        // crate itself, and not given for another crate's.
+        let one_with_semi = match statements.statements().next() {
+            Some(syntax::ast::Stmt::ExprStmt(only)) if count == 1 => {
+                only.semicolon_token().is_some() && only.expr().is_some()
+            }
+            _ => false,
+        };
+        if one_with_semi && statements.expr().is_none() {
+            if call.loc(db).def.krate != owner.krate(db) {
+                return None;
+            }
+            return Some(
+                "macro call in parentheses or brackets with no `;` after it, whose expansion \
+                 is one expression and a `;`, which rustc's `semicolon_in_expressions_from_macros` \
+                 refuses for a macro of the same crate"
+                    .to_owned(),
+            );
+        }
+        let what = match (count, statements.expr().is_some()) {
+            (0, false) => "nothing".to_owned(),
+            (n, false) => format!("{n} statements and no expression"),
+            (n, true) => format!("{n} statements before its expression"),
+        };
+        Some(format!(
+            "macro call in parentheses or brackets with no `;` after it, which rustc \
+             parses as one expression, whose expansion is {what}"
+        ))
     })
+}
+
+/// Whether rustc parses `call` as an expression (`parse_stmt_mac`): in statement position,
+/// in parentheses or brackets, with no `;` after it. One last in another call's expansion
+/// ends where the expansion does, and is what that call is: a statement where the call was
+/// one, as `m!(..);` or `m! { .. }`. `enclosing` finds the call a macro file expands.
+fn is_expression_call(
+    call: &syntax::ast::MacroCall,
+    file: hir_expand::HirFileId,
+    enclosing: &dyn Fn(
+        hir_expand::MacroCallId,
+    ) -> Option<(syntax::ast::MacroCall, hir_expand::HirFileId)>,
+) -> bool {
+    use syntax::{AstNode, SyntaxKind::*, ast};
+    let Some(parent) = call.syntax().parent().filter(|it| it.kind() == MACRO_EXPR) else {
+        return false;
+    };
+    let Some(grandparent) = parent.parent() else { return false };
+    if call.token_tree().is_some_and(|it| it.l_curly_token().is_some()) {
+        return false;
+    }
+    match grandparent.kind() {
+        EXPR_STMT => {
+            ast::ExprStmt::cast(grandparent).is_none_or(|it| it.semicolon_token().is_none())
+        }
+        STMT_LIST => true,
+        MACRO_STMTS => match file.macro_file().and_then(enclosing) {
+            Some((outer, file)) => is_expression_call(&outer, file, enclosing),
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 /// How the body of a closure gets at what the closure captured.
@@ -4699,7 +4914,16 @@ fn captured_place<'a>(
     })
 }
 
-#[salsa::tracked(returns(as_ref), cycle_result = mir_body_cycle_result)]
+/// How many of the lowered bodies salsa keeps the value of once a revision is over; 0 keeps
+/// every one.
+pub fn set_mir_capacity(db: &mut dyn HirDatabase, capacity: usize) {
+    mir_body_query::set_lru_capacity(db, capacity);
+    mir_body_for_closure_query::set_lru_capacity(db, capacity);
+    mir_body_for_coroutine_query::set_lru_capacity(db, capacity);
+    mir_body_for_coroutine_by_move_query::set_lru_capacity(db, capacity);
+}
+
+#[salsa::tracked(returns(as_ref), cycle_result = mir_body_cycle_result, lru = 0)]
 pub fn mir_body_query<'db>(
     db: &'db dyn HirDatabase,
     def: InferBodyId<'db>,

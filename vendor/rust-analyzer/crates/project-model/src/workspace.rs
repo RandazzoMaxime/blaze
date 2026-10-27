@@ -247,27 +247,38 @@ impl ProjectWorkspace {
         };
 
         // Resolve the Cargo.toml to the workspace root as we base the `target` dir off of it.
+        // blaze's own reading is never left to cargo when it fails.
+        let own_root =
+            match &config.own_metadata {
+                Some(own) => Some((own.root)(cargo_toml).with_context(|| {
+                    format!("blaze could not find the workspace of {cargo_toml}")
+                })?),
+                None => None,
+            };
         let mut cmd = sysroot.tool(Tool::Cargo, workspace_dir, extra_env);
         cmd.args(["locate-project", "--workspace", "--manifest-path", cargo_toml.as_str()]);
-        let cargo_toml = &match utf8_stdout(&mut cmd) {
-            Ok(output) => {
-                #[derive(serde_derive::Deserialize)]
-                struct Root {
-                    root: Utf8PathBuf,
-                }
-                match serde_json::from_str::<Root>(&output) {
-                    Ok(object) => ManifestPath::try_from(AbsPathBuf::assert(object.root))
-                        .expect("manifest path should be absolute"),
-                    Err(e) => {
-                        tracing::error!(%e, %cargo_toml, "failed fetching cargo workspace root");
-                        cargo_toml.clone()
+        let cargo_toml = &match own_root {
+            Some(root) => root,
+            None => match utf8_stdout(&mut cmd) {
+                Ok(output) => {
+                    #[derive(serde_derive::Deserialize)]
+                    struct Root {
+                        root: Utf8PathBuf,
+                    }
+                    match serde_json::from_str::<Root>(&output) {
+                        Ok(object) => ManifestPath::try_from(AbsPathBuf::assert(object.root))
+                            .expect("manifest path should be absolute"),
+                        Err(e) => {
+                            tracing::error!(%e, %cargo_toml, "failed fetching cargo workspace root");
+                            cargo_toml.clone()
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::error!(%e, %cargo_toml, "failed fetching cargo workspace root");
-                cargo_toml.clone()
-            }
+                Err(e) => {
+                    tracing::error!(%e, %cargo_toml, "failed fetching cargo workspace root");
+                    cargo_toml.clone()
+                }
+            },
         };
         let workspace_dir = cargo_toml.parent();
 
@@ -288,22 +299,40 @@ impl ProjectWorkspace {
             .ok()
             .flatten();
 
-        let fetch_metadata = FetchMetadata::new(
-            cargo_toml,
-            workspace_dir,
-            &CargoMetadataConfig {
-                features: features.clone(),
-                targets: targets.clone(),
-                extra_args: extra_args.clone(),
-                metadata_extra_args: metadata_extra_args.clone(),
-                config_path: config_path.clone(),
-                extra_env: extra_env.clone(),
-                toolchain_version: toolchain.clone(),
-                kind: "workspace",
-            },
-            &sysroot,
-            *no_deps,
-        );
+        // blaze's own `cargo metadata` needs the target's `cfg` first. One blaze can't make
+        // is an error: cargo is not asked instead.
+        let mut own = match &config.own_metadata {
+            Some(own) => {
+                let target = targets.first().map(Deref::deref);
+                let cfg = rustc_cfg::get(toolchain_config, target, extra_env);
+                let metadata =
+                    (own.metadata)(cargo_toml, target, &cfg, extra_env).with_context(|| {
+                        format!("blaze could not resolve the workspace {cargo_toml}")
+                    })?;
+                Some((cfg, Some(metadata)))
+            }
+            None => None,
+        };
+        let own_metadata = own.as_mut().and_then(|it| it.1.take());
+        let fetch_metadata = own_metadata.is_none().then(|| {
+            FetchMetadata::new(
+                cargo_toml,
+                workspace_dir,
+                &CargoMetadataConfig {
+                    features: features.clone(),
+                    targets: targets.clone(),
+                    extra_args: extra_args.clone(),
+                    metadata_extra_args: metadata_extra_args.clone(),
+                    config_path: config_path.clone(),
+                    extra_env: extra_env.clone(),
+                    toolchain_version: toolchain.clone(),
+                    kind: "workspace",
+                    own_metadata: None,
+                },
+                &sysroot,
+                *no_deps,
+            )
+        });
 
         // We spawn a bunch of processes to query various information about the workspace's
         // toolchain and sysroot
@@ -312,8 +341,13 @@ impl ProjectWorkspace {
         let join = thread::scope(|s| {
             let rustc_cfg = Builder::new()
                 .name("ProjectWorkspace::rustc_cfg".to_owned())
-                .spawn_scoped(s, || {
-                    rustc_cfg::get(toolchain_config, targets.first().map(Deref::deref), extra_env)
+                .spawn_scoped(s, || match &own {
+                    Some((cfg, _)) => cfg.clone(),
+                    None => rustc_cfg::get(
+                        toolchain_config,
+                        targets.first().map(Deref::deref),
+                        extra_env,
+                    ),
                 })
                 .expect("failed to spawn thread");
             let target_data = Builder::new()
@@ -360,7 +394,8 @@ impl ProjectWorkspace {
                             config_path: config_path.clone(),
                             extra_env: extra_env.clone(),
                             toolchain_version: toolchain.clone(),
-                            kind: "rustc-dev"
+                            kind: "rustc-dev",
+                            own_metadata: None,
                         },
                         &sysroot,
                         *no_deps,
@@ -398,7 +433,10 @@ impl ProjectWorkspace {
 
             let cargo_metadata = Builder::new()
                 .name("ProjectWorkspace::cargo_metadata".to_owned())
-                .spawn_scoped(s, || fetch_metadata.exec(false, progress))
+                .spawn_scoped(s, || match fetch_metadata {
+                    Some(fetch_metadata) => fetch_metadata.exec(false, progress),
+                    None => Ok((own_metadata.expect("blaze's own metadata"), None)),
+                })
                 .expect("failed to spawn thread");
             let loaded_sysroot = Builder::new()
                 .name("ProjectWorkspace::loaded_sysroot".to_owned())
@@ -453,10 +491,10 @@ impl ProjectWorkspace {
         })?;
         let mut cargo = CargoWorkspace::new(meta, cargo_toml.clone(), cargo_env, false);
         cargo.set_executables(config.executables.clone());
-        if let Some(loaded_sysroot) = loaded_sysroot {
+        if let Ok(Some(loaded_sysroot)) = &loaded_sysroot {
             tracing::info!(src_root = ?sysroot.rust_lib_src_root(), root = %loaded_sysroot, "Loaded sysroot");
-            sysroot.set_workspace(loaded_sysroot);
         }
+        sysroot.set_loaded(loaded_sysroot);
 
         if !cargo.requires_rustc_private()
             && let Err(e) = &mut rustc
@@ -545,9 +583,7 @@ impl ProjectWorkspace {
             Err(e) => std::panic::resume_unwind(e),
         };
 
-        if let Some(loaded_sysroot) = loaded_sysroot {
-            sysroot.set_workspace(loaded_sysroot);
-        }
+        sysroot.set_loaded(loaded_sysroot);
 
         ProjectWorkspace {
             kind: ProjectWorkspaceKind::Json(project_json),
@@ -596,9 +632,7 @@ impl ProjectWorkspace {
             config.no_deps,
             &|_| (),
         );
-        if let Some(loaded_sysroot) = loaded_sysroot {
-            sysroot.set_workspace(loaded_sysroot);
-        }
+        sysroot.set_loaded(loaded_sysroot);
 
         let fetch_metadata = FetchMetadata::new(
             detached_file,
@@ -612,6 +646,7 @@ impl ProjectWorkspace {
                 extra_env: config.extra_env.clone(),
                 toolchain_version: toolchain.clone(),
                 kind: "detached-file",
+                own_metadata: None,
             },
             &sysroot,
             config.no_deps,
@@ -657,6 +692,21 @@ impl ProjectWorkspace {
         match &self.kind {
             ProjectWorkspaceKind::DetachedFile { cargo: Some((cargo, _, None)), .. }
             | ProjectWorkspaceKind::Cargo { cargo, error: None, .. } => {
+                if let Some(own) = &config.own_build_scripts {
+                    let asked = crate::OwnBuildAsked {
+                        sysroot: &self.sysroot,
+                        rustc_cfg: &self.rustc_cfg,
+                        config,
+                    };
+                    return (own.0)(cargo, &asked)
+                        .and_then(|outputs| WorkspaceBuildScripts::of_own(cargo, outputs))
+                        .with_context(|| {
+                            format!(
+                                "Failed to build the build scripts of {}",
+                                cargo.workspace_root()
+                            )
+                        });
+                }
                 WorkspaceBuildScripts::run_for_workspace(
                     config,
                     cargo,
@@ -1458,11 +1508,24 @@ fn cargo_to_crate_graph(
         for dep in &cargo[pkg].dependencies {
             let Some(&to) = pkg_to_lib_crate.get(&dep.pkg) else { continue };
             let Some(targets) = pkg_crates.get(&pkg) else { continue };
+            // An optional dependency no feature turns on is not built.
+            if dep.optional.as_ref().is_some_and(|key| !cargo[pkg].activates(key)) {
+                continue;
+            }
 
             let name = CrateName::new(&dep.name).unwrap();
             for &(from, kind) in targets {
                 // Build scripts may only depend on build dependencies.
                 if (dep.kind == DepKind::Build) != (kind == TargetKind::BuildScript) {
+                    continue;
+                }
+                // The standard library as built has no `cfg(test)`, and so no use for what
+                // its unit tests depend on: std's `rand`, which rustc's build of it has not.
+                if dep.kind == DepKind::Dev
+                    && sysroot_as_built()
+                    && cargo.is_sysroot()
+                    && matches!(kind, TargetKind::Lib { .. })
+                {
                     continue;
                 }
                 // Those are its unit tests' alone.
@@ -2199,5 +2262,6 @@ fn sysroot_metadata_config(
         extra_env: config.extra_env.clone(),
         toolchain_version,
         kind: "sysroot",
+        own_metadata: config.own_metadata.clone(),
     }
 }
