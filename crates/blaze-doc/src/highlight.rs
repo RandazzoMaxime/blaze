@@ -11,9 +11,8 @@ pub(crate) fn rust(code: &str) -> String {
     let mut out = String::with_capacity(code.len() * 2);
     let mut attr_depth: Option<i32> = None;
     let count = lexed.len();
-    let next_significant = |from: usize| {
-        (from..count).map(|at| lexed.kind(at)).find(|kind| !kind.is_trivia())
-    };
+    let next_significant =
+        |from: usize| (from..count).map(|at| lexed.kind(at)).find(|kind| !kind.is_trivia());
     for at in 0..count {
         let kind = lexed.kind(at);
         let text = lexed.text(at);
@@ -44,8 +43,12 @@ pub(crate) fn rust(code: &str) -> String {
             continue;
         }
         let class = match kind {
-            SyntaxKind::COMMENT if text.starts_with("///") || text.starts_with("//!") => Some("doccomment"),
-            SyntaxKind::COMMENT if text.starts_with("/**") || text.starts_with("/*!") => Some("doccomment"),
+            SyntaxKind::COMMENT if text.starts_with("///") || text.starts_with("//!") => {
+                Some("doccomment")
+            }
+            SyntaxKind::COMMENT if text.starts_with("/**") || text.starts_with("/*!") => {
+                Some("doccomment")
+            }
             SyntaxKind::COMMENT => Some("comment"),
             SyntaxKind::STRING
             | SyntaxKind::BYTE_STRING

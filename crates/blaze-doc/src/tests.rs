@@ -315,7 +315,11 @@ fn reexports_inline_as_rustdoc_does() {
     assert_eq!(item(fixture, "fixture::Helper").kind, Kind::Struct, "a foreign item is inlined");
     assert_eq!(item(fixture, "fixture::glob_fn").kind, Kind::Function, "a foreign glob is inlined");
     assert_eq!(item(fixture, "fixture::DeriveIdentity").kind, Kind::ProcDerive);
-    assert_eq!(item(fixture, "fixture::Shown").kind, Kind::Struct, "an unreachable item is inlined");
+    assert_eq!(
+        item(fixture, "fixture::Shown").kind,
+        Kind::Struct,
+        "an unreachable item is inlined"
+    );
     assert!(fixture.find("Outside").is_none(), "doc(no_inline) stays a line");
     let root = fixture.root();
     let lines: Vec<String> = root.reexports.iter().map(|it| it.decl.plain()).collect();
@@ -388,14 +392,28 @@ fn members_and_impls() {
     let thing = item(fixture, "fixture::Thing");
     assert_eq!(thing.fields.iter().map(|it| it.name.as_str()).collect::<Vec<_>>(), ["value"]);
     assert!(thing.hidden_fields);
-    let inherent: Vec<&str> =
-        thing.impls.inherent.iter().flat_map(|it| it.items.iter().map(|it| it.name.as_str())).collect();
+    let inherent: Vec<&str> = thing
+        .impls
+        .inherent
+        .iter()
+        .flat_map(|it| it.items.iter().map(|it| it.name.as_str()))
+        .collect();
     assert_eq!(inherent, ["new"], "a pub(crate) method is not shown");
     let traits: Vec<String> = thing.impls.traits.iter().map(|it| it.header.plain()).collect();
     assert!(traits.iter().any(|it| it.contains("Clone for Thing<T, N>")), "{traits:?}");
     let auto: Vec<String> = thing.impls.auto.iter().map(|it| it.header.plain()).collect();
-    assert!(auto.contains(&"impl<T, const N: usize> Send for Thing<T, N>\nwhere\n    T: Send,".to_owned()), "{auto:?}");
-    assert!(auto.contains(&"impl<T, const N: usize> Sync for Thing<T, N>\nwhere\n    T: Sync,".to_owned()), "{auto:?}");
+    assert!(
+        auto.contains(
+            &"impl<T, const N: usize> Send for Thing<T, N>\nwhere\n    T: Send,".to_owned()
+        ),
+        "{auto:?}"
+    );
+    assert!(
+        auto.contains(
+            &"impl<T, const N: usize> Sync for Thing<T, N>\nwhere\n    T: Sync,".to_owned()
+        ),
+        "{auto:?}"
+    );
     let blanket: Vec<String> = thing.impls.blanket.iter().map(|it| it.header.plain()).collect();
     assert!(blanket.contains(&"impl<T> From<T> for T".to_owned()), "{blanket:?}");
     assert!(blanket.iter().any(|it| it.contains("Into<U> for T")), "{blanket:?}");
@@ -407,13 +425,21 @@ fn members_and_impls() {
     let wraps = item(fixture, "fixture::Wraps");
     let auto: Vec<String> = wraps.impls.auto.iter().map(|it| it.header.plain()).collect();
     assert!(auto.contains(&"impl<T> !Send for Wraps<T>".to_owned()), "{auto:?}");
-    assert!(auto.contains(&"impl<T> Sync for Wraps<T>\nwhere\n    T: Sync,".to_owned()), "{auto:?}");
+    assert!(
+        auto.contains(&"impl<T> Sync for Wraps<T>\nwhere\n    T: Sync,".to_owned()),
+        "{auto:?}"
+    );
 
     let kind = item(fixture, "fixture::Kind");
     let variants: Vec<&str> = kind.variants.iter().map(|it| it.name.as_str()).collect();
     assert_eq!(variants, ["A", "B", "C"]);
     assert_eq!(kind.variants[2].fields[0].name, "x");
-    let shape_impl = kind.impls.traits.iter().find(|it| it.trait_name.as_deref() == Some("Shape")).expect("impl Shape");
+    let shape_impl = kind
+        .impls
+        .traits
+        .iter()
+        .find(|it| it.trait_name.as_deref() == Some("Shape"))
+        .expect("impl Shape");
     let names: Vec<&str> = shape_impl.items.iter().map(|it| it.name.as_str()).collect();
     for name in ["Out", "SIDES", "area", "name"] {
         assert!(names.contains(&name), "{name} in {names:?}");
@@ -421,7 +447,8 @@ fn members_and_impls() {
     assert!(shape_impl.items.iter().find(|it| it.name == "name").unwrap().provided);
 
     let shape = item(fixture, "fixture::Shape");
-    let implementors: Vec<String> = shape.impls.implementors.iter().map(|it| it.header.plain()).collect();
+    let implementors: Vec<String> =
+        shape.impls.implementors.iter().map(|it| it.header.plain()).collect();
     assert_eq!(implementors, ["impl Shape for Kind"]);
     let members: Vec<&str> = shape.trait_items.iter().map(|it| it.name.as_str()).collect();
     assert_eq!(members, ["Out", "SIDES", "area", "name"]);
@@ -435,7 +462,11 @@ fn provided_methods_that_cannot_apply_are_left_out() {
     let (_db, model) = load();
     let fixture = krate(&model, "fixture");
     let members = |path: &str| -> Vec<String> {
-        let each = item(fixture, path).impls.traits.iter().find(|it| it.trait_name.as_deref() == Some("Each"));
+        let each = item(fixture, path)
+            .impls
+            .traits
+            .iter()
+            .find(|it| it.trait_name.as_deref() == Some("Each"));
         each.expect("impl Each").items.iter().map(|it| it.name.clone()).collect()
     };
     assert_eq!(members("fixture::Squares"), ["Item"], "a square of this crate is not Copy");
@@ -475,7 +506,10 @@ fn intra_doc_links_resolve() {
 fn unresolved_links_warn() {
     let (_db, model) = load();
     let messages: Vec<&str> = model.warnings.iter().map(|it| it.message.as_str()).collect();
-    assert!(messages.iter().any(|it| it.contains("unresolved link to `missing_item`")), "{messages:?}");
+    assert!(
+        messages.iter().any(|it| it.contains("unresolved link to `missing_item`")),
+        "{messages:?}"
+    );
     assert!(messages.iter().any(|it| it.contains("unresolved link to `Nope`")), "{messages:?}");
     assert!(model.warnings.iter().all(|it| it.krate == "fixture"), "dependencies do not warn");
 }
@@ -521,7 +555,6 @@ fn writes_pages_sources_and_search() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-
 /// The text of an HTML page, its tags dropped.
 fn text(html: &str) -> String {
     let mut out = String::new();
@@ -537,8 +570,6 @@ fn text(html: &str) -> String {
     out
 }
 
-
-
 #[test]
 fn impl_ids_follow_rustdoc() {
     let id = |text: &str| {
@@ -546,13 +577,25 @@ fn impl_ids_follow_rustdoc() {
         code.text(text);
         crate::collect::impl_anchor(&code)
     };
-    assert_eq!(id("impl<'a, 'h, A: Debug> Debug for FindIter<'a, 'h, A>"), "impl-Debug-for-FindIter%3C'a,+'h,+A%3E");
+    assert_eq!(
+        id("impl<'a, 'h, A: Debug> Debug for FindIter<'a, 'h, A>"),
+        "impl-Debug-for-FindIter%3C'a,+'h,+A%3E"
+    );
     assert_eq!(id("impl<T> From<T> for T"), "impl-From%3CT%3E-for-T");
     assert_eq!(id("impl<T> !Send for Wraps<T>"), "impl-Send-for-Wraps%3CT%3E");
     assert_eq!(id("impl<F: Fn() -> u8> Run<F>"), "impl-Run%3CF%3E");
-    assert_eq!(id("impl<'de: 'a, 'a> Deserialize<'de> for &'a [u8]"), "impl-Deserialize%3C'de%3E-for-%26%5Bu8%5D");
-    assert_eq!(id("impl From<Error> for Box<dyn Error + Send>"), "impl-From%3CError%3E-for-Box%3Cdyn+Error+%2B+Send%3E");
-    assert_eq!(id("impl<'a> Iterator for Iter<'a>\nwhere\n    'a: 'static,"), "impl-Iterator-for-Iter%3C'a%3E");
+    assert_eq!(
+        id("impl<'de: 'a, 'a> Deserialize<'de> for &'a [u8]"),
+        "impl-Deserialize%3C'de%3E-for-%26%5Bu8%5D"
+    );
+    assert_eq!(
+        id("impl From<Error> for Box<dyn Error + Send>"),
+        "impl-From%3CError%3E-for-Box%3Cdyn+Error+%2B+Send%3E"
+    );
+    assert_eq!(
+        id("impl<'a> Iterator for Iter<'a>\nwhere\n    'a: 'static,"),
+        "impl-Iterator-for-Iter%3C'a%3E"
+    );
 }
 
 #[test]

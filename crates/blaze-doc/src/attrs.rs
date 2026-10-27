@@ -70,7 +70,9 @@ pub(crate) fn doc_cfg(node: &impl HasAttrs) -> Option<String> {
         let Some(tt) = meta.token_tree() else { continue };
         let mut tokens = tt.syntax().children_with_tokens().peekable();
         while let Some(token) = tokens.next() {
-            if token.as_token().is_some_and(|it| it.kind() == SyntaxKind::IDENT && it.text() == "cfg")
+            if token
+                .as_token()
+                .is_some_and(|it| it.kind() == SyntaxKind::IDENT && it.text() == "cfg")
                 && let Some(inner) = tokens.peek().and_then(|it| it.as_node()).cloned()
                 && let Some(inner) = ast::TokenTree::cast(inner)
             {

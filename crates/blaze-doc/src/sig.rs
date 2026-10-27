@@ -12,7 +12,10 @@ use hir_def::{
         path::{GenericArg, GenericArgs, GenericArgsParentheses, Path},
     },
     hir::{
-        generics::{GenericParams, LocalTypeOrConstParamId, TypeOrConstParamData, TypeParamProvenance, WherePredicate},
+        generics::{
+            GenericParams, LocalTypeOrConstParamId, TypeOrConstParamData, TypeParamProvenance,
+            WherePredicate,
+        },
         type_ref::{
             ConstRef, LifetimeRef, LifetimeRefId, Mutability, TraitBoundModifier, TypeBound,
             TypeRef, TypeRefId, UseArgRef,
@@ -856,8 +859,7 @@ fn self_param(sig: &Sig<'_>, out: &mut Code, ty: TypeRefId, store: &ExpressionSt
         TypeRef::Path(path) if path.is_self_type() => {
             out.kw("self");
         }
-        TypeRef::Reference(reference)
-            if matches!(&store[reference.ty], TypeRef::Path(p) if p.is_self_type()) =>
+        TypeRef::Reference(reference) if matches!(&store[reference.ty], TypeRef::Path(p) if p.is_self_type()) =>
         {
             out.text("&");
             if let Some(lifetime) = reference.lifetime {
@@ -919,7 +921,13 @@ fn fields_decl(
     indent: &str,
 ) -> Fields {
     let fields = VariantFields::of(db, variant);
-    let sig = Sig::new(db, places, &fields.store, variant.resolver(db), ExpressionStoreOwnerId::VariantFields(variant));
+    let sig = Sig::new(
+        db,
+        places,
+        &fields.store,
+        variant.resolver(db),
+        ExpressionStoreOwnerId::VariantFields(variant),
+    );
     let hir_variant: hir::Variant = variant.into();
     let hir_fields = hir_variant.fields(db);
     let mut out = Code::default();
@@ -990,7 +998,13 @@ fn fields_decl(
 pub(crate) fn field_type(db: &RootDatabase, places: Linking<'_>, field: hir::Field) -> Code {
     let variant: VariantId = field.parent_def(db).into();
     let fields = VariantFields::of(db, variant);
-    let sig = Sig::new(db, places, &fields.store, variant.resolver(db), ExpressionStoreOwnerId::VariantFields(variant));
+    let sig = Sig::new(
+        db,
+        places,
+        &fields.store,
+        variant.resolver(db),
+        ExpressionStoreOwnerId::VariantFields(variant),
+    );
     let id: hir_def::FieldId = field.into();
     let mut out = Code::default();
     sig.ty(&mut out, fields.fields()[id.local_id].type_ref);
@@ -1026,7 +1040,8 @@ pub(crate) fn struct_decl(
     visibility(db, &mut out, it.visibility(db), module);
     out.kw("struct").text(" ");
     let sig = sig_of(db, places, &data.store, id.into());
-    let where_clause = head(&sig, &mut out, alias, data.name.as_str(), Kind::Struct, &data.generic_params);
+    let where_clause =
+        head(&sig, &mut out, alias, data.name.as_str(), Kind::Struct, &data.generic_params);
     let has_where = !where_clause.0.is_empty();
     let places = alias.map_or(places, |it| places.substituting(&it.subst));
     let fields = fields_decl(db, places, VariantId::StructId(id), module, show_private, true, "");
@@ -1078,7 +1093,8 @@ pub(crate) fn union_decl(
     visibility(db, &mut out, it.visibility(db), module);
     out.kw("union").text(" ");
     let sig = sig_of(db, places, &data.store, id.into());
-    let where_clause = head(&sig, &mut out, alias, data.name.as_str(), Kind::Union, &data.generic_params);
+    let where_clause =
+        head(&sig, &mut out, alias, data.name.as_str(), Kind::Union, &data.generic_params);
     let has_where = !where_clause.0.is_empty();
     out.extend(where_clause);
     let places = alias.map_or(places, |it| places.substituting(&it.subst));
@@ -1093,7 +1109,12 @@ pub(crate) fn union_decl(
 }
 
 /// An enum's declaration, or with `alias` the one its alias's page shows.
-pub(crate) fn enum_decl(db: &RootDatabase, places: Linking<'_>, it: hir::Enum, alias: Option<&Aliased>) -> Code {
+pub(crate) fn enum_decl(
+    db: &RootDatabase,
+    places: Linking<'_>,
+    it: hir::Enum,
+    alias: Option<&Aliased>,
+) -> Code {
     use hir::HasAttrs;
     let id: hir_def::EnumId = it.into();
     let data = EnumSignature::of(db, id);
@@ -1103,7 +1124,8 @@ pub(crate) fn enum_decl(db: &RootDatabase, places: Linking<'_>, it: hir::Enum, a
     visibility(db, &mut out, it.visibility(db), module);
     out.kw("enum").text(" ");
     let sig = sig_of(db, places, &data.store, id.into());
-    let where_clause = head(&sig, &mut out, alias, data.name.as_str(), Kind::Enum, &data.generic_params);
+    let where_clause =
+        head(&sig, &mut out, alias, data.name.as_str(), Kind::Enum, &data.generic_params);
     let has_where = !where_clause.0.is_empty();
     out.extend(where_clause);
     let places = alias.map_or(places, |it| places.substituting(&it.subst));
@@ -1120,7 +1142,8 @@ pub(crate) fn enum_decl(db: &RootDatabase, places: Linking<'_>, it: hir::Enum, a
         out.text("    ");
         out.push(Piece::Name(v.name(db).as_str().to_owned(), Kind::Variant));
         let vid: hir_def::EnumVariantId = v.into();
-        let fields = fields_decl(db, places, VariantId::EnumVariantId(vid), module, true, false, "    ");
+        let fields =
+            fields_decl(db, places, VariantId::EnumVariantId(vid), module, true, false, "    ");
         out.extend(fields.decl);
         out.text(",\n");
     }
@@ -1140,7 +1163,12 @@ fn attributes(db: &RootDatabase, out: &mut Code, adt: AdtId) {
     }
 }
 
-pub(crate) fn trait_header(db: &RootDatabase, places: Linking<'_>, it: hir::Trait, out: &mut Code) -> Code {
+pub(crate) fn trait_header(
+    db: &RootDatabase,
+    places: Linking<'_>,
+    it: hir::Trait,
+    out: &mut Code,
+) -> Code {
     let id: TraitId = it.into();
     let data = TraitSignature::of(db, id);
     visibility(db, out, it.visibility(db), it.module(db));
@@ -1225,12 +1253,18 @@ pub(crate) struct Aliased {
     where_clause: Code,
 }
 
-pub(crate) fn aliased(db: &RootDatabase, places: Linking<'_>, it: hir::TypeAlias) -> Option<Aliased> {
+pub(crate) fn aliased(
+    db: &RootDatabase,
+    places: Linking<'_>,
+    it: hir::TypeAlias,
+) -> Option<Aliased> {
     let id: TypeAliasId = it.into();
     let data = TypeAliasSignature::of(db, id);
     let TypeRef::Path(path) = &data.store[data.ty?] else { return None };
     let sig = sig_of(db, places, &data.store, id.into());
-    let TypeNs::AdtId(adt_id) = sig.resolver.resolve_path_in_type_ns_fully(db, path)? else { return None };
+    let TypeNs::AdtId(adt_id) = sig.resolver.resolve_path_in_type_ns_fully(db, path)? else {
+        return None;
+    };
     let args: Vec<TypeRefId> = path
         .segments()
         .last()
@@ -1249,9 +1283,13 @@ pub(crate) fn aliased(db: &RootDatabase, places: Linking<'_>, it: hir::TypeAlias
     let (params, store) = GenericParams::with_store(db, adt_def);
     let adt_sig = sig_of(db, places, store, adt_def);
     let mut subst = vec![];
-    let type_params = params.iter_type_or_consts().filter_map(|(local, data)| Some((local, data.type_param()?)));
+    let type_params =
+        params.iter_type_or_consts().filter_map(|(local, data)| Some((local, data.type_param()?)));
     for (at, (local, param)) in type_params.enumerate() {
-        let param_id = hir_def::TypeParamId::from_unchecked(hir_def::TypeOrConstParamId { parent: adt_def, local_id: local });
+        let param_id = hir_def::TypeParamId::from_unchecked(hir_def::TypeOrConstParamId {
+            parent: adt_def,
+            local_id: local,
+        });
         let mut code = Code::default();
         match (args.get(at), param.default) {
             (Some(arg), _) => sig.ty(&mut code, *arg),
@@ -1264,12 +1302,25 @@ pub(crate) fn aliased(db: &RootDatabase, places: Linking<'_>, it: hir::TypeAlias
     sig.generics(&mut generics, &data.generic_params);
     let mut where_clause = Code::default();
     sig.where_clause(&mut where_clause, &data.generic_params);
-    Some(Aliased { adt: adt_id.into(), subst, name: data.name.as_str().to_owned(), generics, where_clause })
+    Some(Aliased {
+        adt: adt_id.into(),
+        subst,
+        name: data.name.as_str().to_owned(),
+        generics,
+        where_clause,
+    })
 }
 
 /// The name, generics and `where` clause a struct, union or enum's declaration starts with:
 /// its own, or an alias's.
-fn head(sig: &Sig<'_>, out: &mut Code, alias: Option<&Aliased>, name: &str, kind: Kind, params: &GenericParams) -> Code {
+fn head(
+    sig: &Sig<'_>,
+    out: &mut Code,
+    alias: Option<&Aliased>,
+    name: &str,
+    kind: Kind,
+    params: &GenericParams,
+) -> Code {
     let mut where_clause = Code::default();
     match alias {
         Some(alias) => {
@@ -1287,7 +1338,11 @@ fn head(sig: &Sig<'_>, out: &mut Code, alias: Option<&Aliased>, name: &str, kind
 }
 
 /// The type an alias stands for: `[u8]` of `type Target = [u8];`.
-pub(crate) fn alias_type(db: &RootDatabase, places: Linking<'_>, it: hir::TypeAlias) -> Option<Code> {
+pub(crate) fn alias_type(
+    db: &RootDatabase,
+    places: Linking<'_>,
+    it: hir::TypeAlias,
+) -> Option<Code> {
     let id: TypeAliasId = it.into();
     let data = TypeAliasSignature::of(db, id);
     let mut out = Code::default();

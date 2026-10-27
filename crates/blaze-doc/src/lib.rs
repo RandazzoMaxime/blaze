@@ -72,7 +72,12 @@ pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> 
             stack.push(dep);
         }
     }
-    out.extend(deps.into_iter().map(|(name, krate)| Documented { krate, name, private: false, warn: false }));
+    out.extend(deps.into_iter().map(|(name, krate)| Documented {
+        krate,
+        name,
+        private: false,
+        warn: false,
+    }));
     out
 }
 

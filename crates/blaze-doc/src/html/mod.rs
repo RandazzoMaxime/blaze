@@ -131,7 +131,10 @@ pub fn write(model: &Model, out: &Path) -> io::Result<Written> {
             dir.pop();
             let writer = Writer::new(model, &names, &statics, k, dir);
             let html = writer.source_page(f);
-            std::fs::write(out.join("src").join(&krate.name).join(format!("{}.html", file.path)), html)?;
+            std::fs::write(
+                out.join("src").join(&krate.name).join(format!("{}.html", file.path)),
+                html,
+            )?;
             Ok(1)
         })
         .collect::<io::Result<Vec<usize>>>()?
@@ -139,7 +142,10 @@ pub fn write(model: &Model, out: &Path) -> io::Result<Written> {
     model.crates.par_iter().enumerate().try_for_each(|(k, krate)| -> io::Result<()> {
         let writer = Writer::new(model, &names, &statics, k, vec![krate.name.clone()]);
         std::fs::write(out.join(&krate.name).join("all.html"), writer.all_items())?;
-        std::fs::write(out.join("search-index").join(format!("{}.js", krate.name)), search_index(krate))?;
+        std::fs::write(
+            out.join("search-index").join(format!("{}.js", krate.name)),
+            search_index(krate),
+        )?;
         Ok(())
     })?;
     write_crates_list(model, out)?;
@@ -166,7 +172,10 @@ fn write_crates_list(model: &Model, out: &Path) -> io::Result<()> {
         }
     }
     names.sort();
-    std::fs::write(path, format!("window.BLAZE_CRATES = {};\n", serde_json::to_string(&names).unwrap()))
+    std::fs::write(
+        path,
+        format!("window.BLAZE_CRATES = {};\n", serde_json::to_string(&names).unwrap()),
+    )
 }
 
 fn module_dir(krate: &CrateDoc, module: &Item) -> String {
@@ -290,12 +299,35 @@ impl<'a> Writer<'a> {
         let root = "../".repeat(dir.len());
         let mut ids = Ids::default();
         for reserved in [
-            "main-content", "search", "settings", "help", "sidebar", "implementations",
-            "trait-implementations", "synthetic-implementations", "blanket-implementations",
-            "fields", "variants", "aliased-type", "implementors", "foreign-impls", "required-methods",
+            "main-content",
+            "search",
+            "settings",
+            "help",
+            "sidebar",
+            "implementations",
+            "trait-implementations",
+            "synthetic-implementations",
+            "blanket-implementations",
+            "fields",
+            "variants",
+            "aliased-type",
+            "implementors",
+            "foreign-impls",
+            "required-methods",
             "provided-methods",
-            "reexports", "modules", "structs", "enums", "traits", "functions", "macros",
-            "constants", "statics", "types", "unions", "derives", "attributes",
+            "reexports",
+            "modules",
+            "structs",
+            "enums",
+            "traits",
+            "functions",
+            "macros",
+            "constants",
+            "statics",
+            "types",
+            "unions",
+            "derives",
+            "attributes",
         ] {
             ids.unique(reserved);
         }
@@ -327,10 +359,17 @@ impl<'a> Writer<'a> {
             Target::Url(url) => url.clone(),
             Target::Item(item) => {
                 // A primitive is `std`'s but not of its paths: `primitive u8`, `method u8::max`.
-                let path = if item.kind == Kind::Primitive { item.name.clone() } else { item.display_path() };
+                let path = if item.kind == Kind::Primitive {
+                    item.name.clone()
+                } else {
+                    item.display_path()
+                };
                 if let (Some(descr), Some(anchor)) = (item.descr, &item.anchor) {
                     // `method.len` names `len`, `variant.A.field.x` names `A::x`.
-                    let member = anchor.split_once('.').map_or(anchor.as_str(), |(_, it)| it).replace(".field.", "::");
+                    let member = anchor
+                        .split_once('.')
+                        .map_or(anchor.as_str(), |(_, it)| it)
+                        .replace(".field.", "::");
                     return format!("{descr} {path}::{member}");
                 }
                 let kind = match item.kind {
@@ -363,7 +402,10 @@ impl<'a> Writer<'a> {
         let mut out = String::new();
         for piece in &code.0 {
             match piece {
-                Piece::Text(text) | Piece::Keyword(text) | Piece::Plain(text) | Piece::Lifetime(text) => {
+                Piece::Text(text)
+                | Piece::Keyword(text)
+                | Piece::Plain(text)
+                | Piece::Lifetime(text) => {
                     out.push_str(&escape(text));
                 }
                 Piece::Name(name, kind) => match anchor {
@@ -413,7 +455,13 @@ impl<'a> Writer<'a> {
         Some(format!("{}src/{}/{}.html#{lines}", self.root, krate.name, file.path))
     }
 
-    fn head(&self, title: &str, description: &str, body_class: &str, sidebar_js: Option<&str>) -> String {
+    fn head(
+        &self,
+        title: &str,
+        description: &str,
+        body_class: &str,
+        sidebar_js: Option<&str>,
+    ) -> String {
         let mut out = String::new();
         let _ = write!(
             out,
@@ -451,7 +499,12 @@ impl<'a> Writer<'a> {
         )
     }
 
-    fn sidebar(&self, location: &str, sections: &[(String, Vec<(String, String)>)], module: Option<(String, String)>) -> String {
+    fn sidebar(
+        &self,
+        location: &str,
+        sections: &[(String, Vec<(String, String)>)],
+        module: Option<(String, String)>,
+    ) -> String {
         let krate = self.krate();
         let mut out = String::from("<nav class=\"sidebar\" aria-label=\"Site\">");
         let _ = write!(
@@ -496,7 +549,8 @@ impl<'a> Writer<'a> {
 
     fn breadcrumbs(&self, item: &Item) -> String {
         let krate = self.krate();
-        let mut parts = vec![(krate.name.clone(), format!("{}{}/index.html", self.root, krate.name))];
+        let mut parts =
+            vec![(krate.name.clone(), format!("{}{}/index.html", self.root, krate.name))];
         let mut path = format!("{}{}", self.root, krate.name);
         let modules = if item.kind == Kind::Module { &item.modules[..] } else { &item.modules[..] };
         for module in modules {
@@ -539,7 +593,10 @@ impl<'a> Writer<'a> {
             if in_list {
                 let _ = write!(out, "<span class=\"stab portability\">{}</span>", short_cfg(cfg));
             } else {
-                let _ = write!(out, "<div class=\"stab portability\">Available on <strong>{cfg}</strong> only.</div>");
+                let _ = write!(
+                    out,
+                    "<div class=\"stab portability\">Available on <strong>{cfg}</strong> only.</div>"
+                );
             }
         }
         if notes.is_unsafe && in_list {
@@ -552,7 +609,11 @@ impl<'a> Writer<'a> {
         let krate = self.krate();
         let item = &krate.items[at];
         let is_root = item.kind == Kind::Module && item.name.is_empty();
-        let path = if is_root { krate.name.clone() } else { format!("{}::{}", krate.name, item.full_path()) };
+        let path = if is_root {
+            krate.name.clone()
+        } else {
+            format!("{}::{}", krate.name, item.full_path())
+        };
         let parent_path = std::iter::once(krate.name.as_str())
             .chain(item.modules.iter().map(String::as_str))
             .collect::<Vec<_>>()
@@ -563,7 +624,11 @@ impl<'a> Writer<'a> {
             format!("{} in {} - Rust", item.name, parent_path)
         };
         let description = markdown::plain_summary(&item.docs.markdown, 160);
-        let description = if description.is_empty() { format!("API documentation for the Rust `{}` {}", item.name, item.kind.short()) } else { description };
+        let description = if description.is_empty() {
+            format!("API documentation for the Rust `{}` {}", item.name, item.kind.short())
+        } else {
+            description
+        };
         let sidebar_js = if is_root {
             None
         } else if item.kind == Kind::Module {
@@ -571,7 +636,8 @@ impl<'a> Writer<'a> {
         } else {
             Some("sidebar-items.js")
         };
-        let mut out = self.head(&title, &description, &format!("blaze {}", item.kind.short()), sidebar_js);
+        let mut out =
+            self.head(&title, &description, &format!("blaze {}", item.kind.short()), sidebar_js);
 
         let location = if is_root {
             format!("Crate {}", escape(&krate.name))
@@ -612,12 +678,20 @@ impl<'a> Writer<'a> {
             escape(&path),
         );
         if let Some(src) = self.src_link(item.source) {
-            let _ = write!(out, "<span class=\"sub-heading\"><a class=\"src\" href=\"{}\">Source</a></span>", escape(&src));
+            let _ = write!(
+                out,
+                "<span class=\"sub-heading\"><a class=\"src\" href=\"{}\">Source</a></span>",
+                escape(&src)
+            );
         }
         out.push_str("</div>");
 
         if !item.decl.is_empty() {
-            let _ = write!(out, "<pre class=\"rust item-decl\"><code>{}</code></pre>", self.code(&item.decl, None));
+            let _ = write!(
+                out,
+                "<pre class=\"rust item-decl\"><code>{}</code></pre>",
+                self.code(&item.decl, None)
+            );
         }
         out.push_str(&self.notes(&item.notes, false));
         if !item.docs.is_empty() {
@@ -641,7 +715,11 @@ impl<'a> Writer<'a> {
             Kind::TypeAlias => {
                 if let Some(aliased) = &item.aliased {
                     out.push_str(&self.section_header("aliased-type", "Aliased Type"));
-                    let _ = write!(out, "<pre class=\"rust item-decl\"><code>{}</code></pre>", self.code(aliased, None));
+                    let _ = write!(
+                        out,
+                        "<pre class=\"rust item-decl\"><code>{}</code></pre>",
+                        self.code(aliased, None)
+                    );
                     out.push_str(&self.fields_section(item));
                     out.push_str(&self.variants_section(item));
                 }
@@ -656,7 +734,10 @@ impl<'a> Writer<'a> {
         let krate = self.krate();
         let mut out = vec![];
         let anchors = |members: &[Member]| -> Vec<(String, String)> {
-            members.iter().map(|m| (format!("#{}.{}", m.kind.short(), m.name), m.name.clone())).collect()
+            members
+                .iter()
+                .map(|m| (format!("#{}.{}", m.kind.short(), m.name), m.name.clone()))
+                .collect()
         };
         match item.kind {
             Kind::Module => {
@@ -679,7 +760,10 @@ impl<'a> Writer<'a> {
                 out.push(("Variants".to_owned(), anchors(&item.variants)));
             }
             Kind::TypeAlias if item.aliased.is_some() => {
-                out.push(("Aliased Type".to_owned(), vec![("#aliased-type".to_owned(), String::new())]));
+                out.push((
+                    "Aliased Type".to_owned(),
+                    vec![("#aliased-type".to_owned(), String::new())],
+                ));
                 out.push(("Fields".to_owned(), anchors(&item.fields)));
                 out.push(("Variants".to_owned(), anchors(&item.variants)));
             }
@@ -687,7 +771,9 @@ impl<'a> Writer<'a> {
                 let pick = |kind: Kind, provided: bool| -> Vec<(String, String)> {
                     item.trait_items
                         .iter()
-                        .filter(|m| m.kind == kind && (kind != Kind::AssocType || m.provided == provided))
+                        .filter(|m| {
+                            m.kind == kind && (kind != Kind::AssocType || m.provided == provided)
+                        })
                         .map(|m| (format!("#{}.{}", m.kind.short(), m.name), m.name.clone()))
                         .collect()
                 };
@@ -708,7 +794,9 @@ impl<'a> Writer<'a> {
                     })
                     .collect();
                 out.push(("Implementations on Foreign Types".to_owned(), foreign));
-                let implementors: Vec<(String, String)> = if item.impls.implementors.is_empty() && item.impls.blanket_implementors.is_empty() {
+                let implementors: Vec<(String, String)> = if item.impls.implementors.is_empty()
+                    && item.impls.blanket_implementors.is_empty()
+                {
                     vec![]
                 } else {
                     vec![("#implementors".to_owned(), "Implementors".to_owned())]
@@ -728,7 +816,11 @@ impl<'a> Writer<'a> {
         out.push(("Methods".to_owned(), methods));
         for deref in &item.impls.deref {
             let title = format!("Methods from Deref<Target = {}>", deref.target.plain());
-            let links = deref.members.iter().map(|m| (format!("#method.{}", m.name), m.name.clone())).collect();
+            let links = deref
+                .members
+                .iter()
+                .map(|m| (format!("#method.{}", m.name), m.name.clone()))
+                .collect();
             out.push((title, links));
         }
         let traits = |impls: &[ImplDoc]| -> Vec<(String, String)> {
@@ -748,7 +840,9 @@ impl<'a> Writer<'a> {
     }
 
     fn section_header(&self, id: &str, title: &str) -> String {
-        format!("<h2 id=\"{id}\" class=\"section-header\">{title}<a href=\"#{id}\" class=\"anchor\">§</a></h2>")
+        format!(
+            "<h2 id=\"{id}\" class=\"section-header\">{title}<a href=\"#{id}\" class=\"anchor\">§</a></h2>"
+        )
     }
 
     fn module_body(&self, module: &Item) -> String {
@@ -768,10 +862,18 @@ impl<'a> Writer<'a> {
             }
             out.push_str("</dl>");
         }
-        let base = if module.name.is_empty() && module.modules.is_empty() { String::new() } else { String::new() };
+        let base = if module.name.is_empty() && module.modules.is_empty() {
+            String::new()
+        } else {
+            String::new()
+        };
         for kind in Kind::MODULE_ORDER {
-            let mut children: Vec<&Item> =
-                module.children.iter().map(|&at| &krate.items[at]).filter(|it| it.kind == kind).collect();
+            let mut children: Vec<&Item> = module
+                .children
+                .iter()
+                .map(|&at| &krate.items[at])
+                .filter(|it| it.kind == kind)
+                .collect();
             if children.is_empty() {
                 continue;
             }
@@ -818,7 +920,8 @@ impl<'a> Writer<'a> {
                 self.notes(&field.notes, false),
             );
             if !field.docs.is_empty() {
-                let _ = write!(out, "<div class=\"docblock\">{}</div>", self.docs_html(&field.docs, 3));
+                let _ =
+                    write!(out, "<div class=\"docblock\">{}</div>", self.docs_html(&field.docs, 3));
             }
         }
         out
@@ -844,10 +947,15 @@ impl<'a> Writer<'a> {
                 self.notes(&variant.notes, false),
             );
             if !variant.docs.is_empty() {
-                let _ = write!(out, "<div class=\"docblock\">{}</div>", self.docs_html(&variant.docs, 3));
+                let _ = write!(
+                    out,
+                    "<div class=\"docblock\">{}</div>",
+                    self.docs_html(&variant.docs, 3)
+                );
             }
             if !variant.fields.is_empty() {
-                let _ = write!(out, "<div class=\"sub-variant\" id=\"{id}.fields\"><h4>Fields</h4>");
+                let _ =
+                    write!(out, "<div class=\"sub-variant\" id=\"{id}.fields\"><h4>Fields</h4>");
                 for field in &variant.fields {
                     let fid = format!("{id}.field.{}", field.name);
                     let _ = write!(
@@ -856,7 +964,11 @@ impl<'a> Writer<'a> {
                         self.code(&field.decl, None)
                     );
                     if !field.docs.is_empty() {
-                        let _ = write!(out, "<div class=\"docblock\">{}</div>", self.docs_html(&field.docs, 4));
+                        let _ = write!(
+                            out,
+                            "<div class=\"docblock\">{}</div>",
+                            self.docs_html(&field.docs, 4)
+                        );
                     }
                     out.push_str("</div>");
                 }
@@ -966,8 +1078,13 @@ impl<'a> Writer<'a> {
         }
         let docs = if member.docs_from_trait {
             let summary = self.summary_html(&member.docs);
-            let more = crate::model::first_paragraph(&member.docs.markdown).len() < member.docs.markdown.trim().len();
-            if more { format!("<p>{summary} <a class=\"read-more\" href=\"#{id}\">Read more</a></p>") } else { format!("<p>{summary}</p>") }
+            let more = crate::model::first_paragraph(&member.docs.markdown).len()
+                < member.docs.markdown.trim().len();
+            if more {
+                format!("<p>{summary} <a class=\"read-more\" href=\"#{id}\">Read more</a></p>")
+            } else {
+                format!("<p>{summary}</p>")
+            }
         } else {
             self.docs_html(&member.docs, 4)
         };
@@ -982,10 +1099,26 @@ impl<'a> Writer<'a> {
     fn trait_body(&self, item: &Item) -> String {
         let mut out = String::new();
         let groups: [(&str, &str, Box<dyn Fn(&Member) -> bool>); 5] = [
-            ("required-associated-types", "Required Associated Types", Box::new(|m: &Member| m.kind == Kind::AssocType && !m.provided)),
-            ("provided-associated-types", "Provided Associated Types", Box::new(|m: &Member| m.kind == Kind::AssocType && m.provided)),
-            ("associated-constants", "Associated Constants", Box::new(|m: &Member| m.kind == Kind::AssocConst)),
-            ("required-methods", "Required Methods", Box::new(|m: &Member| m.kind == Kind::TyMethod)),
+            (
+                "required-associated-types",
+                "Required Associated Types",
+                Box::new(|m: &Member| m.kind == Kind::AssocType && !m.provided),
+            ),
+            (
+                "provided-associated-types",
+                "Provided Associated Types",
+                Box::new(|m: &Member| m.kind == Kind::AssocType && m.provided),
+            ),
+            (
+                "associated-constants",
+                "Associated Constants",
+                Box::new(|m: &Member| m.kind == Kind::AssocConst),
+            ),
+            (
+                "required-methods",
+                "Required Methods",
+                Box::new(|m: &Member| m.kind == Kind::TyMethod),
+            ),
             ("provided-methods", "Provided Methods", Box::new(|m: &Member| m.kind == Kind::Method)),
         ];
         for (id, title, wanted) in groups {
@@ -1047,7 +1180,12 @@ impl<'a> Writer<'a> {
             let Some(mut items) = by_kind.remove(&kind) else { continue };
             items.sort();
             items.dedup();
-            let _ = write!(out, "<h3 id=\"{}\">{}</h3><ul class=\"all-items\">", kind.section_id(), kind.plural());
+            let _ = write!(
+                out,
+                "<h3 id=\"{}\">{}</h3><ul class=\"all-items\">",
+                kind.section_id(),
+                kind.plural()
+            );
             for (path, href) in items {
                 let _ = write!(out, "<li><a href=\"{}\">{}</a></li>", escape(&href), escape(&path));
             }
@@ -1061,7 +1199,12 @@ impl<'a> Writer<'a> {
         let krate = self.krate();
         let file = &krate.sources[file_at];
         let name = file.path.rsplit('/').next().unwrap_or(&file.path);
-        let mut out = self.head(&format!("{name} - source"), &format!("Source of the Rust file `{}`.", file.path), "blaze src", None);
+        let mut out = self.head(
+            &format!("{name} - source"),
+            &format!("Source of the Rust file `{}`.", file.path),
+            "blaze src",
+            None,
+        );
         out.push_str(&self.sidebar(&format!("Source of {}", escape(&krate.name)), &[], None));
         out.push_str("<main><div class=\"width-limiter\">");
         out.push_str(&self.topbar());
@@ -1075,10 +1218,16 @@ impl<'a> Writer<'a> {
         let highlighted = crate::highlight::rust(&file.text);
         let lines = split_lines(&highlighted);
         let digits = lines.len().to_string().len().max(2);
-        let _ = write!(out, "<div class=\"example-wrap source digits-{digits}\"><pre class=\"rust\"><code>");
+        let _ = write!(
+            out,
+            "<div class=\"example-wrap source digits-{digits}\"><pre class=\"rust\"><code>"
+        );
         for (at, line) in lines.iter().enumerate() {
             let n = at + 1;
-            let _ = write!(out, "<span class=\"src-line\" data-line=\"{n}\"><a class=\"line-number\" id=\"{n}\" href=\"#{n}\">{n}</a>{line}</span>");
+            let _ = write!(
+                out,
+                "<span class=\"src-line\" data-line=\"{n}\"><a class=\"line-number\" id=\"{n}\" href=\"#{n}\">{n}</a>{line}</span>"
+            );
         }
         out.push_str("</code></pre></div></section><section id=\"search\" class=\"content hidden\"></section></div></main></body></html>");
         out

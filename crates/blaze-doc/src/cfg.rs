@@ -25,11 +25,8 @@ pub(crate) fn describe(tt: &ast::TokenTree) -> String {
 }
 
 fn parse_list(tt: &ast::TokenTree) -> Vec<Cfg> {
-    let mut items: Vec<NodeOrToken<_, _>> = tt
-        .syntax()
-        .children_with_tokens()
-        .filter(|it| !it.kind().is_trivia())
-        .collect();
+    let mut items: Vec<NodeOrToken<_, _>> =
+        tt.syntax().children_with_tokens().filter(|it| !it.kind().is_trivia()).collect();
     // Drop the delimiters.
     if items.first().is_some_and(|it| matches!(it.kind(), T!['('] | T!['['] | T!['{'])) {
         items.remove(0);
@@ -85,7 +82,9 @@ fn parse_list(tt: &ast::TokenTree) -> Vec<Cfg> {
 
 fn render(cfg: &Cfg, nested: bool) -> String {
     match cfg {
-        Cfg::Name(name) => name_word(name).map_or_else(|| format!("<code>{name}</code>"), str::to_owned),
+        Cfg::Name(name) => {
+            name_word(name).map_or_else(|| format!("<code>{name}</code>"), str::to_owned)
+        }
         Cfg::KeyValue(key, value) => key_value_words(key, value),
         Cfg::All(list) => join(list, " and ", nested),
         Cfg::Any(list) => join(list, " or ", nested),

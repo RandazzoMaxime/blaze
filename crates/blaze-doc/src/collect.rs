@@ -5,8 +5,8 @@ use std::cell::RefCell;
 
 use either::Either;
 use hir::{
-    AssocItem, Crate, HasAttrs, HasCrate, HasSource, HasVisibility, Impl, InFile,
-    ModuleDef, Visibility,
+    AssocItem, Crate, HasAttrs, HasCrate, HasSource, HasVisibility, Impl, InFile, ModuleDef,
+    Visibility,
 };
 use ide_db::RootDatabase;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -16,8 +16,8 @@ use crate::{
     attrs,
     links::{self, Resolved},
     model::{
-        Code, CrateDoc, DerefMethods, Doc, ImplDoc, Impls, Item, ItemRef, Kind, Member, Model, Notes, Piece,
-        Reexport, Span, Target, Warning,
+        Code, CrateDoc, DerefMethods, Doc, ImplDoc, Impls, Item, ItemRef, Kind, Member, Model,
+        Notes, Piece, Reexport, Span, Target, Warning,
     },
     places::{self, Line, Linking, Placed, Places, kind_of, primitive},
     sig::{self, FnContext},
@@ -73,7 +73,8 @@ enum Members {
 /// Whether `imp` is a `#[rustc_reservation_impl]` (`impl<T> From<!> for T`), which no type has.
 fn reservation(db: &RootDatabase, imp: Impl) -> bool {
     hir_def::ImplId::try_from(imp).is_ok_and(|id| {
-        hir_def::attrs::AttrFlags::query(db, id.into()).contains(hir_def::attrs::AttrFlags::RUSTC_RESERVATION_IMPL)
+        hir_def::attrs::AttrFlags::query(db, id.into())
+            .contains(hir_def::attrs::AttrFlags::RUSTC_RESERVATION_IMPL)
     })
 }
 
@@ -92,15 +93,23 @@ fn impls_by_trait_arg(db: &RootDatabase, places: &Places) -> FxHashMap<hir::Adt,
             // A `#[fundamental]` type's arguments (`Box<Local>`, `Pin<&mut Local>`) are what the
             // impl is for, as far as a page is concerned.
             let inside: Vec<hir::Adt> = match own {
-                Some(adt) if fundamental(db, adt) => {
-                    self_ty.type_arguments().filter_map(|it| it.strip_references().as_adt()).collect()
-                }
+                Some(adt) if fundamental(db, adt) => self_ty
+                    .type_arguments()
+                    .filter_map(|it| it.strip_references().as_adt())
+                    .collect(),
                 _ => vec![],
             };
             // A trait's arguments: the self type is the first, lifetimes and consts are none.
             let args = (1..16).filter_map(|at| trait_ref.get_type_argument(at));
-            for adt in args.filter_map(|it| it.strip_references().as_adt()).chain(behind_ref).chain(inside) {
-                if Some(adt) != own && places.crates.iter().any(|it| Some(it.krate) == places::krate_of(db, ModuleDef::Adt(adt))) {
+            for adt in
+                args.filter_map(|it| it.strip_references().as_adt()).chain(behind_ref).chain(inside)
+            {
+                if Some(adt) != own
+                    && places
+                        .crates
+                        .iter()
+                        .any(|it| Some(it.krate) == places::krate_of(db, ModuleDef::Adt(adt)))
+                {
                     let list = out.entry(adt).or_default();
                     if !list.contains(&imp) {
                         list.push(imp);
@@ -113,7 +122,8 @@ fn impls_by_trait_arg(db: &RootDatabase, places: &Places) -> FxHashMap<hir::Adt,
 }
 
 fn fundamental(db: &RootDatabase, adt: hir::Adt) -> bool {
-    hir_def::attrs::AttrFlags::query(db, hir_def::AdtId::from(adt).into()).contains(hir_def::attrs::AttrFlags::FUNDAMENTAL)
+    hir_def::attrs::AttrFlags::query(db, hir_def::AdtId::from(adt).into())
+        .contains(hir_def::attrs::AttrFlags::FUNDAMENTAL)
 }
 
 /// What every crate's impls need from `core`: the auto traits, a type that is not each, and
@@ -136,17 +146,19 @@ struct AutoTrait {
 
 impl StdItems {
     fn find(db: &RootDatabase, places: &Places) -> StdItems {
-        let core = Crate::all(db)
-            .into_iter()
-            .find(|it| places::lang_crate_name(db, *it) == Some("core"));
+        let core =
+            Crate::all(db).into_iter().find(|it| places::lang_crate_name(db, *it) == Some("core"));
         let mut auto = vec![];
         let mut blankets = vec![];
         let trait_at = |path: &[&str]| match core.and_then(|core| lookup(db, core, path)) {
             Some(ModuleDef::Trait(it)) => Some(it),
             _ => None,
         };
-        let (deref, deref_mut, copy) =
-            (trait_at(&["ops", "Deref"]), trait_at(&["ops", "DerefMut"]), trait_at(&["marker", "Copy"]));
+        let (deref, deref_mut, copy) = (
+            trait_at(&["ops", "Deref"]),
+            trait_at(&["ops", "DerefMut"]),
+            trait_at(&["marker", "Copy"]),
+        );
         if let Some(core) = core {
             let adt = |path: &[&str]| match lookup(db, core, path) {
                 Some(ModuleDef::Adt(it)) => Some(it),
@@ -172,12 +184,17 @@ impl StdItems {
             }
             let mut crates: Vec<Crate> = Crate::all(db)
                 .into_iter()
-                .filter(|it| matches!(places::lang_crate_name(db, *it), Some("core" | "alloc" | "std")))
+                .filter(|it| {
+                    matches!(places::lang_crate_name(db, *it), Some("core" | "alloc" | "std"))
+                })
                 .collect();
             crates.extend(places.crates.iter().map(|it| it.krate));
             for krate in crates {
                 for imp in Impl::all_in_crate(db, krate) {
-                    if imp.trait_(db).is_some() && imp.self_ty(db).as_type_param(db).is_some() && !reservation(db, imp) {
+                    if imp.trait_(db).is_some()
+                        && imp.self_ty(db).as_type_param(db).is_some()
+                        && !reservation(db, imp)
+                    {
                         blankets.push(imp);
                     }
                 }
@@ -288,10 +305,12 @@ impl Builder<'_> {
         };
         match def {
             ModuleDef::Module(_) => {
-                item.reexports = placed.reexports.iter().filter_map(|it| self.reexport(it)).collect();
+                item.reexports =
+                    placed.reexports.iter().filter_map(|it| self.reexport(it)).collect();
             }
             ModuleDef::Function(it) => {
-                item.decl = renamed(sig::function(db, self.places, it, FnContext::Free, Kind::Function));
+                item.decl =
+                    renamed(sig::function(db, self.places, it, FnContext::Free, Kind::Function));
                 item.notes.is_unsafe = it.is_unsafe_to_call(db, None, span::Edition::CURRENT);
             }
             ModuleDef::Adt(hir::Adt::Struct(it)) => {
@@ -330,26 +349,30 @@ impl Builder<'_> {
                 item.dyn_compatible = Some(it.dyn_compatibility(db).is_none());
             }
             ModuleDef::TypeAlias(it) => {
-                item.decl = renamed(sig::type_alias(db, self.places, it, FnContext::Free, Kind::TypeAlias));
+                item.decl =
+                    renamed(sig::type_alias(db, self.places, it, FnContext::Free, Kind::TypeAlias));
                 if let Some(alias) = sig::aliased(db, self.places, it) {
                     let places = self.places.substituting(&alias.subst);
                     // Another crate's private fields stay private, whatever this crate shows.
                     let private = private && alias.adt.krate(db) == self.documented().krate;
                     match alias.adt {
                         hir::Adt::Struct(adt) => {
-                            let (decl, hidden) = sig::struct_decl(db, self.places, adt, private, Some(&alias));
+                            let (decl, hidden) =
+                                sig::struct_decl(db, self.places, adt, private, Some(&alias));
                             item.aliased = Some(renamed(decl));
                             item.hidden_fields = hidden;
                             item.fields = self.fields(adt.fields(db), places);
                         }
                         hir::Adt::Union(adt) => {
-                            let (decl, hidden) = sig::union_decl(db, self.places, adt, private, Some(&alias));
+                            let (decl, hidden) =
+                                sig::union_decl(db, self.places, adt, private, Some(&alias));
                             item.aliased = Some(renamed(decl));
                             item.hidden_fields = hidden;
                             item.fields = self.fields(adt.fields(db), places);
                         }
                         hir::Adt::Enum(adt) => {
-                            item.aliased = Some(renamed(sig::enum_decl(db, self.places, adt, Some(&alias))));
+                            item.aliased =
+                                Some(renamed(sig::enum_decl(db, self.places, adt, Some(&alias))));
                             item.variants = adt
                                 .variants(db)
                                 .into_iter()
@@ -361,7 +384,8 @@ impl Builder<'_> {
                 }
             }
             ModuleDef::Const(it) => {
-                item.decl = renamed(sig::constant(db, self.places, it, FnContext::Free, Kind::Constant));
+                item.decl =
+                    renamed(sig::constant(db, self.places, it, FnContext::Free, Kind::Constant));
             }
             ModuleDef::Static(it) => {
                 item.decl = renamed(sig::static_decl(db, self.places, it));
@@ -386,7 +410,9 @@ impl Builder<'_> {
                     .map(|it| it.crate_name().to_string())
                     .unwrap_or_else(|| name.clone());
                 match self.places.target(db, ModuleDef::Module(krate.root_module(db))) {
-                    Some(to) => decl.push(Piece::Link { text: crate_name.clone(), kind: Kind::Module, to }),
+                    Some(to) => {
+                        decl.push(Piece::Link { text: crate_name.clone(), kind: Kind::Module, to })
+                    }
                     None => decl.push(Piece::Plain(crate_name.clone())),
                 };
                 if *name != crate_name {
@@ -518,17 +544,14 @@ impl Builder<'_> {
                 }
                 None => {
                     if warn && let Some(range) = range {
-                        self.warn(
-                            format!("unresolved link to `{}`", pp.path),
-                            docs,
-                            range,
-                        );
+                        self.warn(format!("unresolved link to `{}`", pp.path), docs, range);
                     }
                     continue;
                 }
             };
             if let Some(mut target) = target {
-                if let (Some(fragment), Target::Item(ItemRef { anchor, descr, .. })) = (&pp.fragment, &mut target)
+                if let (Some(fragment), Target::Item(ItemRef { anchor, descr, .. })) =
+                    (&pp.fragment, &mut target)
                 {
                     *anchor = Some(fragment.clone());
                     *descr = None;
@@ -563,9 +586,15 @@ impl Builder<'_> {
                 None => None,
             },
             ModuleDef::Function(it) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
-            ModuleDef::Adt(hir::Adt::Struct(it)) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
-            ModuleDef::Adt(hir::Adt::Enum(it)) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
-            ModuleDef::Adt(hir::Adt::Union(it)) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
+            ModuleDef::Adt(hir::Adt::Struct(it)) => {
+                it.source(db).map(|s| s.map(ast::AnyHasAttrs::new))
+            }
+            ModuleDef::Adt(hir::Adt::Enum(it)) => {
+                it.source(db).map(|s| s.map(ast::AnyHasAttrs::new))
+            }
+            ModuleDef::Adt(hir::Adt::Union(it)) => {
+                it.source(db).map(|s| s.map(ast::AnyHasAttrs::new))
+            }
             ModuleDef::Const(it) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
             ModuleDef::Static(it) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
             ModuleDef::Trait(it) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
@@ -596,7 +625,8 @@ impl Builder<'_> {
         if let Some(node) = &node {
             let flags = def.attrs(db);
             if flags.is_deprecated() {
-                notes.deprecated = attrs::deprecation(&node.value).or_else(|| Some(Default::default()));
+                notes.deprecated =
+                    attrs::deprecation(&node.value).or_else(|| Some(Default::default()));
             }
             notes.cfg = attrs::doc_cfg(&node.value);
         }
@@ -604,7 +634,11 @@ impl Builder<'_> {
         (span, notes)
     }
 
-    fn member_notes(&self, node: Option<InFile<ast::AnyHasAttrs>>, deprecated: bool) -> (Option<Span>, Notes) {
+    fn member_notes(
+        &self,
+        node: Option<InFile<ast::AnyHasAttrs>>,
+        deprecated: bool,
+    ) -> (Option<Span>, Notes) {
         let mut notes = Notes::default();
         let Some(node) = node else { return (None, notes) };
         let span = self.files.span(self.db, node.as_ref().map(|it| it.syntax()));
@@ -668,7 +702,11 @@ impl Builder<'_> {
                 Some(Resolved::Primitive(name, _)) => Some(Target::Item(primitive(name))),
                 None => {
                     if warn {
-                        self.warn(format!("unresolved link to `{}`", pp.path), docs, link.range.clone());
+                        self.warn(
+                            format!("unresolved link to `{}`", pp.path),
+                            docs,
+                            link.range.clone(),
+                        );
                     }
                     continue;
                 }
@@ -723,15 +761,30 @@ impl Builder<'_> {
             AssocItem::Function(f) => {
                 let kind = if in_trait && !f.has_body(db) { Kind::TyMethod } else { Kind::Method };
                 let decl = sig::function(db, self.places, f, context, kind);
-                (kind, decl, f.source(db).map(|s| s.map(ast::AnyHasAttrs::new)), in_trait && f.has_body(db))
+                (
+                    kind,
+                    decl,
+                    f.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
+                    in_trait && f.has_body(db),
+                )
             }
             AssocItem::Const(c) => {
                 let decl = sig::constant(db, self.places, c, context, Kind::AssocConst);
-                (Kind::AssocConst, decl, c.source(db).map(|s| s.map(ast::AnyHasAttrs::new)), in_trait && c.has_body(db))
+                (
+                    Kind::AssocConst,
+                    decl,
+                    c.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
+                    in_trait && c.has_body(db),
+                )
             }
             AssocItem::TypeAlias(t) => {
                 let decl = sig::type_alias(db, self.places, t, context, Kind::AssocType);
-                (Kind::AssocType, decl, t.source(db).map(|s| s.map(ast::AnyHasAttrs::new)), in_trait && t.has_type(db))
+                (
+                    Kind::AssocType,
+                    decl,
+                    t.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
+                    in_trait && t.has_type(db),
+                )
             }
         };
         let deprecated = match assoc {
@@ -789,10 +842,26 @@ impl Builder<'_> {
         }
         out.text(if has_where { "\n{\n" } else { " {\n" });
         let groups: [(&str, &str, Box<dyn Fn(&Member) -> bool>); 5] = [
-            ("Required associated type", "Required associated types", Box::new(|m: &Member| m.kind == Kind::AssocType && !m.provided)),
-            ("Provided associated type", "Provided associated types", Box::new(|m: &Member| m.kind == Kind::AssocType && m.provided)),
-            ("Associated constant", "Associated constants", Box::new(|m: &Member| m.kind == Kind::AssocConst)),
-            ("Required method", "Required methods", Box::new(|m: &Member| m.kind == Kind::TyMethod)),
+            (
+                "Required associated type",
+                "Required associated types",
+                Box::new(|m: &Member| m.kind == Kind::AssocType && !m.provided),
+            ),
+            (
+                "Provided associated type",
+                "Provided associated types",
+                Box::new(|m: &Member| m.kind == Kind::AssocType && m.provided),
+            ),
+            (
+                "Associated constant",
+                "Associated constants",
+                Box::new(|m: &Member| m.kind == Kind::AssocConst),
+            ),
+            (
+                "Required method",
+                "Required methods",
+                Box::new(|m: &Member| m.kind == Kind::TyMethod),
+            ),
             ("Provided method", "Provided methods", Box::new(|m: &Member| m.kind == Kind::Method)),
         ];
         let mut first = true;
@@ -805,7 +874,8 @@ impl Builder<'_> {
                 out.text("\n");
             }
             first = false;
-            out.text("    ").push(Piece::Comment(format!("// {}", if group.len() == 1 { one } else { many })));
+            out.text("    ")
+                .push(Piece::Comment(format!("// {}", if group.len() == 1 { one } else { many })));
             out.text("\n");
             for member in group {
                 out.text("    ");
@@ -814,7 +884,11 @@ impl Builder<'_> {
                     match piece {
                         Piece::Text(text) => {
                             // A where clause's last comma gives way to the `;` or `{ ... }`.
-                            let text = if at == last { text.strip_suffix(',').unwrap_or(text) } else { text };
+                            let text = if at == last {
+                                text.strip_suffix(',').unwrap_or(text)
+                            } else {
+                                text
+                            };
                             out.text(text.replace('\n', "\n    "));
                         }
                         other => {
@@ -846,9 +920,12 @@ impl Builder<'_> {
                 return false;
             }
             // A trait of this crate that is not documented, or of another that is not public.
-            let local = places::krate_of(db, ModuleDef::Trait(trait_)) == Some(self.documented().krate);
+            let local =
+                places::krate_of(db, ModuleDef::Trait(trait_)) == Some(self.documented().krate);
             if local {
-                if self.places.item_ref(db, ModuleDef::Trait(trait_)).is_none() && !self.documented().private {
+                if self.places.item_ref(db, ModuleDef::Trait(trait_)).is_none()
+                    && !self.documented().private
+                {
                     return false;
                 }
             } else if trait_.visibility(db) != Visibility::Public {
@@ -870,7 +947,9 @@ impl Builder<'_> {
                 for assoc in own {
                     let shown = (private || assoc_visibility(db, assoc) == Visibility::Public)
                         && !assoc_hidden(db, assoc);
-                    if shown && let Some(member) = self.assoc_member(assoc, FnContext::Free, None, false) {
+                    if shown
+                        && let Some(member) = self.assoc_member(assoc, FnContext::Free, None, false)
+                    {
                         items.push(member);
                     }
                 }
@@ -880,24 +959,31 @@ impl Builder<'_> {
                 let mut implemented = FxHashSet::default();
                 for assoc in own {
                     let name = assoc.name(db);
-                    let trait_item = trait_items.iter().copied().find(|it| it.name(db) == name && same_kind(*it, assoc));
+                    let trait_item = trait_items
+                        .iter()
+                        .copied()
+                        .find(|it| it.name(db) == name && same_kind(*it, assoc));
                     if let Some(name) = name {
                         implemented.insert(name);
                     }
                     // An item the trait hides is hidden in every impl (serde's `deserialize_in_place`).
-                    if assoc_hidden(db, assoc) || trait_item.is_some_and(|it| assoc_hidden(db, it)) {
+                    if assoc_hidden(db, assoc) || trait_item.is_some_and(|it| assoc_hidden(db, it))
+                    {
                         continue;
                     }
                     if members == Members::AssocTypes {
                         if let AssocItem::TypeAlias(_) = assoc
-                            && let Some(mut member) = self.assoc_member(assoc, FnContext::Trait, None, false)
+                            && let Some(mut member) =
+                                self.assoc_member(assoc, FnContext::Trait, None, false)
                         {
                             member.docs = Doc::default();
                             items.push(member);
                         }
                         continue;
                     }
-                    if let Some(member) = self.assoc_member(assoc, FnContext::Trait, trait_item, false) {
+                    if let Some(member) =
+                        self.assoc_member(assoc, FnContext::Trait, trait_item, false)
+                    {
                         items.push(member);
                     }
                 }
@@ -923,7 +1009,9 @@ impl Builder<'_> {
                     if !provided {
                         continue;
                     }
-                    if let Some(mut member) = self.assoc_member(assoc, FnContext::Trait, None, false) {
+                    if let Some(mut member) =
+                        self.assoc_member(assoc, FnContext::Trait, None, false)
+                    {
                         member.docs_from_trait = true;
                         member.provided = true;
                         items.push(member);
@@ -932,7 +1020,9 @@ impl Builder<'_> {
             }
         }
         let source = match hir_def::ImplId::try_from(imp) {
-            Ok(_) => imp.source(db).and_then(|src| self.files.span(db, src.as_ref().map(|it| it.syntax()))),
+            Ok(_) => imp
+                .source(db)
+                .and_then(|src| self.files.span(db, src.as_ref().map(|it| it.syntax()))),
             Err(_) => None,
         };
         let docs = self.doc(imp, None);
@@ -1015,7 +1105,9 @@ impl Builder<'_> {
         {
             let impls = Impl::all_for_type(db, ty.clone());
             let of = |trait_: Option<hir::Trait>| {
-                impls.iter().copied().find(|imp| imp.trait_(db) == trait_ && trait_.is_some() && !imp.is_negative(db))
+                impls.iter().copied().find(|imp| {
+                    imp.trait_(db) == trait_ && trait_.is_some() && !imp.is_negative(db)
+                })
             };
             let Some(deref_impl) = of(Some(deref)) else { break };
             let mutable = of(deref_mut).is_some();
@@ -1033,7 +1125,10 @@ impl Builder<'_> {
             let copy = self.std.copy.is_some_and(|it| target.impls_trait(db, it, &[]));
             let mut members = vec![];
             for imp in Impl::all_for_type(db, target.clone()) {
-                if imp.trait_(db).is_some() || !self.impl_shown(imp) || !target.unifies_with_any_params(db, &imp.self_ty(db)) {
+                if imp.trait_(db).is_some()
+                    || !self.impl_shown(imp)
+                    || !target.unifies_with_any_params(db, &imp.self_ty(db))
+                {
                     continue;
                 }
                 for assoc in imp.items(db) {
@@ -1043,13 +1138,21 @@ impl Builder<'_> {
                         hir::Access::Shared => true,
                         hir::Access::Exclusive => mutable,
                         // `self` needs a `Copy` target; `self: Rc<Self>` is reached, `self: Box<Self>` not.
-                        hir::Access::Owned => match receiver.ty(db).as_adt().filter(|it| Some(*it) != imp.self_ty(db).as_adt()) {
+                        hir::Access::Owned => match receiver
+                            .ty(db)
+                            .as_adt()
+                            .filter(|it| Some(*it) != imp.self_ty(db).as_adt())
+                        {
                             Some(wrapper) => wrapper.name(db).as_str() != "Box",
                             None => copy,
                         },
                     };
-                    let shown = (private || assoc_visibility(db, assoc) == Visibility::Public) && !assoc_hidden(db, assoc);
-                    if reached && shown && let Some(member) = self.assoc_member(assoc, FnContext::Free, None, false) {
+                    let shown = (private || assoc_visibility(db, assoc) == Visibility::Public)
+                        && !assoc_hidden(db, assoc);
+                    if reached
+                        && shown
+                        && let Some(member) = self.assoc_member(assoc, FnContext::Free, None, false)
+                    {
                         members.push(member);
                     }
                 }
@@ -1058,7 +1161,9 @@ impl Builder<'_> {
                 let trait_name = deref.name(db).as_str().to_owned();
                 let mut trait_code = Code::default();
                 match self.places.target(db, ModuleDef::Trait(deref)) {
-                    Some(to) => trait_code.push(Piece::Link { text: trait_name, kind: Kind::Trait, to }),
+                    Some(to) => {
+                        trait_code.push(Piece::Link { text: trait_name, kind: Kind::Trait, to })
+                    }
                     None => trait_code.push(Piece::Plain(trait_name)),
                 };
                 let anchor = small_url_encode(&format!("deref-methods-{}", target_code.plain()));
@@ -1095,7 +1200,12 @@ impl Builder<'_> {
             };
             let holds = with(None);
             let needs: Vec<&String> = if holds {
-                params.iter().enumerate().filter(|(at, _)| !with(Some(*at))).map(|(_, it)| it).collect()
+                params
+                    .iter()
+                    .enumerate()
+                    .filter(|(at, _)| !with(Some(*at)))
+                    .map(|(_, it)| it)
+                    .collect()
             } else {
                 vec![]
             };
@@ -1117,7 +1227,9 @@ impl Builder<'_> {
                 header.text("!");
             }
             match self.places.target(db, ModuleDef::Trait(auto.trait_)) {
-                Some(to) => header.push(Piece::Link { text: trait_name.clone(), kind: Kind::Trait, to }),
+                Some(to) => {
+                    header.push(Piece::Link { text: trait_name.clone(), kind: Kind::Trait, to })
+                }
                 None => header.push(Piece::Plain(trait_name.clone())),
             };
             header.text(" ").kw("for").text(" ");
@@ -1134,7 +1246,11 @@ impl Builder<'_> {
                 for param in needs {
                     header.text(format!("\n    {param}: "));
                     match self.places.target(db, ModuleDef::Trait(auto.trait_)) {
-                        Some(to) => header.push(Piece::Link { text: trait_name.clone(), kind: Kind::Trait, to }),
+                        Some(to) => header.push(Piece::Link {
+                            text: trait_name.clone(),
+                            kind: Kind::Trait,
+                            to,
+                        }),
                         None => header.push(Piece::Plain(trait_name.clone())),
                     };
                     header.text(",");
@@ -1179,13 +1295,17 @@ impl Builder<'_> {
         if trait_.attrs(db).is_doc_hidden() || trait_.visibility(db) != Visibility::Public {
             return false;
         }
-        self.linked.contains(&imp.module(db).krate(db)) && self.places.item_ref(db, ModuleDef::Trait(trait_)).is_some()
+        self.linked.contains(&imp.module(db).krate(db))
+            && self.places.item_ref(db, ModuleDef::Trait(trait_)).is_some()
     }
 
     fn trait_impls(&self, trait_: hir::Trait) -> Impls {
         let db = self.db;
         let mut out = Impls::default();
-        let mut allowed = places::upstream(db, places::krate_of(db, ModuleDef::Trait(trait_)).unwrap_or(self.documented().krate));
+        let mut allowed = places::upstream(
+            db,
+            places::krate_of(db, ModuleDef::Trait(trait_)).unwrap_or(self.documented().krate),
+        );
         allowed.extend(self.places.crates.iter().map(|it| it.krate));
         for imp in Impl::all_for_trait(db, trait_) {
             if !allowed.contains(&imp.module(db).krate(db)) {
@@ -1231,7 +1351,8 @@ impl Builder<'_> {
             it.as_adt().is_some_and(|adt| {
                 let def = ModuleDef::Adt(adt);
                 let krate = places::krate_of(db, def);
-                self.places.crates.iter().any(|it| Some(it.krate) == krate) && self.places.item_ref(db, def).is_none()
+                self.places.crates.iter().any(|it| Some(it.krate) == krate)
+                    && self.places.item_ref(db, def).is_none()
             })
         })
     }
@@ -1245,7 +1366,9 @@ impl Builder<'_> {
             return false;
         }
         let trait_krate = places::krate_of(db, ModuleDef::Trait(trait_));
-        if trait_krate.is_some_and(|it| matches!(places::lang_crate_name(db, it), Some("core" | "alloc" | "std"))) {
+        if trait_krate.is_some_and(|it| {
+            matches!(places::lang_crate_name(db, it), Some("core" | "alloc" | "std"))
+        }) {
             return false;
         }
         let ty = imp.self_ty(db);
@@ -1254,7 +1377,8 @@ impl Builder<'_> {
             Some(inner) => places::type_home(db, &inner),
             None => places::type_home(db, &ty),
         };
-        let core = Crate::all(db).into_iter().find(|it| places::lang_crate_name(db, *it) == Some("core"));
+        let core =
+            Crate::all(db).into_iter().find(|it| places::lang_crate_name(db, *it) == Some("core"));
         let Some(home) = home.or(core) else { return false };
         home != self.documented().krate && Some(home) != trait_krate
     }
@@ -1272,7 +1396,8 @@ impl Builder<'_> {
                     out.text("\n{\n    ");
                     out.push(Piece::Comment("// Attributes available to this derive:".to_owned()));
                     for helper in &info.helpers {
-                        out.text("\n    ").push(Piece::Attribute(format!("#[{}]", helper.as_str())));
+                        out.text("\n    ")
+                            .push(Piece::Attribute(format!("#[{}]", helper.as_str())));
                     }
                     out.text("\n}");
                 }
@@ -1292,7 +1417,10 @@ impl Builder<'_> {
         let Some(source) = mac.source(db) else { return out };
         match source.value {
             Either::Left(ast::Macro::MacroRules(rules)) => {
-                out.kw("macro_rules!").text(" ").push(Piece::Name(name.to_owned(), Kind::Macro)).text(" {\n");
+                out.kw("macro_rules!")
+                    .text(" ")
+                    .push(Piece::Name(name.to_owned(), Kind::Macro))
+                    .text(" {\n");
                 if let Some(tt) = rules.token_tree() {
                     for pattern in macro_rule_patterns(&tt) {
                         out.text(format!("    {pattern} => {{ ... }};\n"));
@@ -1474,7 +1602,10 @@ fn macro_rule_patterns(tt: &ast::TokenTree) -> Vec<String> {
             syntax::NodeOrToken::Token(token) => {
                 if token.kind() == T![;] || token.kind() == T![,] {
                     expect_pattern = true;
-                } else if token.kind() == SyntaxKind::FAT_ARROW || token.kind() == T![=] || token.kind() == T![>] {
+                } else if token.kind() == SyntaxKind::FAT_ARROW
+                    || token.kind() == T![=]
+                    || token.kind() == T![>]
+                {
                     expect_pattern = false;
                 }
             }
@@ -1486,4 +1617,3 @@ fn macro_rule_patterns(tt: &ast::TokenTree) -> Vec<String> {
 fn squash(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
-

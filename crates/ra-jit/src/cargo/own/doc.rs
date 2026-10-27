@@ -128,7 +128,11 @@ impl Flags {
             lib: read.has("--lib"),
             bins: read.has("--bins"),
             bin: read.values("--bin"),
-            profile: if read.has("--release") { Some("release".to_owned()) } else { read.value("--profile") },
+            profile: if read.has("--release") {
+                Some("release".to_owned())
+            } else {
+                read.value("--profile")
+            },
             config: read.values("--config"),
             unstable: read.values("-Z"),
             quiet: read.has("--quiet"),
@@ -147,9 +151,10 @@ impl Flags {
             workspace: self.workspace,
             excludes: self.excludes.clone(),
             unstable: self.unstable.clone(),
-            target: self.target.clone().or_else(|| {
-                std::env::var("CARGO_BUILD_TARGET").ok().filter(|it| !it.is_empty())
-            }),
+            target: self
+                .target
+                .clone()
+                .or_else(|| std::env::var("CARGO_BUILD_TARGET").ok().filter(|it| !it.is_empty())),
             dev_deps: false,
             config: self.config.clone(),
             asked_in,
@@ -246,7 +251,11 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
     let profile = selection.profile.as_str();
     let shape = if profile == "release" { "optimized" } else { "unoptimized + debuginfo" };
     let took = started.elapsed().as_secs_f64();
-    say::status(flags.quiet, "Finished", &format!("`{profile}` profile [{shape}] target(s) in {took:.2}s"));
+    say::status(
+        flags.quiet,
+        "Finished",
+        &format!("`{profile}` profile [{shape}] target(s) in {took:.2}s"),
+    );
     let page = out.join(&first).join("index.html");
     let shown = page.strip_prefix(&cwd).unwrap_or(&page).display().to_string();
     match asked_names.len() {
@@ -266,7 +275,11 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
 
 /// The packages `cargo doc` documents with `flags`: those `-p` names, every member with
 /// `--workspace`, else the one of the directory, or the default members at a virtual root.
-fn selected<'a>(flags: &Flags, metadata: &'a Metadata, cwd: &Path) -> Result<Vec<&'a Package>, String> {
+fn selected<'a>(
+    flags: &Flags,
+    metadata: &'a Metadata,
+    cwd: &Path,
+) -> Result<Vec<&'a Package>, String> {
     let members = metadata.workspace_packages();
     if !flags.packages.is_empty() {
         let mut out = vec![];
@@ -323,7 +336,12 @@ fn asked_crates(
     let mut out = vec![];
     for package in packages {
         let lib = package.targets.iter().find(|it| {
-            it.kind.iter().any(|kind| matches!(kind, TargetKind::Lib | TargetKind::RLib | TargetKind::ProcMacro | TargetKind::DyLib))
+            it.kind.iter().any(|kind| {
+                matches!(
+                    kind,
+                    TargetKind::Lib | TargetKind::RLib | TargetKind::ProcMacro | TargetKind::DyLib
+                )
+            })
         });
         let lib_name = lib.map(|it| it.name.replace('-', "_"));
         if let Some(lib) = lib
@@ -369,7 +387,8 @@ fn describe(db: &RootDatabase, vfs: &vfs::Vfs, documented: &Documented) -> Strin
         .as_path()
         .map(|it| Path::new(it.as_str()))
         .and_then(|it| it.ancestors().skip(1).find(|dir| dir.join("Cargo.toml").is_file()));
-    let fetched = crate::cargo::switch::cargo_home().map(|home| [home.join("registry"), home.join("git")]);
+    let fetched =
+        crate::cargo::switch::cargo_home().map(|home| [home.join("registry"), home.join("git")]);
     match dir {
         Some(dir) if !fetched.iter().flatten().any(|it| dir.starts_with(it)) => {
             format!("{name}{version} ({})", dir.display())
@@ -410,7 +429,11 @@ fn open(page: &Path) {
         None => "xdg-open".into(),
     };
     if let Err(why) = std::process::Command::new(&opener).arg(page).status() {
-        say::error(&format!("could not open {} with {}: {why}", page.display(), opener.to_string_lossy()));
+        say::error(&format!(
+            "could not open {} with {}: {why}",
+            page.display(),
+            opener.to_string_lossy()
+        ));
     }
 }
 
@@ -425,7 +448,9 @@ mod tests {
 
     #[test]
     fn reads_cargo_docs_flags() {
-        let flags = parse("-p a --package=b --no-deps --open -Ffoo,bar --target wasm32-wasip1 -r -q").unwrap();
+        let flags =
+            parse("-p a --package=b --no-deps --open -Ffoo,bar --target wasm32-wasip1 -r -q")
+                .unwrap();
         assert_eq!(flags.packages, ["a", "b"]);
         assert!(flags.no_deps && flags.open && flags.quiet);
         assert_eq!(flags.features, ["foo", "bar"]);

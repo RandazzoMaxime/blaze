@@ -122,9 +122,12 @@ impl<'a> Linking<'a> {
     /// on doc.rust-lang.org for `std` and the crates under it, or nowhere.
     pub(crate) fn target(&self, db: &RootDatabase, def: ModuleDef) -> Option<Target> {
         match def {
-            ModuleDef::BuiltinType(builtin) => Some(Target::Item(primitive(builtin.name().as_str()))),
+            ModuleDef::BuiltinType(builtin) => {
+                Some(Target::Item(primitive(builtin.name().as_str())))
+            }
             ModuleDef::EnumVariant(variant) => {
-                let mut parent = self.item_ref(db, ModuleDef::Adt(variant.parent_enum(db).into()))?;
+                let mut parent =
+                    self.item_ref(db, ModuleDef::Adt(variant.parent_enum(db).into()))?;
                 parent.anchor = Some(format!("variant.{}", variant.name(db).as_str()));
                 parent.descr = Some("variant");
                 Some(Target::Item(parent))
@@ -153,11 +156,8 @@ impl<'a> Linking<'a> {
             hir::Variant::EnumVariant(variant) => {
                 let mut parent =
                     self.item_ref(db, ModuleDef::Adt(variant.parent_enum(db).into()))?;
-                parent.anchor = Some(format!(
-                    "variant.{}.field.{}",
-                    variant.name(db).as_str(),
-                    name.as_str()
-                ));
+                parent.anchor =
+                    Some(format!("variant.{}.field.{}", variant.name(db).as_str(), name.as_str()));
                 parent.descr = Some("field");
                 return Some(Target::Item(parent));
             }
@@ -236,7 +236,9 @@ pub(crate) fn primitive(name: &str) -> ItemRef {
 fn declared_path(db: &RootDatabase, def: ModuleDef) -> Option<String> {
     let mut parts = vec![def.name(db)?.as_str().to_owned()];
     let mut at = match def {
-        ModuleDef::Macro(it) if is_macro_export(db, it) => Some(it.module(db).krate(db).root_module(db)),
+        ModuleDef::Macro(it) if is_macro_export(db, it) => {
+            Some(it.module(db).krate(db).root_module(db))
+        }
         _ => def.module(db),
     };
     while let Some(module) = at {
@@ -279,14 +281,30 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
         && it.is_crate_root(db)
     {
         let krate = krate_name.to_owned();
-        return Some(ItemRef { krate, modules: vec![], kind, name: String::new(), anchor: None, descr: None, declared: None });
+        return Some(ItemRef {
+            krate,
+            modules: vec![],
+            kind,
+            name: String::new(),
+            anchor: None,
+            descr: None,
+            declared: None,
+        });
     }
     let name = def.name(db)?.as_str().to_owned();
     if let ModuleDef::Macro(it) = def
         && is_macro_export(db, it)
     {
         let krate = krate_name.to_owned();
-        return Some(ItemRef { krate, modules: vec![], kind, name, anchor: None, descr: None, declared: None });
+        return Some(ItemRef {
+            krate,
+            modules: vec![],
+            kind,
+            name,
+            anchor: None,
+            descr: None,
+            declared: None,
+        });
     }
     // The module whose scope declares it; a module's parent for a module.
     let module = def.module(db)?;
@@ -321,10 +339,12 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             if segment.as_str() == "prelude" {
                 return None;
             }
-            let Some(ModuleDef::Module(next)) = at.scope(db, None).into_iter().find_map(|(name, def)| match def {
-                hir::ScopeDef::ModuleDef(def) if name == *segment => Some(def),
-                _ => None,
-            }) else {
+            let Some(ModuleDef::Module(next)) =
+                at.scope(db, None).into_iter().find_map(|(name, def)| match def {
+                    hir::ScopeDef::ModuleDef(def) if name == *segment => Some(def),
+                    _ => None,
+                })
+            else {
                 return None;
             };
             if next.attrs(db).is_doc_hidden() {
@@ -333,7 +353,15 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             at = next;
         }
     }
-    Some(ItemRef { krate: krate_name.to_owned(), modules, kind, name, anchor: None, descr: None, declared: None })
+    Some(ItemRef {
+        krate: krate_name.to_owned(),
+        modules,
+        kind,
+        name,
+        anchor: None,
+        descr: None,
+        declared: None,
+    })
 }
 
 /// The kind of page rustdoc gives an item, or none for an item that has no page of its own.
@@ -370,7 +398,9 @@ pub(crate) fn trait_is_alias(db: &RootDatabase, it: hir::Trait) -> bool {
 pub(crate) fn macro_kind(db: &RootDatabase, it: Macro) -> Option<Kind> {
     // The built-in ones are `core`'s, which documents them as it does any other.
     Some(match it.kind(db) {
-        MacroKind::Declarative | MacroKind::ProcMacro | MacroKind::DeclarativeBuiltIn => Kind::Macro,
+        MacroKind::Declarative | MacroKind::ProcMacro | MacroKind::DeclarativeBuiltIn => {
+            Kind::Macro
+        }
         MacroKind::Derive | MacroKind::DeriveBuiltIn => Kind::ProcDerive,
         MacroKind::Attr | MacroKind::AttrBuiltIn => Kind::ProcAttribute,
     })
@@ -506,7 +536,11 @@ impl<'a> Walker<'a> {
         for (name, per_ns) in entries {
             let mut defs: Vec<(ModuleDef, Option<ImportOrExternCrate>, bool)> = vec![];
             if let Some(item) = per_ns.types {
-                defs.push((item.def.into(), item.import, item.vis == hir_def::visibility::Visibility::Public));
+                defs.push((
+                    item.def.into(),
+                    item.import,
+                    item.vis == hir_def::visibility::Visibility::Public,
+                ));
             }
             if let Some(item) = per_ns.values {
                 defs.push((
@@ -571,11 +605,8 @@ impl<'a> Walker<'a> {
             if !declared_here || from_builtin_attr(db, def) {
                 return;
             }
-            let shown = if local {
-                self.shown(def)
-            } else {
-                public && !def.attrs(db).is_doc_hidden()
-            };
+            let shown =
+                if local { self.shown(def) } else { public && !def.attrs(db).is_doc_hidden() };
             if shown {
                 self.put(at, path, def, kind, name, None, local);
             }
@@ -673,7 +704,8 @@ impl<'a> Walker<'a> {
         let mut segments: Vec<String> = vec![];
         for tree in tree.syntax().ancestors().filter_map(ast::UseTree::cast) {
             if let Some(path) = tree.path() {
-                let mut outer: Vec<String> = path.segments().map(|it| it.syntax().text().to_string()).collect();
+                let mut outer: Vec<String> =
+                    path.segments().map(|it| it.syntax().text().to_string()).collect();
                 outer.append(&mut segments);
                 segments = outer;
             }
@@ -687,14 +719,19 @@ impl<'a> Walker<'a> {
                 "self" if i == 0 => Some(here),
                 "super" => at.parent(db),
                 name => at.scope(db, None).into_iter().find_map(|(it, def)| match def {
-                    hir::ScopeDef::ModuleDef(ModuleDef::Module(m)) if it.as_str() == name => Some(m),
+                    hir::ScopeDef::ModuleDef(ModuleDef::Module(m)) if it.as_str() == name => {
+                        Some(m)
+                    }
                     _ => None,
                 }),
             };
             let Some(next) = next else { return false };
             at = next;
         }
-        if at == here || at.krate(db) != self.krate || !self.reachable_as_declared(ModuleDef::Module(at)) {
+        if at == here
+            || at.krate(db) != self.krate
+            || !self.reachable_as_declared(ModuleDef::Module(at))
+        {
             return false;
         }
         let id: hir_def::ModuleId = at.into();
@@ -773,8 +810,10 @@ impl UseAttrs {
         use hir_def::{Lookup, src::HasSource};
         use syntax::ast::HasAttrs as _;
         let flags = hir_def::attrs::AttrFlags::query(db, id.into());
-        let mut out =
-            UseAttrs { hidden: flags.contains(hir_def::attrs::AttrFlags::IS_DOC_HIDDEN), ..UseAttrs::default() };
+        let mut out = UseAttrs {
+            hidden: flags.contains(hir_def::attrs::AttrFlags::IS_DOC_HIDDEN),
+            ..UseAttrs::default()
+        };
         let source = id.lookup(db).source(db);
         for attr in source.value.attrs() {
             for word in crate::attrs::doc_words(&attr) {
@@ -814,8 +853,12 @@ pub(crate) fn linked(db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
             continue;
         }
         let def_map = hir_def::nameres::crate_def_map(db, it.into());
-        let named: Vec<Crate> =
-            it.root_module(db).extern_crate_decls(db).into_iter().filter_map(|it| it.resolved_crate(db)).collect();
+        let named: Vec<Crate> = it
+            .root_module(db)
+            .extern_crate_decls(db)
+            .into_iter()
+            .filter_map(|it| it.resolved_crate(db))
+            .collect();
         for dep in it.dependencies(db) {
             let linked = match lang_crate_name(db, dep.krate) {
                 Some("std" | "alloc") => !def_map.is_no_std(),

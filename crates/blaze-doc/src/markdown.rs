@@ -58,7 +58,8 @@ fn parser<'a, 'b>(
 
 /// The docs as a block of HTML.
 pub(crate) fn render(doc: &Doc, cx: &Context<'_>, ids: &mut Ids) -> String {
-    let mut callback = |broken: BrokenLink<'_>| Some((broken.reference.to_string().into(), "".into()));
+    let mut callback =
+        |broken: BrokenLink<'_>| Some((broken.reference.to_string().into(), "".into()));
     let events: Vec<Event<'_>> = parser(&doc.markdown, &mut callback).collect();
     let events = rewrite(events, doc, cx, Some(ids), false);
     let mut out = String::new();
@@ -88,7 +89,8 @@ pub(crate) fn summary(doc: &Doc, cx: &Context<'_>) -> String {
 /// and the page's description.
 pub(crate) fn plain_summary(markdown: &str, limit: usize) -> String {
     let first = crate::model::first_paragraph(markdown);
-    let mut callback = |broken: BrokenLink<'_>| Some((broken.reference.to_string().into(), "".into()));
+    let mut callback =
+        |broken: BrokenLink<'_>| Some((broken.reference.to_string().into(), "".into()));
     let mut out = String::new();
     for event in parser(first, &mut callback) {
         match event {
@@ -143,16 +145,26 @@ fn rewrite<'a>(
                         match (cx.url)(target) {
                             Some(url) => {
                                 let title: CowStr<'a> = (cx.title)(target).into();
-                                out.push(Event::Start(Tag::Link(LinkType::Inline, url.clone().into(), title.clone())));
+                                out.push(Event::Start(Tag::Link(
+                                    LinkType::Inline,
+                                    url.clone().into(),
+                                    title.clone(),
+                                )));
                                 out.extend(inner);
-                                out.push(Event::End(Tag::Link(LinkType::Inline, url.into(), title)));
+                                out.push(Event::End(Tag::Link(
+                                    LinkType::Inline,
+                                    url.into(),
+                                    title,
+                                )));
                             }
                             None => out.extend(inner),
                         }
                     }
                     None if matches!(
                         kind,
-                        LinkType::ShortcutUnknown | LinkType::CollapsedUnknown | LinkType::ReferenceUnknown
+                        LinkType::ShortcutUnknown
+                            | LinkType::CollapsedUnknown
+                            | LinkType::ReferenceUnknown
                     ) =>
                     {
                         // Not a link after all: the brackets stay, as rustdoc leaves them.
@@ -231,7 +243,9 @@ fn rewrite<'a>(
             Event::SoftBreak if inline => out.push(Event::Text(" ".into())),
             Event::Html(html) if inline => {
                 // Block HTML (`<details>`, `<div>`) does not belong in a line.
-                if !html.trim_start().starts_with("<div") && !html.trim_start().starts_with("<details") {
+                if !html.trim_start().starts_with("<div")
+                    && !html.trim_start().starts_with("<details")
+                {
                     out.push(Event::Html(html));
                 }
             }
@@ -304,7 +318,8 @@ impl LangString {
         let mut seen_rust = false;
         let mut seen_other = false;
         let mut seen_custom = false;
-        for token in info.split(|c: char| c == ',' || c.is_whitespace()).filter(|it| !it.is_empty()) {
+        for token in info.split(|c: char| c == ',' || c.is_whitespace()).filter(|it| !it.is_empty())
+        {
             let token = token.trim_matches(|c| c == '{' || c == '}');
             match token {
                 "should_panic" => {
@@ -343,7 +358,9 @@ impl LangString {
                     seen_rust = !seen_other || seen_rust;
                 }
                 x if x.starts_with('.') => out.classes.push(x[1..].to_owned()),
-                x if x.starts_with("class=") => out.classes.push(x["class=".len()..].trim_matches('"').to_owned()),
+                x if x.starts_with("class=") => {
+                    out.classes.push(x["class=".len()..].trim_matches('"').to_owned())
+                }
                 other => {
                     seen_other = true;
                     out.unknown.push(other.to_owned());

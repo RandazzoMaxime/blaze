@@ -197,9 +197,18 @@ pub fn impl_may_apply<'db>(
     let clauses = crate::lower::GenericPredicates::query_all(db, impl_.into())
         .iter_instantiated(interner, args.as_slice())
         .map(crate::next_solver::Unnormalized::skip_norm_wip);
-    crate::next_solver::util::clauses_as_obligations(clauses, ObligationCause::dummy(), ParamEnv::empty())
-        .all(may_hold)
-        && may_hold(Obligation::new(interner, ObligationCause::dummy(), ParamEnv::empty(), trait_ref))
+    crate::next_solver::util::clauses_as_obligations(
+        clauses,
+        ObligationCause::dummy(),
+        ParamEnv::empty(),
+    )
+    .all(may_hold)
+        && may_hold(Obligation::new(
+            interner,
+            ObligationCause::dummy(),
+            ParamEnv::empty(),
+            trait_ref,
+        ))
 }
 
 /// Whether the trait's item `item` cannot be used through `impl_`: one of its own where-clauses
@@ -269,7 +278,12 @@ pub fn is_impossible_associated_item(
                 continue;
             }
         }
-        ocx.register_obligation(Obligation::new(interner, ObligationCause::dummy(), ParamEnv::empty(), clause));
+        ocx.register_obligation(Obligation::new(
+            interner,
+            ObligationCause::dummy(),
+            ParamEnv::empty(),
+            clause,
+        ));
     }
     !ocx.try_evaluate_obligations().is_empty()
 }
@@ -277,30 +291,40 @@ pub fn is_impossible_associated_item(
 /// Whether `krate` can know every impl of `trait_ref`: the trait is its own or `#[fundamental]`,
 /// or one of the types is its own, under references and `#[fundamental]` types. rustc's
 /// `trait_ref_is_knowable` and `orphan_check_trait_ref`, leaving out where parameters may appear.
-fn knowable<'db>(db: &'db dyn HirDatabase, krate: Crate, trait_ref: crate::next_solver::TraitRef<'db>) -> bool {
+fn knowable<'db>(
+    db: &'db dyn HirDatabase,
+    krate: Crate,
+    trait_ref: crate::next_solver::TraitRef<'db>,
+) -> bool {
     let trait_id = trait_ref.def_id.0;
     if trait_id.module(db).krate(db) == krate
         || TraitSignature::of(db, trait_id).flags.contains(TraitFlags::FUNDAMENTAL)
     {
         return true;
     }
-    trait_ref.args.types().any(|mut ty| loop {
-        match ty.kind() {
-            TyKind::Ref(_, inner, _) => ty = inner,
-            TyKind::Adt(adt_def, args) => {
-                let fundamental = match adt_def.def_id() {
-                    AdtId::StructId(id) => StructSignature::of(db, id).flags.contains(StructFlags::FUNDAMENTAL),
-                    _ => false,
-                };
-                match args.types().next() {
-                    Some(inner) if fundamental => ty = inner,
-                    _ => break adt_def.def_id().module(db).krate(db) == krate,
+    trait_ref.args.types().any(|mut ty| {
+        loop {
+            match ty.kind() {
+                TyKind::Ref(_, inner, _) => ty = inner,
+                TyKind::Adt(adt_def, args) => {
+                    let fundamental = match adt_def.def_id() {
+                        AdtId::StructId(id) => {
+                            StructSignature::of(db, id).flags.contains(StructFlags::FUNDAMENTAL)
+                        }
+                        _ => false,
+                    };
+                    match args.types().next() {
+                        Some(inner) if fundamental => ty = inner,
+                        _ => break adt_def.def_id().module(db).krate(db) == krate,
+                    }
                 }
+                TyKind::Dynamic(bounds, _) => {
+                    break bounds
+                        .principal_def_id()
+                        .is_some_and(|it| it.0.module(db).krate(db) == krate);
+                }
+                _ => break false,
             }
-            TyKind::Dynamic(bounds, _) => {
-                break bounds.principal_def_id().is_some_and(|it| it.0.module(db).krate(db) == krate);
-            }
-            _ => break false,
         }
     })
 }

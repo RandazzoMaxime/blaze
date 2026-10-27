@@ -302,7 +302,11 @@ pub enum Piece {
     /// The item's own name where its declaration says it.
     Name(String, Kind),
     /// A name that points at its documentation, with the kind it is.
-    Link { text: String, kind: Kind, to: Target },
+    Link {
+        text: String,
+        kind: Kind,
+        to: Target,
+    },
     /// A name with no documentation to point at (a generic parameter, an item of a crate not
     /// documented).
     Plain(String),

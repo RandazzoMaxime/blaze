@@ -1533,7 +1533,8 @@ impl Function {
     /// that names only the trait's parameters cannot hold there, as `Self: DoubleEndedIterator`
     /// of `Iterator::rev` for an iterator that is not, as far as `krate` can know.
     pub fn is_impossible_in(self, db: &dyn HirDatabase, impl_: Impl, krate: Crate) -> bool {
-        let (AnyFunctionId::FunctionId(id), Ok(impl_id)) = (self.id, ImplId::try_from(impl_)) else {
+        let (AnyFunctionId::FunctionId(id), Ok(impl_id)) = (self.id, ImplId::try_from(impl_))
+        else {
             return false;
         };
         if !matches!(id.lookup(db).container, ItemContainerId::TraitId(_)) {
@@ -4607,7 +4608,10 @@ impl<'db> Type<'db> {
     /// parameters left as its own: `Foo<'a, i32, N>` of `Foo<'a, T, const N: usize>`. Unlike
     /// [`Type::instantiate`], which fills those with errors that every trait goal takes to hold,
     /// trait goals on the result are solved as in the type's own crate and environment.
-    pub fn instantiate_type_params(&self, args: impl IntoIterator<Item: Borrow<Type<'db>>>) -> Type<'db> {
+    pub fn instantiate_type_params(
+        &self,
+        args: impl IntoIterator<Item: Borrow<Type<'db>>>,
+    ) -> Type<'db> {
         let TypeOwnerId::GenericDefId(def) = self.owner else { return self.clone() };
         let interner = DbInterner::conjure();
         let mut args = args.into_iter();
@@ -4618,7 +4622,10 @@ impl<'db> Type<'db> {
             },
             _ => hir_ide::next_solver::mk_param(interner, index, id),
         });
-        Type { owner: self.owner, ty: EarlyBinder::bind(self.ty.instantiate(interner, args).skip_norm_wip()) }
+        Type {
+            owner: self.owner,
+            ty: EarlyBinder::bind(self.ty.instantiate(interner, args).skip_norm_wip()),
+        }
     }
 
     /// Instantiates multiple types with infer vars, keeping the same infer vars for the same owners.
