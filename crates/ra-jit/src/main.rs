@@ -3194,7 +3194,7 @@ fn workspace_at(
             &cargo_config.extra_env,
         )?;
         let triple = triple.first().context("no target to build for")?;
-        let asked = plan::Asked { triple, env: &cargo_config.extra_env };
+        let asked = plan::Asked { triple, cfg: &workspace.rustc_cfg, env: &cargo_config.extra_env };
         let plan = plan::Plan::of(manifest.manifest_path().as_ref(), selection, &asked)?;
         debug = plan.whole()?;
         let packages: Vec<_> = cargo.packages().collect();
