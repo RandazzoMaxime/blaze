@@ -114,6 +114,7 @@ mod imports;
 #[cfg(feature = "llvm")]
 mod llvm;
 mod neon;
+mod overlap;
 mod patch;
 mod places;
 #[cfg(feature = "llvm")]
@@ -511,6 +512,11 @@ enum PassMode {
         skipped: u8,
     },
     Indirect,
+    /// An unsized value (`unsized_fn_params`): rustc's `PassMode::Indirect` with
+    /// `meta_attrs`, the address of the value and then its metadata (length or vtable), the
+    /// value staying where the caller has it. In the codegen the place of such a value is a
+    /// pair of those two words in memory, as an unsized local's slot is.
+    IndirectUnsized,
     /// A vector of AArch64's shorter than 64 bits, whose lanes LLVM widens to make a 64-bit
     /// vector of the same count (`<4 x i8>` as `<4 x i16>`): in the low 64 bits of a vector
     /// register, each lane of `lane` at the bottom of `stride` bytes, the bits above it
@@ -2488,8 +2494,12 @@ const LARGE: usize = 50_000;
 /// dev-aws-6 nushell's `main`, of 35 780 instructions, took 75 ms of Cranelift with it and
 /// 47 ms with the single-pass one, on every edit to it; the largest functions of a cold build
 /// of nushell took 80 to 220 ms each. The single-pass allocator's code is larger and slower,
-/// which a function this large, a `main` or a big `match` run once, rarely pays for.
-const SINGLE_PASS: usize = 20_000;
+/// and it gives every value live across blocks a stack slot of its own: hir-ty's
+/// `<Ty as HirDisplay>::hir_fmt`, of 22 503 instructions and recursive, had a frame of 10.7 KB
+/// with it and 2.5 KB without, and hir-ide's `recursive_vars_2` overflowed its 2 MB stack. The
+/// largest functions of blaze's own hir-ide tests, up to 128 217 instructions, took at most
+/// 85 ms each with the usual one.
+const SINGLE_PASS: usize = 50_000;
 
 /// The most cases of a `match` lowered as a chain of comparisons for LLVM to make a `switch`
 /// of; a larger one, which a function Cranelift compiles after all would test one case at a
@@ -3208,6 +3218,8 @@ enum Variadic {
     Apple {
         named: u32,
     },
+    /// In memory the caller wrote, whose address follows the named parameters.
+    Buffer,
 }
 
 impl Variadic {
@@ -3222,6 +3234,7 @@ impl Variadic {
             Some(VariableArguments::Stack) => {
                 Some(Variadic::Apple { named: Self::apple_stack(sig)? })
             }
+            Some(VariableArguments::Buffer) => Some(Variadic::Buffer),
             None => None,
         })
     }
@@ -3231,6 +3244,7 @@ impl Variadic {
             Variadic::SystemV(named) => named.rest(sig),
             Variadic::Windows(named) => named.rest(sig),
             Variadic::Apple { .. } => (),
+            Variadic::Buffer => sig.params.push(AbiParam::new(ptr())),
         }
     }
 
@@ -6429,7 +6443,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     }
                 },
                 CachedData::Static { symbol, thread_local } => {
-                    self.module.declare_data(symbol, Linkage::Import, false, *thread_local)?
+                    self.declare_named_data(symbol, Linkage::Import, false, *thread_local, false)?
                 }
                 CachedData::OwnStatic(name) => {
                     let Some(of) = self.names.static_named(name) else {
@@ -6827,11 +6841,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             return Ok(data);
         }
         if let Some(symbol) = static_link_name(db, id).or_else(theirs) {
-            let data = self.module.declare_data(
+            let data = self.declare_named_data(
                 &symbol,
                 Linkage::Import,
                 false,
                 is_thread_local(db, id),
+                false,
             )?;
             self.imported_statics.insert(id, data);
             if stateful_linked {
@@ -6848,8 +6863,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         if let Some(symbol) = self.linked_static(id)? {
             let thread_local = is_thread_local(db, id);
-            let data =
-                self.module.declare_data(symbol.as_str(), Linkage::Import, false, thread_local)?;
+            let data = self.declare_named_data(
+                symbol.as_str(),
+                Linkage::Import,
+                false,
+                thread_local,
+                false,
+            )?;
             self.imported_statics.insert(id, data);
             return Ok(data);
         }
@@ -6864,8 +6884,15 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if known.symbol.is_empty() {
                 unsupported!("a static that rustc's symbols name no copy of");
             }
-            let data =
-                self.module.declare_data(&known.symbol, Linkage::Import, known.writable, false)?;
+            // A thread-local of the base is one still: the patch's code reaches it as one.
+            let thread_local = is_thread_local(db, id);
+            let data = self.declare_named_data(
+                &known.symbol,
+                Linkage::Import,
+                known.writable,
+                thread_local,
+                false,
+            )?;
             self.imported_statics.insert(id, data);
             return Ok(data);
         }
@@ -6880,7 +6907,13 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let own = (!self.patching).then(|| self.symbols.own_static(id)).flatten();
         let exported = exported_static(db, id).filter(|_| !self.patching);
         let data = if let Some(known) = again {
-            self.module.declare_data(&known.symbol, Linkage::Hidden, compiled.writable, false)?
+            self.declare_named_data(
+                &known.symbol,
+                Linkage::Hidden,
+                compiled.writable,
+                false,
+                false,
+            )?
         } else if let Some(name) = (self.base.is_some() && !thread_local && exported.is_none())
             .then(|| self.lasting_static_name(id, &compiled.blob.bytes, compiled.writable))
             .flatten()
@@ -6891,18 +6924,21 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 let name = StaticSignature::of(db, id).name.as_str();
                 unsupported!("a static `{name}` written as another is in the same place");
             }
-            self.module.declare_data(&name, Linkage::Hidden, compiled.writable, false)?
+            self.declare_named_data(&name, Linkage::Hidden, compiled.writable, false, false)?
         } else if let Some(name) = own.or_else(|| exported.map(|it| it.as_str().to_owned())) {
             // Nothing rustc built defines it: what finds it by name finds ours.
-            self.module.declare_data(&name, Linkage::Export, compiled.writable, thread_local)?
+            self.declare_named_data(&name, Linkage::Export, compiled.writable, thread_local, false)?
         } else if self.patching || thread_local {
             // Nothing else defines the statics of a program compiled to WebAssembly, and
             // under its own name a static is the same one after a build in full.
             let own = if cfg!(feature = "wasm") { self.symbols.static_(id) } else { None };
-            let name = own.unwrap_or_else(|| format!("ra_jit::static::{}", self.location_counter));
-            self.location_counter += 1;
+            let numbered = own.is_none();
+            let name = match own {
+                Some(name) => name,
+                None => self.own_data_name("ra_jit::static::"),
+            };
             let linkage = if self.patching { Linkage::Hidden } else { Linkage::Local };
-            self.module.declare_data(&name, linkage, compiled.writable, thread_local)?
+            self.declare_named_data(&name, linkage, compiled.writable, thread_local, numbered)?
         } else {
             self.declare_local_data(compiled.writable)?
         };
@@ -7438,11 +7474,60 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     }
 
     fn declare_local_data(&mut self, writable: bool) -> Result<DataId> {
+        let name = self.own_data_name(".Lra-jit.const.");
+        self.declare_named_data(&name, Linkage::Local, writable, false, true)
+    }
+
+    /// The next name of the object's own for a static or a constant, under `prefix`. A patch
+    /// imports the base's statics by the names the build in full gave them, from the same
+    /// numbering: a patch's own are numbered under names of their own, which never meet
+    /// those (#291). A build in full that patches come after has `patching` but no base.
+    fn own_data_name(&mut self, prefix: &str) -> String {
         let n = self.location_counter;
         self.location_counter += 1;
-        self.module
-            .declare_data(&format!(".Lra-jit.const.{n}"), Linkage::Local, writable, false)
-            .map_err(|e| CodegenError::Backend(e.to_string()))
+        match self.base.is_some() {
+            true => format!("{prefix}patch.{n}"),
+            false => format!("{prefix}{n}"),
+        }
+    }
+
+    /// [`Module::declare_data`], with an error naming the symbol where cranelift-module would
+    /// panic or quietly make two things one: a name declared once thread-local and once not
+    /// ("Can't change TLS data object to normal", #291), a function's name, or, for a name the
+    /// object numbered for data of its own (`own`), one already declared, whose definition
+    /// would then stand for both.
+    fn declare_named_data(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        writable: bool,
+        thread_local: bool,
+        own: bool,
+    ) -> Result<DataId> {
+        use cranelift_module::FuncOrDataId;
+        let shown = |tls: bool, linkage: Linkage| {
+            format!("{}{linkage:?}", if tls { "thread-local " } else { "" })
+        };
+        match self.module.declarations().get_name(name) {
+            Some(FuncOrDataId::Func(_)) => {
+                return Err(CodegenError::Backend(format!(
+                    "data `{name}` has the name of a function of the object"
+                )));
+            }
+            Some(FuncOrDataId::Data(id)) => {
+                let was = self.module.declarations().get_data_decl(id);
+                if was.tls != thread_local || own {
+                    return Err(CodegenError::Backend(format!(
+                        "data `{name}` declared as {} is declared again as {}{}",
+                        shown(was.tls, was.linkage),
+                        shown(thread_local, linkage),
+                        if own { ", of the object's own" } else { "" },
+                    )));
+                }
+            }
+            None => {}
+        }
+        Ok(self.module.declare_data(name, linkage, writable, thread_local)?)
     }
 
     /// An `extern_weak` static: not the memory at `symbol` but a pointer to it, 0 when nothing
@@ -8099,6 +8184,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn pass_mode(&self, layout: &Layout, is_ret: bool) -> Result<PassMode> {
+        if let BackendRepr::Memory { sized: false } = layout.backend_repr {
+            // rustc's `make_indirect` of an unsized argument; nothing returns one.
+            if is_ret {
+                unsupported!("an unsized value returned");
+            }
+            return Ok(PassMode::IndirectUnsized);
+        }
         if layout.is_zst() {
             return Ok(PassMode::Ignore);
         }
@@ -8238,6 +8330,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.wide_ints_on_stack(&mut abi)?;
             self.wide_ints_after_registers(&mut abi)?;
             return Ok(abi);
+        }
+        let args: Vec<_> = args.into_iter().collect();
+        if args.iter().any(|&ty| self.is_unsized(ty)) {
+            unsupported!("an unsized value passed in calling convention {abi:?}");
         }
         if self.cg.target.call_conv == isa::CallConv::WindowsFastcall {
             if matches!(abi, ExternAbi::SysV64 { .. }) {
@@ -8392,6 +8488,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Spread { .. } => unreachable!("only the Rust ABI spreads lanes"),
                 PassMode::SpilledPair { .. } => unreachable!("only the stack spills a pair"),
                 PassMode::SkippingPair { .. } => unreachable!("only AAPCS64 skips registers"),
+                PassMode::IndirectUnsized => {
+                    unreachable!("only the Rust ABI passes unsized values")
+                }
             };
             let aggregate = matches!(mode, PassMode::Cast(_) | PassMode::CastPair(..));
             let in_registers = match (int_regs.checked_sub(ints), sse_regs.checked_sub(sses)) {
@@ -8841,6 +8940,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 params.extend((0..count).map(|_| AbiParam::new(unit)));
             }
             PassMode::Indirect => params.push(AbiParam::new(ptr())),
+            PassMode::IndirectUnsized => {
+                params.extend([AbiParam::new(ptr()), AbiParam::new(ptr())])
+            }
             PassMode::Spread { .. } => params.push(AbiParam::new(types::F64)),
             PassMode::OnStack { size, padded } => {
                 params.extend(padded.then(|| copied(8)));
@@ -8945,6 +9047,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.copy(copy, addr, layout.size);
                 values.push(copy);
             }
+            // The callee is handed the value where it is, as rustc does: the operand is a
+            // place moved out of, whose memory nothing reads again.
+            PassMode::IndirectUnsized => {
+                values.push(self.builder.ins().load(ptr(), MEM, addr, 0));
+                values.push(self.builder.ins().load(ptr(), MEM, addr, meta_at()));
+            }
             PassMode::OnStack { padded, .. } => {
                 if padded {
                     values.push(self.scratch());
@@ -8986,6 +9094,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let mut next = || values.next().expect("a value for every abi parameter");
         match mode {
             PassMode::Ignore | PassMode::Indirect | PassMode::OnStack { .. } => (),
+            PassMode::IndirectUnsized => {
+                let (data, meta) = (next(), next());
+                self.builder.ins().store(MEM, data, addr, 0);
+                self.builder.ins().store(MEM, meta, addr, meta_at());
+            }
             PassMode::Direct(_) => {
                 let value = next();
                 self.builder.ins().store(MEM, value, addr, 0);
@@ -9319,7 +9432,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     Some(VariableArguments::Homed) => {
                         matches!(self.abi, ExternAbi::C { .. } | ExternAbi::Win64 { .. })
                     }
-                    Some(VariableArguments::Stack) => matches!(self.abi, ExternAbi::C { .. }),
+                    Some(VariableArguments::Stack | VariableArguments::Buffer) => {
+                        matches!(self.abi, ExternAbi::C { .. })
+                    }
                     None => false,
                 };
                 let Some(variadic) = Variadic::of(self.cg.target, &sig)?.filter(|_| native) else {
@@ -9352,10 +9467,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(layout),
             };
             self.receive(mode, &mut incoming, addr, layout);
-            self.locals.insert(local, LocalSlot { addr, borrowed: false });
+            // An unsized parameter's slot is where the value is and its metadata, as
+            // rustc's `LocalRef::UnsizedPlace`.
+            let borrowed = matches!(mode, PassMode::IndirectUnsized);
+            self.locals.insert(local, LocalSlot { addr, borrowed });
             if matches!(mode, PassMode::Indirect | PassMode::OnStack { .. }) {
                 self.note_passed_in_memory(body, local, addr);
             }
@@ -9455,6 +9574,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             self.builder.ins().store(MEM, stack, addr, 0);
             self.locals.insert(list, LocalSlot { addr, borrowed: false });
         }
+        if let Some(Variadic::Buffer) = variadic {
+            let list = *body.param_locals.last().expect("the list of a variadic function");
+            let layout = self.layout(body.locals[list].ty.as_ref())?;
+            if layout.size.bytes() != u64::from(ptr().bytes()) {
+                unsupported!("a `VaList` that is not the one of this target");
+            }
+            let addr = self.stack_slot(&layout);
+            let buffer = incoming.next().expect("where the variable arguments are");
+            self.builder.ins().store(MEM, buffer, addr, 0);
+            self.locals.insert(list, LocalSlot { addr, borrowed: false });
+        }
         if body.phase != MirPhase::Runtime {
             unsupported!("a body whose drops are not elaborated");
         }
@@ -9520,6 +9650,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         }
         let unmentioned = unmentioned_locals(body);
+        let mut shareable: Vec<(LocalId, ir::StackSlot)> = Vec::new();
         for (local, data) in body.locals.iter() {
             if self.locals.contains_idx(local)
                 || forwarded.contains_key(&local)
@@ -9559,6 +9690,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 continue;
             }
             let promoted = body.promoted_locals.iter().find(|it| it.0 == local);
+            // A slot of its own, which it may share with locals whose storage it never
+            // overlaps: see `overlap`.
+            if promoted.is_none()
+                && frame.is_none()
+                && !layout.is_unsized()
+                && layout.align.abi.bytes() <= 16
+            {
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    layout.size.bytes() as u32,
+                    layout.align.abi.bytes().trailing_zeros() as u8,
+                ));
+                let addr = self.builder.ins().stack_addr(ptr(), slot, 0);
+                self.locals.insert(local, LocalSlot { addr, borrowed: false });
+                shareable.push((local, slot));
+                continue;
+            }
             let addr = if let Some(&(_, expr)) = promoted {
                 let plain = self.is_plain(data.ty.as_ref());
                 match self.promoted_constant(body, expr, &layout, plain) {
@@ -9579,6 +9727,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             self.locals.insert(local, LocalSlot { addr, borrowed: false });
         }
+        self.note_shareable(body, &shareable, &forwarded);
         for (temp, to) in forwarded {
             self.locals.insert(temp, self.locals[to]);
         }
@@ -9870,7 +10019,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         let ty = self.body.expect("MIR body").locals[local].ty.as_ref();
         let layout = self.layout(ty).expect("the layout of a local kept in a register");
-        let slot = LocalSlot { addr: self.stack_slot(&layout), borrowed: false };
+        let lazy = self.cg.frame_locals.as_ref().and_then(|it| it.lazy.get(&local).copied());
+        let addr = match lazy {
+            Some(at) if !layout.is_unsized() && layout.align.abi.bytes() <= 16 => {
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    layout.size.bytes() as u32,
+                    layout.align.abi.bytes().trailing_zeros() as u8,
+                ));
+                self.cg.frame_locals.as_mut().expect("the frame's locals").slots[at] = Some(slot);
+                self.builder.ins().stack_addr(ptr(), slot, 0)
+            }
+            _ => self.stack_slot(&layout),
+        };
+        let slot = LocalSlot { addr, borrowed: false };
         self.locals.insert(local, slot);
         slot
     }
@@ -12052,6 +12214,54 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(Some(addr))
     }
 
+    /// Tells `overlap` which of the slots of `shareable` and of the locals kept in registers
+    /// may hold a value at once: those of two locals whose storage may overlap, a temporary
+    /// written to a binding's slot (`forwarded`) counting as part of the binding.
+    fn note_shareable(
+        &mut self,
+        body: &MirBody<'_>,
+        shareable: &[(LocalId, ir::StackSlot)],
+        forwarded: &FxHashMap<LocalId, LocalId>,
+    ) {
+        // A local kept in a register gets its slot later, if ever: see `local_slot`.
+        let mut registers: Vec<LocalId> = self.registers.keys().copied().collect();
+        registers.sort_unstable_by_key(|it| it.into_raw().into_u32());
+        let count = shareable.len() + registers.len();
+        if count < 2 {
+            return;
+        }
+        let at: FxHashMap<LocalId, usize> =
+            shareable.iter().enumerate().map(|(at, &(local, _))| (local, at)).collect();
+        // Each local with the slot it is kept in, by the slot's index.
+        let mut members: Vec<(LocalId, usize)> =
+            shareable.iter().enumerate().map(|(at, &(local, _))| (local, at)).collect();
+        let lazy: FxHashMap<LocalId, usize> = registers
+            .iter()
+            .enumerate()
+            .map(|(at, &local)| (local, shareable.len() + at))
+            .collect();
+        members.extend(registers.iter().map(|local| (*local, lazy[local])));
+        for (&temp, to) in forwarded {
+            if let Some(&slot) = at.get(to) {
+                members.push((temp, slot));
+            }
+        }
+        let locals: Vec<LocalId> = members.iter().map(|it| it.0).collect();
+        let storage = body.frame_storage_conflicts(&locals);
+        let mut conflicts = rustc_index::bit_set::BitMatrix::new(count, count);
+        for (a, &(_, slot_a)) in members.iter().enumerate() {
+            for (b, &(_, slot_b)) in members.iter().enumerate().skip(a + 1) {
+                if slot_a != slot_b && storage.conflict(a, b) {
+                    conflicts.insert(slot_a, slot_b);
+                    conflicts.insert(slot_b, slot_a);
+                }
+            }
+        }
+        let mut slots: Vec<Option<ir::StackSlot>> = shareable.iter().map(|it| Some(it.1)).collect();
+        slots.resize(count, None);
+        self.cg.frame_locals = Some(overlap::FrameLocals { slots, conflicts, lazy });
+    }
+
     /// Notes the locals a debugger can be told of: the ones written with a name whose value
     /// is in a stack slot of its own, or in the future of an `async` body. What a closure
     /// captured is no local of its body, and is told of by the type of the closure alone.
@@ -12439,7 +12649,29 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     }
 
     fn operands(&mut self, operands: &[Operand]) -> Result<Vec<(Value, Ty<'db>)>> {
-        operands.iter().map(|it| self.operand(it)).collect()
+        operands.iter().map(|it| self.argument(it)).collect()
+    }
+
+    /// An argument of a call. An unsized one (`unsized_fn_params`) is a place moved out of,
+    /// and is where a pair of its address and metadata is, which `PassMode::IndirectUnsized`
+    /// passes.
+    fn argument(&mut self, operand: &Operand) -> Result<(Value, Ty<'db>)> {
+        let (OperandKind::Copy(place) | OperandKind::Move(place)) = &operand.kind else {
+            return self.operand(operand);
+        };
+        let ty = self.operand_ty(operand)?;
+        if !self.is_unsized(ty) {
+            return self.operand(operand);
+        }
+        let PlaceRef { addr, meta: Some(meta), .. } = self.place_ref(place)? else {
+            unsupported!("unsized argument {ty:?} without metadata");
+        };
+        // What the operand reads, for `given_away`.
+        self.operand(operand)?;
+        let pair = self.scratch_pair();
+        self.builder.ins().store(MEM, addr, pair, 0);
+        self.builder.ins().store(MEM, meta, pair, meta_at());
+        Ok((pair, ty))
     }
 
     /// `Fn::call`, `FnMut::call_mut` or `FnOnce::call_once`. For a call expression MIR passes
@@ -12711,8 +12943,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst_ty: Ty<'db>,
     ) -> Result<()> {
         let receiver_layout = self.layout(receiver_ty)?;
-        if !matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
-            || receiver_layout.size.bytes_usize() != 2 * word()
+        // A `dyn Trait` taken by value is where the pair of its data pointer and vtable is
+        // (`argument`), as a fat pointer to it would be; rustc hands the method the data
+        // pointer as well.
+        let by_value = matches!(receiver_ty.kind(), TyKind::Dynamic(..));
+        if !by_value
+            && (!matches!(receiver_layout.backend_repr, BackendRepr::ScalarPair { .. })
+                || receiver_layout.size.bytes_usize() != 2 * word())
         {
             unsupported!("vtable call with receiver {receiver_ty:?}");
         }
@@ -13153,6 +13390,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 PassMode::Indirect | PassMode::OnStack { .. } => {
                     incoming.next().expect("indirect param")
                 }
+                PassMode::IndirectUnsized => self.scratch_pair(),
                 _ => self.stack_slot(&layout),
             };
             self.receive(mode, &mut incoming, addr, &layout);
@@ -13338,6 +13576,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     PassMode::Indirect | PassMode::OnStack { .. } => {
                         incoming.next().expect("indirect param")
                     }
+                    PassMode::IndirectUnsized => self.scratch_pair(),
                     _ => self.stack_slot(&layout),
                 };
                 self.receive(mode, &mut incoming, addr, &layout);
@@ -13533,7 +13772,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let sret = sig.params.first().is_some_and(|it| it.purpose == ArgumentPurpose::StructReturn);
         let count = match mode {
             PassMode::Ignore => 0,
-            PassMode::Pair(..) => 2,
+            PassMode::Pair(..) | PassMode::IndirectUnsized => 2,
             PassMode::SpilledPair { spilled, .. } => {
                 spilled.iter().map(|it| it.map_or(1, |padded| 1 + usize::from(padded))).sum()
             }
@@ -14153,6 +14392,25 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("va_arg", [list])
+                if self.cg.target.variable_arguments() == Some(VariableArguments::Buffer) =>
+            {
+                let scalar = self.scalar_of(dst_ty)?;
+                // What is wider is in pieces whose places the caller decides with LLVM.
+                if scalar.ty.bytes() > 8 {
+                    unsupported!("`va_arg` of {dst_ty:?}");
+                }
+                // The list is the address after the argument before, and each is as aligned
+                // as it is wide.
+                let bytes = i64::from(scalar.ty.bytes());
+                let (list, _) = self.load_scalar(list)?;
+                let after = self.builder.ins().load(ptr(), MEM, list, 0);
+                let slot = self.builder.ins().iadd_imm(after, bytes - 1);
+                let slot = self.builder.ins().band_imm(slot, -bytes);
+                let next = self.builder.ins().iadd_imm(slot, bytes);
+                self.builder.ins().store(MEM, next, list, 0);
+                self.copy(dst, slot, Size::from_bytes(bytes as u64));
+            }
+            ("va_arg", [list])
                 if matches!(
                     self.cg.target.variable_arguments(),
                     Some(VariableArguments::Homed | VariableArguments::Stack)
@@ -14477,6 +14735,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             (
+                "simd_add" | "simd_sub" | "simd_mul" | "simd_div" | "simd_eq" | "simd_ge"
+                | "simd_gt" | "simd_le" | "simd_lt" | "simd_neg" | "simd_fabs" | "simd_fsqrt"
+                | "simd_floor" | "simd_ceil" | "simd_fma" | "simd_cast",
+                _,
+            ) if self.half_lanes(args, dst_ty)? => self.half_vector(name, args, dst, dst_ty)?,
+            (
                 "simd_and"
                 | "simd_or"
                 | "simd_xor"
@@ -14598,7 +14862,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (on_true, _) = self.operand(on_true)?;
                 let (on_false, _) = self.operand(on_false)?;
                 let (mask_lane, count) = self.simd_lanes(mask_ty)?;
-                let (lane, _) = self.simd_lanes(dst_ty)?;
+                let (lane, _) = self.simd_moved_lanes(dst_ty)?;
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
                     let mask_offset = (i * mask_lane.ty.bytes() as u64) as i32;
@@ -14615,7 +14879,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (mask, _) = self.operand(mask)?;
                 let (on_true, _) = self.operand(on_true)?;
                 let (on_false, _) = self.operand(on_false)?;
-                let (lane, count) = self.simd_lanes(dst_ty)?;
+                let (lane, count) = self.simd_moved_lanes(dst_ty)?;
                 // Lane i by bit i of the mask, an integer or bytes: its bytes in memory in order.
                 let lanes: Vec<Value> = (0..count)
                     .map(|i| {
@@ -14663,7 +14927,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("simd_extract", [vector, index]) => {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
-                let (lane, _) = self.simd_lanes(ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
                 let index = self.builder.ins().uextend(ptr(), index);
                 let offset = self.builder.ins().imul_imm(index, lane.ty.bytes() as i64);
                 let addr = self.builder.ins().iadd(vector, offset);
@@ -14674,7 +14938,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let (vector, ty) = self.operand(vector)?;
                 let (index, _) = self.load_scalar(index)?;
                 let (value, _) = self.load_scalar(value)?;
-                let (lane, _) = self.simd_lanes(ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
                 let size = self.layout(ty)?.size;
                 self.copy(dst, vector, size);
                 let index = self.builder.ins().uextend(ptr(), index);
@@ -14688,8 +14952,8 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // `[u32; N]`, or a wrapper of one. Lanes of `second` come after `first`'s.
                 let (indices, _) = self.operand(indices)?;
                 let layout = self.layout(ty)?;
-                let (lane, _) = self.simd_lanes(ty)?;
-                let (_, count) = self.simd_lanes(dst_ty)?;
+                let (lane, _) = self.simd_moved_lanes(ty)?;
+                let (_, count) = self.simd_moved_lanes(dst_ty)?;
                 let lane_size = lane.ty.bytes() as u64;
                 let both = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -14714,7 +14978,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             ("simd_splat", [arg]) => {
                 let (src, _) = self.operand(arg)?;
-                let (lane, count) = self.simd_lanes(dst_ty)?;
+                let (lane, count) = self.simd_moved_lanes(dst_ty)?;
                 let value = self.builder.ins().load(lane.ty, MEM, src, 0);
                 for i in 0..count {
                     let offset = (i * lane.ty.bytes() as u64) as i32;
@@ -15737,7 +16001,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Ok(());
         }
-        if name.starts_with("aarch64.sve.") {
+        if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
             return self.sve_intrinsic(name, args, dst, dst_ty);
         }
         match (name, args) {
@@ -16226,6 +16490,80 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             _ => unsupported!("LLVM intrinsic `{name}`"),
         }
         Ok(())
+    }
+
+    /// The lanes of a vector type for an operation that only moves them, which moves the bits
+    /// of a lane of `f16` as an integer of 16 bits.
+    fn simd_moved_lanes(&self, ty: Ty<'db>) -> Result<(AbiScalar, u64)> {
+        if let BackendRepr::SimdVector { element, count } = self.layout(ty)?.backend_repr
+            && let Primitive::Float(rustc_abi::Float::F16) = element.primitive()
+        {
+            return Ok((AbiScalar { ty: types::I16, signed: false }, count.as_u64()));
+        }
+        self.simd_lanes(ty)
+    }
+
+    /// Whether the first of `args` or the result is a vector of `f16`.
+    fn half_lanes(&mut self, args: &[Operand], dst_ty: Ty<'db>) -> Result<bool> {
+        let first = match args.first() {
+            Some(arg) => Some(self.operand_ty(arg)?),
+            None => None,
+        };
+        for ty in first.into_iter().chain([dst_ty]) {
+            if let BackendRepr::SimdVector { element, .. } = self.layout(ty)?.backend_repr
+                && let Primitive::Float(rustc_abi::Float::F16) = element.primitive()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The lanes of a vector type as `neon` names them, and whether its integers are signed.
+    fn neon_lanes_of(&self, ty: Ty<'db>) -> Result<(neon::Lanes, bool)> {
+        let BackendRepr::SimdVector { element, count } = self.layout(ty)?.backend_repr else {
+            unsupported!("vector operation on {ty:?}");
+        };
+        let count = count.as_u64() as u32;
+        Ok(match element.primitive() {
+            Primitive::Float(float) => {
+                (neon::Lanes::floats(float.size().bits() as u32, count), true)
+            }
+            Primitive::Int(int, signed) => {
+                (neon::Lanes { count, bits: int.size().bits() as u32, float: false }, signed)
+            }
+            _ => unsupported!("vector operation on {ty:?}"),
+        })
+    }
+
+    /// A generic intrinsic on vectors of `f16`, as [`neon::half_vector`] has it, in a function
+    /// with the half-precision instructions; elsewhere LLVM works on the lanes as `f32`s, but
+    /// for the conversions between the two, which are the same instructions there.
+    fn half_vector(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
+        let Some(first) = args.first() else {
+            unsupported!("`{name}` without operands");
+        };
+        let ty = self.operand_ty(first)?;
+        let (a, a_signed) = self.neon_lanes_of(ty)?;
+        let (r, r_signed) = self.neon_lanes_of(dst_ty)?;
+        let widths = (r.float && a.float).then_some((r.bits, a.bits));
+        let single_and_half = name == "simd_cast" && matches!(widths, Some((16, 32) | (32, 16)));
+        if self.cg.target.arch != Arch::Aarch64 || !(single_and_half || self.half_precision()) {
+            unsupported!(
+                "vector operation on lanes of f16 without the half-precision instructions"
+            );
+        }
+        let signed = if a.float { r_signed } else { a_signed };
+        let Some(lowered) = neon::half_vector(name, r, a, signed) else {
+            unsupported!("`{name}` of lanes of f16 into {dst_ty:?}");
+        };
+        self.neon_assembly(name, &lowered, args, dst, dst_ty)
     }
 
     /// The lane type and lane count of a vector type. Lanes sit in memory in order.

@@ -349,6 +349,8 @@ pub(super) struct Recorder<'db> {
     span_ids: FxHashMap<MirSpan, u32>,
     /// The locals written with a name that a stack slot of their own tells where they are.
     pub(super) named: Vec<Named>,
+    /// The slots of the locals of the body, for [`overlap`](super::overlap) to share.
+    pub(super) frame_locals: Option<super::overlap::FrameLocals>,
     /// The bodies of the callees that are built into their callers, which call them by their
     /// place here in [`INLINED`] until [`inline`](super::inline) puts the bodies there.
     pub(super) inlined: Vec<ir::Function>,
@@ -698,6 +700,7 @@ impl<'db> Recorder<'db> {
             spans: Vec::new(),
             span_ids: FxHashMap::default(),
             named: Vec::new(),
+            frame_locals: None,
             inlined: Vec::new(),
             unlocated: false,
             opaque: false,

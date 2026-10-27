@@ -98,12 +98,14 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 |---|---|
 | `difftest.py <workspace> --bin <pkg> --crate <name>` | The base comparison. Builds the binary with cargo, compiles the named crates with ra-jit, links ra-jit's object ahead of rustc's rlibs, runs both. `--layouts` also compares the size and alignment of every type ra-jit laid out with rustc's `-Zprint-type-sizes`. `--bisect` links each ra-jit function in on its own to name the ones that change behaviour. `--mixed N` runs N builds with a random half of the functions left to rustc. `--memcheck` runs under valgrind |
 | `harness/corpus/` | The workspace `difftest.py corpus` runs: a library with one module per area of the code generator and a runner that calls every function and prints the result |
+| `wasm32.py [check...]` | The train's wasm32 job: harnesses run with `RA_JIT_TARGET=wasm32-wasip1` (the corpus, `stress.py`) under wasmtime, each in a process of its own. `RA_JIT_TARGET` takes any harness that builds a program there; see [reports/WASM32.md](reports/WASM32.md). Run in `nix develop .#wasm` |
 | `breakers.py` | Every reduction under `harness/breakers/`, each run on its own so a crash in one does not hide the others. These are minimal cases of bugs found in real crates, rustc's tests and the fuzzer |
 | `unwinds.py` | Edits to functions a panic unwinds through |
 | `growth.py` | That the code of one function grows in a straight line with its source: the `serialize` `#[derive(Serialize)]` gives an internally tagged enum, a `?` in every arm, at 160 and 320 arms (issue #5); and a `load` filling a struct of 200 and 400 fields, each a call's `?` while a value with a destructor is live, as x11-dl opens Xlib's 781 functions (the way out of each `?` once dropped every field before it on its own: 2,986,013 blocks, and 364 GB for bevy) |
 | `asmedits.py` | Edits to `asm!` blocks and the code around them; with `RA_JIT_ASSEMBLER=cc`, assembled by the C compiler, as a build without LLVM does |
 | `answers.py` | That ra-jit's own answers to rustc's questions (`-vV`, `--print cfg`, cargo's probe of file names, `target-spec-json`) are rustc's, byte for byte, on every target ra-jit has them of; `--write` regenerates them from the pinned rustc ([no-rustc.md](no-rustc.md), step B) |
 | `scripts.py [name ...]` | Build scripts run by `crates/blaze-build-script` against the pinned nightly's cargo's runs of them, over the applications of `apps/apps.json` and `harness/scripts/` (openssl-sys, zstd-sys, libz-sys, libgit2-sys, ring, rustix and the scripts that read their metadata): for each run, the environment blaze computes against the one cargo gave, blaze's reading of cargo's output against cargo's own, and a run by blaze against cargo's. `--json` writes every difference ([no-rustc.md](no-rustc.md), step I) |
+| `bscache.py record [project ...]`, `bscache.py report` | What each build script of the projects of `bench.py` reaches in the sandbox: `record` runs `cargo check --compile-time-deps` through `ra-jit-rustc`, so every script runs under `ra-jit build-script` in the sandbox, and collects the sandbox's records; `report` classes each line as one a hermetic sandbox allows (the package, OUT_DIR, the toolchain, the C compiler and pkg-config) or would deny (network, writes outside OUT_DIR, other executables, other reads) and writes the list (`bench/results/2026-10-27-bscache/`). Needs the network |
 | `toolchain_pins.py` | That the sha256 and size of each file of blaze's own Rust (`cargo/toolchain/pins.txt`) are what the release's manifest at static.rust-lang.org says, for every host blaze ships for; `--write` regenerates them when blaze moves to another release ([cargo.md](cargo.md)). Needs the network |
 | `norustc.py` | How often rustc and rustdoc run when `harness/norustc/fixture` is built, edited, tested, doctested and checked with `cargo ra-jit`, through a copy of the toolchain that logs every run; a count above `norustc/baseline.json` fails ([no-rustc.md](no-rustc.md), step A). `--record` lowers the baseline |
 | `fuzz/fuzz.py` | Generated programs, see below |
@@ -116,6 +118,7 @@ with reasons. The daemon's log says `backend: llvm -O2 fast emit` when LLVM is i
 | `allrajit.py [whole] [unit] [stored]` | Programs with nothing rustc built in them, the standard library compiled by ra-jit ([no-rustc.md](no-rustc.md), steps F and G): a hello, one of collections, panics, threads and channels, one of 128-bit atomics raced by threads, and one of the paths of `split_paths_ref` and the XDG directories, each built with the library in the same build, over the library built alone (`--prebuilt`), and on a store and a remote that start empty, where the first build compiles and keeps the library and the later ones, one on a second store, take it. Each has to print and exit as cargo's build does. Linux |
 | `macroserver.py` | The release's proc-macro server (`vendor/proc-macro-srv`) built by ra-jit, and the libraries ra-jit links of serde_derive, thiserror-impl, tokio-macros and clap_derive ([no-rustc.md](no-rustc.md), step J1): every call of a package's derives (with helper attributes), attributes and function-like macros is expanded by the toolchain's server with rustc's library and by ra-jit's with ra-jit's, and the outputs have to be equal, spans included; the package is then built whole with its proc macros by rustc and by ra-jit. `macroserver.py <app>` (or `all`) builds a bench app (fd, bat, hyperfine, just, nushell, helix) whole with `RA_JIT_PROC_MACRO_SERVER`, so ra-jit links every proc macro, again into an empty target directory over that build's store (no library may be linked again), and again without, expanding every call by both servers; the counts, the calls not compared and why each proc macro was rustc's are printed, and both programs have to print the same. Needs crates.io. Linux |
 | `frozenwarm.py` | Frozen def maps (#40, #161) of a dependency whose items, and a `macro_rules!` it exports, are in files `include!` reads and the VFS does not load at first, as the icu `*_data` crates': built on one store cold, warm twice, warm with `RA_JIT_FROZEN=check` and `=verify`, and warm after an included file changed at the same path, which has its def map refused. Each has to print what cargo's build does. Linux |
+| `freshwarm.py PROJECT` | What a build costs on a fresh machine whose only warm thing is the remote (#41): a seed builds on an empty store and `ra-jit cache push`es it; then for each edit (`--edits none,body,signature`, `none2` for a second unchanged one) the checkout is copied again to the same path, the home emptied, `ra-jit cache pull` run and the build timed. Prints pull and build seconds, the time to ready, peak memory, what was compiled and found, the steps and threads' time and the `manifest:` lines; an unchanged build's program has to print what the seed's does. `--env` sets a variable on every step and `--fresh-env` on the fresh ones only (a build configured otherwise). `PROJECT` is one of `bench.py`'s or `blaze` (`--source` the checkout). Not in CI |
 | `wholeprogram.py` | Programs ra-jit builds whole, with its own `main` (as `runbench.py` builds them): one on the default allocator, one with a `#[global_allocator]` of its own, one with a library's, one whose allocator is under a `#[cfg]` that is false. Each has to print and exit as cargo's build does, and a second build of it by ra-jit has to give the same object byte for byte ([#200](https://github.com/indexable-inc/blaze/issues/200)); `--release` builds both in the release profile |
 | `bun_repros.py` | Nightly fixtures, one per thing bun's whole-program build found ra-jit doing wrong (`harness/bun-repros/`: `adt_const_params`, `core::mem::type_info`, macros, exported statics, frame pointers, …). Each compares output with cargo's binary and checks the report's refusals against the case's. A case can set its own `rustflags` and `env` (the frame-pointer case runs LLVM), and `alone` builds it as runbench builds bun, the link taking only ra-jit's objects. It builds with the pinned nightly of `harness/toolchain`, as everything else does. |
 | `backends.py` | One program compiled by each code producer: counts, time per function, and what LLVM left to Cranelift |
@@ -343,18 +346,19 @@ for each platform, each on a machine of its own kind.
 
 | Workflow | Event | What runs | Wall time |
 |---|---|---|---|
-| `ra-jit.yaml` (`gate`) | pull request, merge queue | on Linux x86-64: the build and the unit tests; `harness/imports.py`, `harness/rustcsites.py` | about 5 min |
+| `ra-jit.yaml` (`gate`) | pull request | on Linux x86-64: the build and the unit tests; `harness/imports.py`, `harness/rustcsites.py` | about 5 min |
 | `ra-jit.yaml` (`warm`) | push to main | the build and the unit tests on Linux x86-64, AArch64 and macOS, and the rust tests checkout: they write the caches the other runs read | about 8 min |
 | `fmt.yaml` | push to main | `cargo fmt --all`, and a commit `fmt` when it changed a file | 2 min |
 | `train.yaml` | push to main, by hand | everything below, then a release or the train's issue | about 45 min |
 | `ra-jit.yaml` | docs or site only | the two scripts | 1 min |
 
-A change reaches main through the **merge queue** alone
-([contributing.md](contributing.md#landing-a-change)). `ci` must pass on the pull request before
-it can join the queue; the queue merges each pull request onto main and the entries ahead of it,
-runs the gate on that, and moves main to it once it passes. The gate is the build and the unit
-tests: a change that does not build, or breaks a unit test, never reaches main, and the queue
-moves every few minutes. What the harnesses find, they find on main, in the train, which says
+A change reaches main through a **pull request** alone
+([contributing.md](contributing.md#landing-a-change)), merged directly once `ci` passes on it;
+there is no merge queue, and the branch need not be up to date with main (removed 2026-10-27:
+the queue's wait and its reruns on entries that later landed unchanged cost more than the rare
+pair of changes that pass alone and break together, which the train catches on main). The gate
+is the build and the unit tests: a change that does not build, or breaks a unit test, does not
+merge. What the harnesses find, they find on main, in the train, which says
 which commits since the last green train it came in with. Before the gate was this small, a
 merge-queue run took 35 to 45 minutes, nearly all of it harnesses (harness/ci.py's `quick-2`
 on every platform), and 51 of 140 queue runs on 2026-10-25 and 26 failed, most of them on
@@ -391,6 +395,8 @@ with the `llvm` feature, hands the binary to its other jobs, and runs:
   runs; a miss fetches it from GitHub with retries, since the plain fetch was refused with HTTP
   429 in 26 jobs in two days);
 - the Bun fixtures (Linux x86-64);
+- `harness/wasm32.py` (Linux x86-64, in the flake's `wasm` shell): the corpus and `stress.py`
+  built for `wasm32-wasip1` and run under wasmtime against cargo's build;
 - `cargo_ra_jit.py`: its checks, ripgrep and hyperfine, and fd (Linux x86-64 and macOS), and
   ripgrep, fd, bat, hyperfine, just, axum and nushell with each project's tests (Linux AArch64);
 - `fork alone`: `vendor/rust-analyzer` built and tested outside this repository (the tests of
@@ -435,20 +441,18 @@ runs by hand in its ix VM: every harness of `FAST`, in parts of about four minut
 
 ### Concurrency, the check and the ruleset
 
-On a pull request a newer push cancels the gate's run before it. Every push to main and every
-merge-queue entry runs the gate to the end in a concurrency group of its own: with one group for
+On a pull request a newer push cancels the gate's run before it. Every push to main runs the gate to the end in a concurrency group of its own: with one group for
 main, a merge every few minutes replaced each waiting run with the next, and 7 of 10 runs on
 main were cancelled.
 
 `ci` is the gate's job that says whether everything that ran passed, and it is the one check
-branch rules and the merge queue require. A job that is renamed or split does not change it.
+the branch rules require. A job that is renamed or split does not change it.
 
-The repository ruleset `main` (Settings, Rules) is active and holds the default branch to four
-rules: a change comes through the merge queue, a push needs `ci` to have passed on the commit
-pushed, the branch can't be deleted, and it can't be force-pushed. The queue merges with a
-merge commit, builds up to five entries at once, merges up to five together, needs every entry
-green, and counts an entry failed after 60 minutes without `ci`. Repository admins bypass the
-rules (`bypass_actors`), for repairs; work lands through the queue. A ruleset can't exempt the
+The repository ruleset `main` (Settings, Rules) is active and holds the default branch to three
+rules: a change needs `ci` to have passed on its commit (not strict: the branch need not be up to
+date with main), the branch can't be deleted, and it can't be force-pushed. There is no merge
+queue (removed 2026-10-27). Repository admins bypass the
+rules (`bypass_actors`), for repairs; work lands through pull requests. A ruleset can't exempt the
 token a workflow runs with, so the workflows that commit to main (`fmt.yaml`, the train's
 `release`, `pgo.yaml`'s pin, `bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check
 out with the secret `RA_JIT_BOT_TOKEN`, a fine-grained token of a repository admin (Contents

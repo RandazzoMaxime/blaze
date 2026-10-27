@@ -553,6 +553,7 @@ fn main() {
     #[cfg(panic = "unwind")]
     println!("async_drops {:?}", cases::async_drops::run());
     println!("promoted_assoc_const {:?}", cases::promoted_assoc_const::run());
+    println!("promoted_value_qualifs {:?}", cases::promoted_value_qualifs::run());
     println!("offsets {:?}", cases::offsets::run());
     println!("backtraces {:?}", cases::backtraces::run());
     println!("inline_const_bindings {:?}", cases::inline_const_bindings::run());
@@ -613,6 +614,8 @@ fn main() {
     println!("simd_lanes {}", cases::simd_lanes::run());
     #[cfg(feature = "nightly")]
     println!("fma_nans {}", cases::fma_nans::run());
+    #[cfg(feature = "nightly")]
+    println!("unsized_params {}", cases::unsized_params::run());
     #[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
     println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
@@ -621,6 +624,8 @@ fn main() {
     println!("simd_aarch64 {}", cases::simd_aarch64::run());
     #[cfg(all(target_arch = "aarch64", feature = "nightly"))]
     println!("neon_intrinsics {}", cases::neon_intrinsics::run());
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "nightly"))]
+    println!("half_intrinsics {}", cases::half_intrinsics::run());
     #[cfg(feature = "nightly")]
     {
         use std::simd::Simd;
