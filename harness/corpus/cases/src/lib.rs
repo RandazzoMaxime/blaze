@@ -371,6 +371,17 @@ pub mod consts {
     pub fn repeat(v: u16) -> [u16; 5] {
         [v; 5]
     }
+    // A slice matched from its end in a constant: its length is the target's `usize`.
+    const FROM_END: (u8, usize) = {
+        let primes: &[u8] = &[3, 5, 7, 11];
+        match primes {
+            [.., before, last] => (*before + *last, primes.len()),
+            _ => (0, 0),
+        }
+    };
+    pub fn from_end(n: u8) -> (u8, usize) {
+        (FROM_END.0 + n, FROM_END.1)
+    }
 }
 
 pub mod generics {
