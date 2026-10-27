@@ -354,7 +354,8 @@ fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), St
         }
         let _unwritten = crate::splice::unwritten(&plan.binary);
         let stand_ins = crate::link::stand_ins(&plan.binary).map_err(|it| format!("{it:#}"))?;
-        if !stand_ins.is_empty() && std::env::var_os("RA_JIT_ALLOW_STAND_INS").is_none() {
+        // On Windows the executable keeps every stand-in (see `main.rs`, `link_whole`).
+        if !stand_ins.is_empty() && !cfg!(windows) {
             let mut reached: Vec<String> = stand_ins
                 .iter()
                 .take(SHOWN)

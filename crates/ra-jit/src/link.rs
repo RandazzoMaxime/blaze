@@ -31,6 +31,13 @@ pub(crate) fn executable(
 ) -> anyhow::Result<Duration> {
     let mut line = Line::of(db, program, sysroot, exports.is_some())?;
     let Some(exports) = exports else { return line.link(objects, exe) };
+    if line.windows {
+        // A DLL names what it exports on the command line; `GetProcAddress` finds the list of
+        // a proc-macro crate by it.
+        line.before.push("/DLL".to_owned());
+        line.before.extend(exports.iter().map(|it| format!("/EXPORT:{it}")));
+        return line.link(objects, exe);
+    }
     let mut listed = exe.as_os_str().to_owned();
     listed.push(".exports");
     let listed = PathBuf::from(listed);
@@ -96,6 +103,7 @@ pub(crate) struct Line {
     apple: bool,
     /// Linked by `link.exe`: the arguments are its own.
     windows: bool,
+    raw_dylibs: Vec<(String, Vec<(String, bool)>)>,
 }
 
 impl Line {
@@ -122,7 +130,13 @@ impl Line {
         }
         after.extend(native.args);
         after.extend(target.trailing());
-        Ok(Line { before, after, apple: target.apple, windows: target.windows })
+        Ok(Line {
+            before,
+            after,
+            apple: target.apple,
+            windows: target.windows,
+            raw_dylibs: native.raw_dylibs,
+        })
     }
 
     /// Links `objects` into the executable `exe`. How long `cc` took.
@@ -171,9 +185,8 @@ impl Line {
             }
         }
         args.extend(libs.iter().map(|it| format!("/LIBPATH:{}", it.display())));
-        // LOCAL, for the essay: import libraries of what std links `raw-dylib`, which rustc makes itself.
-        if let Some(dir) = std::env::var_os("RA_JIT_EXTRA_LIBPATH") {
-            args.push(format!("/LIBPATH:{}", PathBuf::from(dir).display()));
+        if let Some(dir) = self.import_libraries(&libs, exe)? {
+            args.push(format!("/LIBPATH:{}", dir.display()));
         }
         args.extend(self.after.iter().cloned());
         args.push(format!("/OUT:{}", exe.display()));
@@ -184,6 +197,50 @@ impl Line {
         std::fs::write(&response, text.join("\n"))
             .with_context(|| format!("writing {}", response.display()))?;
         Ok((linker, response))
+    }
+
+    /// The import libraries of the DLLs the program imports with `raw-dylib` and the system's
+    /// libraries lack, as rustc writes them: made from the names imported, in a directory
+    /// beside `exe`. `None` when there is none to make.
+    fn import_libraries(&self, system: &[PathBuf], exe: &Path) -> anyhow::Result<Option<PathBuf>> {
+        let missing: Vec<_> = self
+            .raw_dylibs
+            .iter()
+            .filter(|(dll, _)| !system.iter().any(|dir| dir.join(format!("{dll}.lib")).is_file()))
+            .collect();
+        if missing.is_empty() {
+            return Ok(None);
+        }
+        let mut dir = exe.as_os_str().to_owned();
+        dir.push(".implib");
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let Some(tool) = find_msvc_tool("lib.exe") else { bail!("no lib.exe beside link.exe") };
+        for (dll, names) in missing {
+            let mut names = names.clone();
+            names.sort();
+            names.dedup();
+            let mut def = format!("LIBRARY {dll}.dll\nEXPORTS\n");
+            for (name, data) in &names {
+                def.push_str(&format!("  {name}{}\n", if *data { " DATA" } else { "" }));
+            }
+            let file = dir.join(format!("{dll}.def"));
+            std::fs::write(&file, def).with_context(|| format!("writing {}", file.display()))?;
+            let ran = Command::new(&tool)
+                .arg("/NOLOGO")
+                .arg(format!("/DEF:{}", file.display()))
+                .arg(format!("/OUT:{}", dir.join(format!("{dll}.lib")).display()))
+                .arg("/MACHINE:X64")
+                .output()
+                .with_context(|| format!("running {}", tool.display()))?;
+            if !ran.status.success() {
+                bail!(
+                    "the import library of {dll}.dll failed: {}",
+                    String::from_utf8_lossy(&ran.stdout)
+                );
+            }
+        }
+        Ok(Some(dir))
     }
 
     fn msvc_command(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<String> {
@@ -226,6 +283,17 @@ fn msvc_tool() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
         })
         .unwrap_or_default();
     Ok((tool.path().to_path_buf(), libs))
+}
+
+/// A program of the MSVC tools next to `link.exe`.
+#[cfg(windows)]
+fn find_msvc_tool(name: &str) -> Option<PathBuf> {
+    find_msvc_tools::find_tool(std::env::consts::ARCH, name).map(|it| it.path().to_path_buf())
+}
+
+#[cfg(not(windows))]
+fn find_msvc_tool(_: &str) -> Option<PathBuf> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -291,6 +359,9 @@ struct Native {
     /// Where the libraries are looked for: `-L` and `-F`.
     search: Vec<String>,
     libs: Vec<NativeLib>,
+    /// The DLLs the program imports with `kind = "raw-dylib"` and the names it imports from
+    /// each: rustc writes their import libraries, and so must the link on Windows.
+    raw_dylibs: Vec<(String, Vec<(String, bool)>)>,
     /// What the build scripts of the program's packages give the linker as it is.
     args: Vec<String>,
 }
@@ -313,6 +384,9 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
             .flat_map(|(_, module)| module.scope(db).extern_blocks())
             .flat_map(|block| AttrFlags::native_libs(db, block).iter().cloned());
         native.libs.extend(attributes.collect::<Vec<_>>());
+        if target.windows {
+            native.raw_dylibs.extend(raw_dylibs(db, krate));
+        }
         let asked = asked_by_script(db, krate, target);
         native.libs.extend(asked.libs);
         native.search.extend(asked.search);
@@ -328,6 +402,48 @@ fn native(db: &RootDatabase, program: &[Crate], target: &Target) -> Native {
     let mut searched = FxHashSet::default();
     native.search.retain(|it| searched.insert(it.clone()));
     native
+}
+
+/// The DLLs the extern blocks of `krate` import with `kind = "raw-dylib"`, each with the names
+/// imported from it and whether the name is a static (data).
+fn raw_dylibs(db: &RootDatabase, krate: base_db::Crate) -> Vec<(String, Vec<(String, bool)>)> {
+    use hir_def::{ItemContainerId, Lookup as _, ModuleDefId, signatures::FunctionSignature};
+    let mut found: Vec<(String, Vec<(String, bool)>)> = Vec::new();
+    for (_, module) in hir_def::nameres::crate_def_map(db, krate).modules(db) {
+        let scope = module.scope(db);
+        for block in scope.extern_blocks() {
+            let libs = AttrFlags::native_libs(db, block);
+            let Some(lib) = libs.iter().find(|it| it.kind == NativeLibKind::RawDylib) else {
+                continue;
+            };
+            let mut names = Vec::new();
+            for def in scope.declarations() {
+                match def {
+                    ModuleDefId::FunctionId(id)
+                        if id.lookup(db).container == ItemContainerId::ExternBlockId(block) =>
+                    {
+                        let name = AttrFlags::link_name(db, id.into())
+                            .unwrap_or_else(|| FunctionSignature::of(db, id).name.symbol().clone());
+                        names.push((name.as_str().to_owned(), false));
+                    }
+                    ModuleDefId::StaticId(id)
+                        if id.lookup(db).container == ItemContainerId::ExternBlockId(block) =>
+                    {
+                        let name = AttrFlags::link_name(db, id.into()).unwrap_or_else(|| {
+                            hir_def::signatures::StaticSignature::of(db, id).name.symbol().clone()
+                        });
+                        names.push((name.as_str().to_owned(), true));
+                    }
+                    _ => {}
+                }
+            }
+            match found.iter_mut().find(|(dll, _)| *dll == lib.name.as_str()) {
+                Some((_, known)) => known.extend(names),
+                None => found.push((lib.name.as_str().to_owned(), names)),
+            }
+        }
+    }
+    found
 }
 
 /// What the build script of `krate`'s package printed for the link, as cargo passes it to
