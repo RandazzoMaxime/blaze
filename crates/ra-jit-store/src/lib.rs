@@ -1394,6 +1394,14 @@ impl Store {
         Store::open(dir, Identity::current()?, Tuning::from_env()?)
     }
 
+    /// The store in `dir` for values whose key says all of what they are, as a file's sha256
+    /// does: keyed the same by every build of ra-jit and for every toolchain, so what one
+    /// kept, or a remote brought, any other finds. It shares the directory with the store
+    /// of [`Store::global_or`]: the packs are the same files.
+    pub fn open_by_content(dir: &Path) -> io::Result<Store> {
+        Store::open(dir, Identity::new(b"by content", ""), Tuning::from_env()?)
+    }
+
     fn open(dir: &Path, identity: Identity, tuning: Tuning) -> io::Result<Store> {
         let dir = StoreDir::at(dir);
         dir.claim()?;
