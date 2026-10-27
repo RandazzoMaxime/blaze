@@ -739,25 +739,25 @@ mod tests {
         ];
         let also = std::collections::BTreeSet::from(["OPENSSL_DIR".to_owned()]);
         let out = env_in(&env, &also, &closure);
-        let var = |name: &str| out.iter().find(|it| it.0 == name).map(|it| it.1.as_str());
-        assert_eq!(var("CARGO"), Some("/home/me/.cargo/bin/cargo"));
-        assert_eq!(var("CARGO_PKG_NAME"), Some("openssl-sys"));
-        assert_eq!(var("DEP_Z_INCLUDE"), Some("/t/debug/build/z-1/out/include"));
-        assert_eq!(var("OPENSSL_DIR"), Some("/opt/openssl"));
+        let got = |name: &str| out.iter().find(|it| it.0 == name).map(|it| it.1.as_str());
+        assert_eq!(got("CARGO"), Some("/home/me/.cargo/bin/cargo"));
+        assert_eq!(got("CARGO_PKG_NAME"), Some("openssl-sys"));
+        assert_eq!(got("DEP_Z_INCLUDE"), Some("/t/debug/build/z-1/out/include"));
+        assert_eq!(got("OPENSSL_DIR"), Some("/opt/openssl"));
         for gone in ["CARGO_HOME", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"] {
-            assert_eq!(var(gone), None, "{gone}");
+            assert_eq!(got(gone), None, "{gone}");
         }
-        assert_eq!(var("CC"), Some("/nix/store/a-clang/bin/clang"));
-        assert_eq!(var("AR"), Some("/nix/store/d-binutils/bin/ar"));
-        assert_eq!(var("PKG_CONFIG"), Some("/nix/store/b-pkg-config/bin/pkg-config"));
-        assert_eq!(var("PKG_CONFIG_PATH"), Some("/nix/store/c-openssl-dev/lib/pkgconfig"));
+        assert_eq!(got("CC"), Some("/nix/store/a-clang/bin/clang"));
+        assert_eq!(got("AR"), Some("/nix/store/d-binutils/bin/ar"));
+        assert_eq!(got("PKG_CONFIG"), Some("/nix/store/b-pkg-config/bin/pkg-config"));
+        assert_eq!(got("PKG_CONFIG_PATH"), Some("/nix/store/c-openssl-dev/lib/pkgconfig"));
         assert_eq!(
-            var("NIX_CFLAGS_COMPILE"),
+            got("NIX_CFLAGS_COMPILE"),
             Some("-isystem /nix/store/c-openssl-dev/include -ffile-prefix-map=/t/debug=/target")
         );
-        assert_eq!(var("HOME"), Some("/homeless-shelter"));
+        assert_eq!(got("HOME"), Some("/homeless-shelter"));
         assert_eq!(
-            var("PATH"),
+            got("PATH"),
             Some("/nix/store/a-clang/bin:/nix/store/b-pkg-config/bin:/nix/store/c-openssl-dev/bin")
         );
         _ = std::fs::remove_dir_all(&root);
