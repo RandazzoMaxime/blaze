@@ -533,7 +533,14 @@ changes to rust-analyzer were needed, each made as rustc does it:
   is `dyn Trait + 'x`, not `'static`. In an impl header, a trait object behind a reference
   whose lifetime is elided has that lifetime too (`hir-ty/src/lower.rs`, `impl_header`), as
   rustc makes both one fresh parameter of the impl: rusqlite's `impl Params for
-  &[&dyn ToSql]` holds for `params![id, name]` of locals.
+  &[&dyn ToSql]` holds for `params![id, name]` of locals. In a type written in a body (a
+  `let`'s type, a cast's), a lifetime left to inference names nothing, so a trait object it
+  would default has a lifetime inferred on its own (`hir-ty/src/lower.rs`, `object_default`),
+  as rustc's `resolve_object_lifetime_default` stops at `ObjectLifetimeDefault { lifetime:
+  None }` or the body and lowering gives a fresh region: `err as &dyn Error` is
+  `&'1 (dyn Error + '2)`, so cargo's `source` returns it as `dyn Error + 'static`.
+  `Box<dyn Trait>` there is the same, not `'static`; a trait bounded by `'static` still
+  makes its objects `'static`.
 - A return-position `impl Trait` has a lifetime parameter for each lifetime elided in its
   function's parameters, after the function's own (`hir-ty/src/lower.rs`, `elided_lifetimes`),
   as rustc duplicates them as parameters of the opaque type. In its bounds, `'_` or an elided
