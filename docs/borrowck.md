@@ -204,7 +204,15 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   of `negotiate<S>` is "`S` does not live long enough". What a parameter's type implies is
   assumed, but its higher-ranked where clauses are proven, as rustc applies what proving the
   type's well-formedness needs: `Foo<&'lt u8>` with `for<'x> T::Ty<'x>: Sized` normalizes
-  `<&'lt u8 as Trait>::Ty<'x>`, whose `Self: 'x` is `'lt: 'static`. rust-analyzer gives a trait object
+  `<&'lt u8 as Trait>::Ty<'x>`, whose `Self: 'x` is `'lt: 'static`. Function pointer types
+  are related as rustc's higher-ranked subtyping (`TypeRelating::binders`): the more general
+  side's `for<'a>` is instantiated with placeholders of a new universe, the other's with
+  variables of it, both ways when invariant; a region of a lower universe made to outlive such
+  a placeholder outlives `'static`, and a placeholder made to outlive anything is rustc's E0308
+  "one type is more general than the other". So a closure parameter `x: fn(&u32)` whose
+  expected type is `fn(&'1 u32)` needs `'1: 'static`. A function item cast to a `for<'a> fn`
+  keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables.
+  rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
   (`fn(&mut dyn Write)` for `impl FnMut(&mut dyn Write)` holds).
@@ -368,11 +376,10 @@ with another code, then, of the errors not reported, 5 "lifetime may not live lo
 3 each of E0507, E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
 then one each of five more. The causes, grouped:
 
-- **Higher-ranked regions and placeholders**: trait bounds are proven for placeholders, but a
-  function pointer or closure related to a `for<'a> fn` type is not (rustc's higher-ranked
-  subtyping, with a projection normalized for the placeholder in
-  `nll/closure-malformed-projection-input-issue-102800.rs`), and auto traits of a coroutine's witness (`T: Send` of an `async` block holding
-  a `for<'a>` future) are not proven with them.
+- **Higher-ranked regions and placeholders**: function pointer types are related with
+  placeholders, but a projection in them is not normalized for the placeholder
+  (`nll/closure-malformed-projection-input-issue-102800.rs`), and auto traits of a coroutine's
+  witness (`T: Send` of an `async` block holding a `for<'a>` future) are not proven with them.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
   signature or impl header has an associated type (what normalizing it implies) are not
   checked yet, nor what an impl's or function's where clauses need of a projection in them.
