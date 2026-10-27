@@ -6,7 +6,7 @@
 // toolchain only.
 #![cfg_attr(
     feature = "nightly",
-    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b)
+    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b, unsized_fn_params)
 )]
 #![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
@@ -1218,6 +1218,142 @@ pub mod simd_lanes {
                 Simd::<u16, 2>::from_le_bytes(Simd::from_array([1, 2, 3, 4])),
             ),
         )
+    }
+}
+
+/// Unsized values taken by value (`unsized_fn_params`), which rustc passes as the address of
+/// the value and its metadata: slices, `str`, `dyn Trait` and a struct with an unsized tail,
+/// of several lengths, moved out of a `Box`, passed on, through a trait and a vtable, and
+/// dropped by the callee.
+#[cfg(feature = "nightly")]
+pub mod unsized_params {
+    use std::cell::Cell;
+    use std::fmt::Display;
+
+    thread_local! {
+        static DROPS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub struct Noisy(pub u32);
+    impl Drop for Noisy {
+        fn drop(&mut self) {
+            DROPS.with(|it| it.set(it.get() * 10 + self.0));
+        }
+    }
+
+    pub struct Tail<T: ?Sized> {
+        pub n: u8,
+        pub rest: T,
+    }
+
+    #[inline(never)]
+    pub fn sum(x: [u64]) -> u64 {
+        let mut total = x.len() as u64 * 1000;
+        for v in &x {
+            total = total.wrapping_mul(31).wrapping_add(*v);
+        }
+        total
+    }
+    #[inline(never)]
+    pub fn passed_on(x: [u64], bias: u64) -> u64 {
+        sum(x) ^ bias
+    }
+    #[inline(never)]
+    pub fn bumped(mut x: [u32]) -> Vec<u32> {
+        if let Some(first) = x.first_mut() {
+            *first += 1;
+        }
+        x.to_vec()
+    }
+    #[inline(never)]
+    pub fn shout(s: str) -> String {
+        format!("{}:{}", s.len(), s.to_uppercase())
+    }
+    #[inline(never)]
+    pub fn show(x: dyn Display, width: usize) -> String {
+        format!("[{:>width$}]", &x)
+    }
+    #[inline(never)]
+    pub fn joined(x: [String]) -> String {
+        x.join("+")
+    }
+    #[inline(never)]
+    pub fn counted(x: [Noisy]) -> usize {
+        x.len()
+    }
+    #[inline(never)]
+    pub fn tail(x: Tail<[u16]>) -> (u8, usize, u32) {
+        (x.n, x.rest.len(), x.rest.iter().map(|&it| u32::from(it)).sum())
+    }
+
+    pub trait Total {
+        fn total(self) -> u64;
+    }
+    impl Total for [u64] {
+        fn total(self) -> u64 {
+            passed_on(self, 7)
+        }
+    }
+
+    pub trait Consume {
+        fn consume(self) -> String;
+    }
+    impl Consume for String {
+        fn consume(self) -> String {
+            self + "!"
+        }
+    }
+    impl Consume for (u8, u64, [u16; 3]) {
+        fn consume(self) -> String {
+            format!("{:?}", self)
+        }
+    }
+    impl Consume for Noisy {
+        fn consume(self) -> String {
+            format!("noisy {}", self.0)
+        }
+    }
+
+    pub fn run() -> String {
+        let mut out = Vec::new();
+        for len in [0usize, 1, 3, 17] {
+            let values: Vec<u64> = (0..len as u64).map(|it| it * it + 5).collect();
+            out.push(sum(*values.clone().into_boxed_slice()).to_string());
+            out.push(values.clone().into_boxed_slice().total().to_string());
+            let small: Vec<u32> = (0..len as u32).collect();
+            out.push(format!("{:?}", bumped(*small.into_boxed_slice())));
+            let strings: Vec<String> = (0..len).map(|it| "ab".repeat(it)).collect();
+            out.push(joined(*strings.into_boxed_slice()));
+        }
+        for s in ["", "a", "héllo wörld", "ß"] {
+            let boxed: Box<str> = s.into();
+            out.push(shout(*boxed));
+        }
+        let shown: [Box<dyn Display>; 3] = [Box::new(42u8), Box::new("text"), Box::new(-1.5f64)];
+        for (width, it) in shown.into_iter().enumerate() {
+            out.push(show(*it, width * 3));
+        }
+        DROPS.with(|it| it.set(0));
+        let noisy: Box<[Noisy]> = vec![Noisy(1), Noisy(2), Noisy(3)].into_boxed_slice();
+        out.push(format!("{} {}", counted(*noisy), DROPS.with(Cell::get)));
+        let empty: Box<[Noisy]> = Vec::new().into_boxed_slice();
+        out.push(format!("{} {}", counted(*empty), DROPS.with(Cell::get)));
+        let tails: [Box<Tail<[u16]>>; 3] = [
+            Box::new(Tail { n: 1, rest: [0u16; 0] }),
+            Box::new(Tail { n: 2, rest: [7] }),
+            Box::new(Tail { n: 3, rest: [1, 2, 65535, 9] }),
+        ];
+        for it in tails {
+            out.push(format!("{:?}", tail(*it)));
+        }
+        DROPS.with(|it| it.set(0));
+        let consumed: [Box<dyn Consume>; 3] =
+            [Box::new(String::from("owned")), Box::new((9, u64::MAX, [1, 2, 3])), Box::new(Noisy(4))];
+        for it in consumed {
+            out.push(it.consume());
+        }
+        out.push(DROPS.with(Cell::get).to_string());
+        out.join(" | ")
     }
 }
 
