@@ -190,7 +190,7 @@ fn kept_in_view(name: &str) -> bool {
         crate::as_rustc::TOOLCHAIN,
     ];
     let cargo = name.starts_with("CARGO_") && name != "CARGO_HOME" && name != "CARGO_TARGET_DIR";
-    NAMES.contains(&name) || cargo || name.starts_with("DEP_") || name.starts_with("RA_JIT_")
+    NAMES.contains(&name) || cargo || name.starts_with("DEP_")
 }
 
 /// The environment of a run in `closure`: of `env`, what [`kept_in_view`] keeps and what the
