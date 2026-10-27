@@ -16,8 +16,9 @@ slowest host, so a new or slower harness moves the others, not the time of the t
 tier, nightly and by hand, is every harness, in the parts core, keys-N, buildmodel, store-kills,
 store and daemon (docs/harness.md, "CI").
 
-Each harness runs with an RA_JIT_HOME and an RA_JIT_CACHE of its own (a harness may set its
-own over them), so no daemon, socket or store of one harness is seen by the next.
+Each harness runs with an RA_JIT_HOME of its own (a harness may set its own over it), so no
+daemon or socket of one harness is seen by the next. RA_JIT_CACHE is left alone: set, it turns
+the store on.
 
 Every harness in a part runs even when one before it fails; the part fails at the end and names
 them. RA_JIT_BIN is the ra-jit the harnesses run, as for each harness on its own.
@@ -254,11 +255,12 @@ def parts(tier="full"):
 
 
 def run_one(args, env):
-    """Runs one harness with a daemon home and a store of its own, kept when it fails (CI shows
-    the daemon logs under /tmp then)."""
+    """Runs one harness with a daemon home of its own, kept when it fails (CI shows the daemon
+    logs under /tmp then). RA_JIT_CACHE stays as the caller has it: set, it turns the store on,
+    which only the store harnesses do."""
     # Under /tmp, short: a daemon's socket is under its home, and macOS allows 104 bytes.
     home = tempfile.mkdtemp(prefix="rj-ci-", dir="/tmp" if SYSTEM != "windows" else None)
-    own = {"RA_JIT_HOME": home, "RA_JIT_CACHE": os.path.join(home, "store")}
+    own = {"RA_JIT_HOME": home}
     status = subprocess.run([sys.executable, *args], cwd=HERE, env={**os.environ, **own, **env}).returncode
     # A daemon the harness left running in that home, which nothing after it may talk to.
     cargo_ra_jit = os.path.join(os.path.dirname(os.path.abspath(os.environ.get("RA_JIT_BIN", ""))), "cargo-ra-jit")
