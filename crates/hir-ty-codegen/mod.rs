@@ -95,6 +95,7 @@ use hir_ty::mir::{
 };
 
 mod asm;
+mod avx512;
 mod backend;
 use backend::Step;
 pub use backend::{Backend, builds_edits, links_own, sections_of_their_own};
@@ -15979,6 +15980,60 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
+    /// Calls the instruction `avx512::lower` makes of the x86 intrinsic `name` on its operands
+    /// and writes what it leaves where `dst` is. False for an intrinsic it does not know or of
+    /// operands other than its name says.
+    fn avx512_assembly(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<bool> {
+        let mut given = Vec::with_capacity(args.len());
+        for arg in args {
+            let ty = self.operand_ty(arg)?;
+            given.push(avx512::Given {
+                bytes: self.layout(ty)?.size.bytes() as u32,
+                pointer: matches!(ty.kind(), TyKind::RawPtr(..)),
+                constant: self.immediate(arg)?,
+            });
+        }
+        let layout = self.layout(dst_ty)?;
+        let func = self.body.and_then(|it| it.owner.as_function());
+        let features = func.map(|func| AttrFlags::target_features(self.cg.db, func));
+        let features: Vec<&str> = features.into_iter().flatten().map(|it| it.as_str()).collect();
+        let lowered = match avx512::lower(name, &given, layout.size.bytes() as u32, &features) {
+            None => return Ok(false),
+            Some(lowered) => lowered.map_err(CodegenError::Unsupported)?,
+        };
+        if let avx512::Out::Masks(_, at) = lowered.out
+            && (layout.fields.count() != 2 || layout.fields.offset(1).bytes() != u64::from(at))
+        {
+            unsupported!("`llvm.{name}` returning {dst_ty:?}");
+        }
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8 * (1 + args.len() as u32),
+            3,
+        ));
+        let slot = self.builder.ins().stack_addr(ptr(), slot, 0);
+        self.builder.ins().store(MEM, dst, slot, 0);
+        for (i, (arg, load)) in args.iter().zip(&lowered.loads).enumerate() {
+            if *load != avx512::Load::Immediate {
+                let (addr, _) = self.operand(arg)?;
+                self.builder.ins().store(MEM, addr, slot, 8 * (i as i32 + 1));
+            }
+        }
+        let text = asm::avx512_function(&lowered.loads, &lowered.text, lowered.out);
+        let mut sig = self.cg.make_signature();
+        sig.params.push(AbiParam::new(ptr()));
+        let callee = self.cg.assembly(text, &sig);
+        let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+        self.builder.ins().call(callee, &[slot]);
+        Ok(true)
+    }
+
     /// A function `core::arch` declares as `llvm.{name}`: something LLVM implements, with no
     /// body anywhere.
     fn llvm_intrinsic(
@@ -16479,6 +16534,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             {
                 self.neon_assembly(&format!("llvm.{name}"), &lowered, args, dst, dst_ty)?
             }
+            _ if self.cg.target.arch == Arch::X86_64
+                && (name.starts_with("x86.avx512.") || name.starts_with("x86.avx2.vpdp"))
+                && self.avx512_assembly(name, args, dst, dst_ty)? => {}
             _ => unsupported!("LLVM intrinsic `{name}`"),
         }
         Ok(())
