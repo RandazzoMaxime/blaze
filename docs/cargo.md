@@ -324,6 +324,17 @@ A script that fails having been refused a write or a connection says so under it
 
     note: the build script of `sys-crate` failed in the sandbox, which refused it writing `/home/me/ws/sys-crate/src/bindings.rs` (the machine is read-only in a sandbox); if it needs that, run it outside: `unsandboxed-build-scripts = ["sys-crate"]` under `[workspace.metadata.blaze.sandbox]` in /home/me/ws/Cargo.toml (or `build-script = false` under `[package.metadata.blaze.sandbox]` in its own manifest, for a package of the workspace), or `RA_JIT_SANDBOX=off` for every build script and test of the command
 
+A script that downloads a prebuilt library (`v8`, `ort-sys`, `webrtc-sys`) is given it
+instead, pinned as Nix pins a fixed-output derivation. `blaze lock --fetches` (`--target
+<triple>` for each target, the host's by default) works out each download of the workspace's
+resolve, keeps its bytes in blaze's store by their sha256 and writes them into
+`Cargo.fetches.lock` beside `Cargo.lock`, by the package's name, version and `Cargo.lock`
+checksum (commit it). A build writes the store's copy below the target directory and sets the
+crate's own variable for a local copy to it; a missing or stale entry fails the build, naming
+the command, and nothing is downloaded. The crates blaze knows and their variables are
+`OVERRIDES` in `crates/ra-jit/src/cargo/fetches.rs`; a script refused the network that it does
+not know is told which variable an entry there would set.
+
 The ways out, in the workspace's root manifest, which is the only one a dependency from a
 registry can be named in:
 
