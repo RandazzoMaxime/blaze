@@ -194,16 +194,26 @@ ra-jit runs natively and emits wasm32 with its own lowering from Cranelift IR, w
 relocatable object that `rust-lld` links ahead of rustc's rlibs. The splice writes the
 module again with new function bodies under the same indices.
 
-This was measured once, on an earlier branch with `nightly-2026-05-10`, for `wasm32-wasip1`
-under wasmtime: corpus MATCH with 655 of 656 functions from ra-jit, stress 99 of 99, splices
-71 of 71 with 62 spliced ([reports/WASM32.md](reports/WASM32.md)). It is not in CI and has
-not been rerun since, on 1.99.0 or the pinned nightly, so treat it as unverified at the current commit.
+Measured 2026-10-27 on an arm64 ix VM with the pinned nightly (`nightly-2026-10-25`) and
+wasmtime 49.0.2, at main 2ee9f8ab94 with #534, for `wasm32-wasip1`: corpus MATCH with 913 of
+914 functions from ra-jit, stress 100 of 100, splices 71 of 71, unwinds and includes 8 of 8,
+breakers 176 of 176. The train runs the corpus and stress for `wasm32-wasip1` on every push to
+main (`harness/wasm32.py`, [harness.md](harness.md)). These link ra-jit's objects ahead of
+rustc's rlibs.
 
-Limits stated in that report: no unwinding is emitted (the wasm targets are
-`panic=abort`), threads are not supported, `v128` and some wide-integer operations are
-refused, and `wasm32-unknown-unknown` was exercised only through one Dioxus page.
-wasm-bindgen has to run again after every edit and takes 0.27 to 0.36 s on a hello world,
-more than the compile and the splice together. There is no LLVM backend for wasm.
+With nothing of rustc's (the whole build of [no-rustc.md](no-rustc.md), `RA_JIT_STD_FROM=off`),
+ra-jit compiles the wasip1 standard library itself: the std unit of a program refuses 84
+functions, all of them `f16` or `f128`. A std program, and a program over blaze-manifest and
+blaze-resolve reading blaze's own workspace and lock file (issue #458), compile with no
+function refused, 45,837 functions for the second. Neither links yet: the link line of
+`link.rs` is the C compiler's, and `cargo blaze build --target wasm32-*` is refused.
+
+Limits: no unwinding is emitted (the wasm targets are `panic=abort`), threads are not
+supported, defining a C-variadic function is refused, and `v128` (`simd128`, relaxed SIMD) and
+some wide-integer operations are refused. `wasm32-unknown-unknown` was exercised only through
+one Dioxus page, on an earlier branch ([reports/WASM32.md](reports/WASM32.md)), where
+wasm-bindgen had to run again after every edit and took 0.27 to 0.36 s on a hello world, more
+than the compile and the splice together. There is no LLVM backend for wasm.
 
 Running the compiler itself in a browser is a separate experiment in `crates/ra-jit-wasm`.
 
