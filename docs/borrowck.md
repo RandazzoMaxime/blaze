@@ -252,7 +252,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   with a written type that a value outliving a universal lifetime is assigned to is blamed
   as rustc blames a type annotation, not the assignment. What a closure needs of its creator's regions is a requirement the creator
   proves where it makes the closure (closures are checked before the bodies that make them),
-  so the error is the creator's, as in rustc. So is a `T: 'a` the closure cannot prove: the
+  so the error is the creator's, as in rustc. Closures, `async` blocks and `const { .. }` blocks in code that is never
+  reached (after a `return`) are checked too, as rustc checks every body nested in an item's
+  (`nested_bodies_within`), though MIR lowering leaves the code that makes them out. So is a `T: 'a` the closure cannot prove: the
   creator proves `T` outlives each of its regions that outlive `'a`, and an error is
   reported where the closure needed it.
 - `const { .. }` blocks: MIR lowering makes one a constant with a body of its own, checked
