@@ -242,13 +242,11 @@ only has to be there, as ra-jit writes it empty. When both fail, they count as t
 failure when blaze names the package cargo named, and the result says why when each stopped at
 something the machine or checkout lacks (a program a script spawns, the linker, a path package).
 
-On main b6a385c8de with this part's driver (arm64 ix VM, 2026-10-27), 9 of 14 equal: the
-fixture, ripgrep, cargo, bat, hyperfine, just, axum, nushell and bevy. fd differs only in
-jemalloc's `config.log`, which records `SHELL`: the build-script sandbox gives a script only
-the variables `script_sandbox.rs` `given` lets through, so `configure` records its own
-`/bin/sh` where cargo's run had the shell's. helix's `helix-term` script fetches its grammars,
-as the bench's `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` does not reach it in the sandbox, and fails
-writing them into its source. With `BLAZE_SANDBOX=off` both are equal (fd 9 packages, helix 38).
+On main 8470a70e6a (#658, arm64 ix VM, 2026-10-27), 10 of 14 equal: the fixture, ripgrep,
+cargo, bat, hyperfine, just, axum, nushell, helix and bevy. fd differs only in jemalloc's
+`config.log` and `config.status`, which record `SHELL`: the build-script sandbox gives a script
+only the variables `script_sandbox.rs` `given` lets through, so `configure` records its own
+`/bin/sh` where cargo's run had the shell's; with `BLAZE_SANDBOX=off` its 9 packages are equal.
 biome stops at a syn-1 proc macro ra-jit cannot compile (`darling_macro`, #327). zed fails for
 both (cargo at gcc's missing `-fuse-ld=lld`, blaze at `cmake`), and bun for both at a path
 package its own build makes (`harness/bunprep.py`).
