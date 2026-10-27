@@ -4,7 +4,7 @@ dated nightly in harness/toolchain; everything that mirrors that rustc moves wit
 
     toolchain_bump.py                  the newest nightly that has every component blaze needs
     toolchain_bump.py --date 2026-11-02
-    toolchain_bump.py --checks         after a bump, on a dev host: build ra-jit and run the
+    toolchain_bump.py --checks         after a bump, in an ix VM: build ra-jit and run the
                                        checks that prove ra-jit and the nightly agree
 
 A bump, in order (each step names itself when it fails, and stops there):
@@ -252,7 +252,7 @@ ra-jit is pinned to {name} ({new[1]}). Left to do:
   - on x86-64 Linux, AArch64 Linux and arm64 macOS each: `python3 harness/answers.py --write`
     (with that host's release build of ra-jit), then commit crates/ra-jit/src/answers/rustc.json;
   - `cargo build -p ra-jit --release` and fix what the new rustc_abi and std ask for;
-  - `python3 harness/toolchain_bump.py --checks` on a dev host, under Cranelift and under LLVM
+  - `python3 harness/toolchain_bump.py --checks` in an ix VM, under Cranelift and under LLVM
     (`nix develop -c ...` with RA_JIT_BACKEND=llvm RA_JIT_OPT=2 RA_JIT_EMIT=fast);
   - the full tier (uitest.py, libsuite.py, borrowck_ui.py) re-measured at the new commit;
   - `git diff --stat` and one commit for the bump (docs/contributing.md).""")

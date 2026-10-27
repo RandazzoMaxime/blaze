@@ -79,8 +79,9 @@ export const rules = [
 		link: "docs/roadmap.md#8-the-agent-api",
 	},
 	{
-		id: "heavy-work-on-dev-host",
-		info: "Heavy work runs on a dev host, the Mac does quick checks. Release builds, harness sweeps and benchmarks run on an AWS dev host claimed in the host ledger (`fleet-ops` skill), with a lease as long as the run, released after.",
+		id: "work-in-ix-vms",
+		info: "Builds, tests, benchmarks and experiments run in an ix VM, one per lane: `ix new --name <lane>`, `ix shell <lane> -- <command>`, `ix rm <lane>` when done. Never on the Mac, never on an AWS dev host or any other AWS machine. Where an ix VM can't do it, stop and say what is missing.",
+		reason: "Andrew, 2026-10-27. It replaced heavy-work-on-dev-host (AWS dev hosts claimed in the host ledger, the Mac for quick checks).",
 		link: "docs/contributing.md#working-in-parallel",
 	},
 	{
@@ -95,7 +96,7 @@ export const rules = [
 	},
 	{
 		id: "clean-up-lane",
-		info: "Delete what a lane made when it is done: its worktree, target directory and dev-host directories, and its merged branch.",
+		info: "Delete what a lane made when it is done: its worktree, target directory and ix VM, and its merged branch.",
 	},
 	{
 		id: "credit-people",

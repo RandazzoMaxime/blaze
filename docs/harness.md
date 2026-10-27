@@ -29,7 +29,7 @@ need a few gigabytes there.
 
 ### The gate
 
-The gate is what a change runs before it lands: its fast tier on the lane's dev host. CI's merge
+The gate is what a change runs before it lands: its fast tier in the lane's ix VM. CI's merge
 gate is only the build and the unit tests; all of it, every part on every platform, runs in the
 release train on main after the merge ([CI](#ci)), which finds what the fast tier would have.
 A change is not done until all of it exits 0 under both backends.
@@ -427,7 +427,7 @@ its failure and output are printed with "FLAKY, not counted in the fast tier" an
 and it still counts in the full tier. The list is `FLAKY` in the harness (today one step of
 `testselect.py`, [#412](https://github.com/indexable-inc/blaze/issues/412)); a check comes off
 it when its issue is fixed. The fast tier (`ci.py --parts fast`, `ci.py fast`) is what a lane
-runs by hand on its dev host: every harness of `FAST`, in parts of about four minutes.
+runs by hand in its ix VM: every harness of `FAST`, in parts of about four minutes.
 
 ### Concurrency, the check and the ruleset
 

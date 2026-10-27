@@ -42,7 +42,7 @@ The flecs skill (`.claude/skills/flecs/`) has the script syntax and its traps.
 CI builds both modules on every run of the `site` workflow and uploads them as the `site-renderer` artifact. The build
 looks for them in `renderer/target/site/` (or `SITE_WASM_DIR`) and, when they are missing, prints how to get them. A
 machine without the Rust toolchain fetches them; changing `renderer/` itself means building them where Rust builds
-run (a dev host, CI) and fetching from there:
+run (an ix VM, CI) and fetching from there:
 
 ```
 uv run --script renderer/fetch.py                                 # the latest green CI run: this branch, else main

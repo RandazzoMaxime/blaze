@@ -209,7 +209,7 @@ What it leaves to a person, and prints at the end:
    `rustc_abi`'s renamed layout calls, vectors of at most 128 bits passed in registers on
    x86-64 and AArch64, Windows x64's rule for zero-sized types, the `f16b` and `ppcf128`
    layouts, libtest's new entry `test_main_env_args` and the intrinsic `abort_immediate`.
-3. `python3 harness/toolchain_bump.py --checks` on a dev host, under Cranelift and under LLVM
+3. `python3 harness/toolchain_bump.py --checks` in an ix VM, under Cranelift and under LLVM
    (in `nix develop`, with `RA_JIT_BACKEND=llvm RA_JIT_OPT=2 RA_JIT_EMIT=fast`). It builds
    ra-jit and runs, in parallel, what proves ra-jit and the nightly agree: `toolchain_pins.py`,
    `answers.py`, `macroserver.py`, the corpus with its `nightly` feature and `--layouts`, and
@@ -269,22 +269,31 @@ under `docs/reports/` do this and it is the reason they can be used.
 
 ## Working in parallel
 
-Several lanes, people or agents, change ra-jit at once. A lane shares the Mac, `git`'s
-metadata and main with all the others, so:
+Several lanes, people or agents, change ra-jit at once. A lane shares `git`'s metadata and
+main with all the others, so:
 
-- **Heavy work runs on a dev host.** A release build of a branch, a harness sweep
-  (`cargo_ra_jit.py`, `buildmodel.py`, `keys.py`, the soak), a benchmark or anything longer
-  than a few minutes runs on an AWS dev host. Claim the host with a CLAIMED row in the host
-  ledger (`/Volumes/Projects/nix/scratch/memory/host-ledger.md`; hosts, ssh and the ledger's
-  rules are in the `fleet-ops` skill), work in a directory named for the lane, and add a
-  RELEASED row when done. Ask for a lease as long as the run (`dev-aws renew N <hours>`): an
-  expired lease stops the host mid-run.
-- **The Mac does quick checks only:** one harness, one unit test, `cargo check`, hot reload.
-  It is shared by every lane at once, and a lane that builds a full release there slows all
-  of them.
+- **Builds, tests, benchmarks and experiments run in the lane's ix VM**, never on the Mac and
+  never on an AWS dev host or any other AWS machine. The Mac edits, reads and runs `git`; a
+  build, a harness, a unit test or a benchmark goes to the VM.
+  - Make it: `ix new --name <lane> --no-shell`. The default image is NixOS with `nix`, `git`
+    and `gh`; `nix develop -c ...` in the checkout brings up `harness/toolchain`'s nightly
+    (about 30 s the first time). `--cpus` (2 to 128, the default is the architecture's cap) and
+    `--memory` (a ceiling in GiB it grows to on demand; add `--memory-commit` for a build,
+    whose memory ramps faster than that) size it, `--arch x86_64` or `--arch arm64` picks the
+    platform, and `--ttl 8h` deletes it on its own.
+  - Use it: `ix shell <lane> -- <command>`. Its arguments go through as they are (no remote
+    shell parses them again, as ssh's does) and stdin streams, so send a checkout with
+    `git bundle create - <branch> | ix shell <lane> -- bash -c 'cat > src.bundle && git clone
+    -b <branch> src.bundle src'` (git can't clone a bundle from a pipe).
+    The VM has no GitHub or AWS credentials. For a benchmark, give it its own VM, pinned to a
+    host CPU class (`--cpu epyc-5`, `xeon-6` or `graviton-5`) with `--memory-commit`, and build
+    nothing else there.
+  - Remove it: `ix rm <lane>` when the lane is done.
+  - Where an ix VM can't do something, stop and say what is missing; never take it to a dev
+    host or the Mac instead.
 - **One worktree per lane, named for it** (`ra-jit-<lane>-<date>`), with its own
-  `CARGO_TARGET_DIR` or a shared sccache. Two lanes building into one target directory wait on
-  each other's lock and overwrite each other's binaries.
+  `CARGO_TARGET_DIR`. Two lanes building into one target directory wait on each other's lock
+  and overwrite each other's binaries.
 - **Never `git stash`.** The stash is one stack for every worktree of the repository, so a pop
   can take another lane's changes. Commit work in progress to the lane's branch.
 - **Run harnesses with `RUST_BACKTRACE=0`**, so a test that panics prints its message and
@@ -293,8 +302,8 @@ metadata and main with all the others, so:
   waits hours for one large merge meets every other lane's changes at once. For anything the
   fast tier does not cover, run the release train on the branch first
   (`gh workflow run train.yaml --ref <branch>`: everything, without the release).
-- **Clean up when done:** remove the worktree (`git worktree remove`), its target directory,
-  and the lane's directories on the dev host; delete the merged branch.
+- **Clean up when done:** remove the worktree (`git worktree remove`), its target directory
+  and the lane's VM (`ix rm <lane>`); delete the merged branch.
 
 ## Landing a change
 
