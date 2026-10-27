@@ -287,11 +287,11 @@ pub(super) fn from_elf(
         let section_index = symbol.section_index().expect("a defined symbol");
         let (section, data) = section_data(section_index)?;
         let size = symbol.size() as usize;
-        let zeroed = matches!(
+        let uninitialized = matches!(
             section.kind(),
             SectionKind::UninitializedData | SectionKind::UninitializedTls
         );
-        let bytes = if zeroed {
+        let bytes = if uninitialized {
             std::borrow::Cow::Owned(vec![0; size])
         } else {
             let start = (symbol.address() - section.address()) as usize;
@@ -300,6 +300,12 @@ pub(super) fn from_elf(
                 .ok_or_else(|| format!("wasm object: `{name}` out of range"))?;
             std::borrow::Cow::Borrowed(bytes)
         };
+        // Writable data that is all zeros, with no address written into it, is `.bss` as LLVM
+        // makes it: the linker leaves such segments out of the module, memory being zeros.
+        let zeroed = uninitialized
+            || section.kind() == SectionKind::Data
+                && section.relocations().next().is_none()
+                && bytes.iter().all(|&b| b == 0);
         // Each piece of data is in a section of its own (`per_data_object_section`), which is
         // aligned as the code generator asked. Its size says nothing: four bytes of a field of
         // a value aligned to 64 are aligned to 64.
