@@ -54,16 +54,6 @@ fn quad_floor(max: u128) -> u128 {
     if width <= 113 { max } else { max & !((1 << (width - 113)) - 1) }
 }
 
-/// Refuses `fma` of `f16`s in an x86-64 function with AVX512-FP16: LLVM picks among the
-/// `vfmadd132`, `213` and `231` forms by where its registers are, which decides which NaN of
-/// two comes out, and folds a negated operand into `vfmsub` or `vfnmadd` in some functions and
-/// not others.
-pub(super) fn half_fma_refused() -> CodegenError {
-    CodegenError::Unsupported(
-        "fma of f16 with AVX512-FP16, whose operand order LLVM picks by register allocation".into(),
-    )
-}
-
 const HALF_SIGN: i64 = 0x8000;
 const QUAD_SIGN: u128 = 1 << 127;
 
@@ -455,9 +445,6 @@ impl<'db> FunctionCx<'_, 'db> {
         }
         if self.half_precision() {
             return Ok(self.half_instruction("fmadd h0, h0, h1, h2", &[a, b, c]));
-        }
-        if self.x86_half_precision() {
-            return Err(half_fma_refused());
         }
         let mut wide = [a, b, c];
         for value in &mut wide {

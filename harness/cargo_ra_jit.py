@@ -836,6 +836,12 @@ def daemon(work):
     open(main, "w").write(kept)
     _, mended = here.cargo("run")
     check("the build after it is mended is the daemon's", mended.returncode == 0 and not by_rustc(mended.stderr) and "hello world" in mended.stdout, f"exit {mended.returncode}, {mended.stderr.strip()[-300:]}")
+    # The worker a first build starts loads the checkout with the places cargo set, which an
+    # integration test names its program by: `env!("CARGO_BIN_EXE_app")` is set as it loads.
+    here.cargo("stop")
+    _, cold = here.cargo("test", "--test", "it")
+    unset = "names a variable that is not set" in cold.stderr
+    check("a first build that is an integration test naming a program builds it", not unset and re.search(r"^test greets_it \.\.\. ok$", cold.stdout, re.M), f"exit {cold.returncode}, {cold.stderr.strip()[-300:]!r}")
     # A lint the source denies fails the build as rustc's would, unless the flags cap lints.
     wait_warm(here, ws)
     open(main, "a").write("\n#[deny(non_snake_case)]\npub fn Denied() {}\n")

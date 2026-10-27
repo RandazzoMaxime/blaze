@@ -46,6 +46,12 @@ const PROGRAM_OF: &str = "CARGO_BIN_EXE_";
 /// The variable that names the directory cargo gives the integration tests of a build.
 const SCRATCH: &str = "CARGO_TARGET_TMPDIR";
 
+/// Whether the variable is one cargo sets to say where a program of the build is, or its
+/// tests' directory.
+pub(crate) fn names_a_place(name: &str) -> bool {
+    name.starts_with(PROGRAM_OF) || name == SCRATCH
+}
+
 /// The file in the daemon's directory that has a line for every program plain cargo asked
 /// for: who linked it, and why when it was rustc.
 const TALLY: &str = "plain-cargo.log";
@@ -612,9 +618,7 @@ impl Unit {
             stamp,
             copies,
             link_line,
-            env: std::env::vars()
-                .filter(|(name, _)| name.starts_with(PROGRAM_OF) || name == SCRATCH)
-                .collect(),
+            env: std::env::vars().filter(|(name, _)| names_a_place(name)).collect(),
             crate_env: std::env::vars()
                 .filter(|(name, _)| super::own_script::read_by_crates(name))
                 .collect(),

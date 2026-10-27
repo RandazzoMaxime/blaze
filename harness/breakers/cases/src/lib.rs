@@ -28,6 +28,7 @@ cases![
     crc_ternlog,
     ifma,
     fma_feature_nans,
+    neon_fma_lanes,
     asm_const,
     cast_then_shift,
     xgetbv,

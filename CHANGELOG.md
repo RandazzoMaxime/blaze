@@ -1031,12 +1031,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
-- A program plain `cargo` starts once `ra-jit enable` was run is no longer refused as "Text
-  file busy" on Linux. cargo's `target/debug` path was a hard link to the daemon's executable,
-  which the daemon writes in place when it lays out debug info or splices for the next build;
-  cargo's place now gets a copy of its own, written under another name and renamed over, as on
-  macOS. Live patching of a running program goes by its UUID (docs/live.md) and is unchanged.
-
+- An integration test that names a program (`env!("CARGO_BIN_EXE_app")`) builds when its
+  build starts the daemon's worker: the worker was started with the variables of its build
+  but not the places cargo set, so its load, which compiles before the first request is read,
+  failed `` `env!("CARGO_BIN_EXE_app")` in it names a variable that is not set ``. A cold
+  `cargo ra-jit test --test it` failed every time; under plain cargo after `ra-jit enable`, the
+  `cargo test` after an edit failed when the edit's load won the race (the release train's
+  plain-cargo row "`cargo test`, edited").
 - A daemon that patches what rustc linked no longer stops at the first build that reaches a
   thread-local, or a static written at run time, of a crate edited before any build reached
   it (``static `__RUST_STD_INTERNAL_VAL` of crate `smid` with state, whose first value is not

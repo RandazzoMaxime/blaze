@@ -538,6 +538,154 @@ impl Lanes {
     }
 }
 
+/// A fused multiply-add of `core::arch`'s NEON, `vfm{a,s}[s|d|h][q][_n|_lane|_laneq]_f{16,32,64}`
+/// (`a + b * c`, `a - b * c`), as its name and `LANE` say it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Fused {
+    subtracts: bool,
+    /// Whether the name says a scalar (`vfmad_lane_f64`), which the body takes a lane of
+    /// `c` for, where a vector's (`vfma_lane_f64` too) splats that lane.
+    scalar: bool,
+    /// The lanes of `a`, `b` and the result.
+    lanes: Lanes,
+    /// What `c` is: the same vector, a scalar (`_n`), or a vector of 64 or 128 bits one lane
+    /// of which is the factor (`_lane`, `_laneq`).
+    c: Factor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Factor {
+    Each,
+    Scalar,
+    Lane { bytes: u32, lane: u32 },
+}
+
+impl Fused {
+    fn parse(name: &str, lane: Option<u32>) -> Option<Fused> {
+        let rest = name.strip_prefix("vfm")?;
+        let subtracts = match rest.as_bytes().first()? {
+            b'a' => false,
+            b's' => true,
+            _ => return None,
+        };
+        let rest = &rest[1..];
+        let (scalar, rest) = match rest.as_bytes().first()? {
+            b's' | b'd' | b'h' => (true, &rest[1..]),
+            _ => (false, rest),
+        };
+        let (quad, rest) = match rest.strip_prefix('q') {
+            Some(rest) => (true, rest),
+            None => (false, rest),
+        };
+        let rest = rest.strip_prefix('_')?;
+        let (form, element) = rest.rsplit_once('_').unwrap_or(("", rest));
+        let bits: u32 = element.strip_prefix('f')?.parse().ok()?;
+        if !matches!(bits, 16 | 32 | 64) || scalar && quad {
+            return None;
+        }
+        let count = if scalar { 1 } else { (if quad { 128 } else { 64 }) / bits };
+        let c = match (form, lane) {
+            ("", None) => Factor::Each,
+            ("n", None) if !scalar => Factor::Scalar,
+            ("lane", Some(lane)) => Factor::Lane { bytes: 8, lane },
+            ("laneq", Some(lane)) => Factor::Lane { bytes: 16, lane },
+            _ => return None,
+        };
+        if let Factor::Lane { bytes, lane } = c
+            && lane >= bytes * 8 / bits
+        {
+            return None;
+        }
+        Some(Fused { subtracts, scalar, lanes: Lanes::floats(bits, count), c })
+    }
+
+    /// Whether the body splats `c` with `vdup_n_f32` or `vdupq_n_f64` and the like, whose
+    /// `floatNxM_t::splat` is `#[inline(always)]`. The halves' `vdup_n_f16` is a call of its
+    /// own at every opt-level 0 build.
+    fn splats_c(self) -> bool {
+        !self.scalar && self.c != Factor::Each && self.lanes.bits != 16
+    }
+
+    /// Whether the instruction takes `c` as its first factor, which it negates when it
+    /// subtracts, and `b` as its second. That decides which of two NaNs comes out, and which
+    /// one's sign the negation flips.
+    fn c_first(self) -> bool {
+        match (self.lanes.count, self.c) {
+            // `fmla a, c, b`, as `simd_fma` of vectors is. The halves' bodies still call
+            // `vget_lane_f16` and `vdup_n_f16`, so LLVM sees vectors there too.
+            (2.., Factor::Each) => true,
+            (2.., _) => self.lanes.bits == 16,
+            // Lane 0 of a 128-bit vector, subtracted from a scalar, is `fmsub` with `c` first;
+            // lane 1 is `fmls d0, d1, v2.d[1]`, `b` first.
+            (_, Factor::Lane { bytes: 16, lane: 0 }) => self.subtracts && self.lanes.bits != 16,
+            _ => false,
+        }
+    }
+
+    /// The instruction on `a` in `v1`, `b` in `v2` and `c` in `v3`, which leaves the result
+    /// in `v0`.
+    fn instruction(self) -> Lowered {
+        let t = self.lanes;
+        let size = size_letter(t.bits);
+        let bytes = |lanes: Lanes| Some(lanes.bytes());
+        let c_bytes = match self.c {
+            Factor::Each => t.bytes(),
+            Factor::Scalar => t.bits / 8,
+            Factor::Lane { bytes, .. } => bytes,
+        };
+        let lane = match self.c {
+            Factor::Lane { lane, .. } => lane,
+            _ => 0,
+        };
+        let text = if t.count > 1 {
+            let mnemonic = if self.subtracts { "fmls" } else { "fmla" };
+            let (r, b) = (t.reg(0), t.reg(2));
+            match (self.c, self.c_first()) {
+                (Factor::Each, _) => format!("{ACCUMULATE}{mnemonic} {r}, {}, {b}", t.reg(3)),
+                (_, true) => format!(
+                    "dup {}, v3.{size}[{lane}]\n{ACCUMULATE}{mnemonic} {r}, {}, {b}",
+                    t.reg(4),
+                    t.reg(4)
+                ),
+                (_, false) => format!("{ACCUMULATE}{mnemonic} {r}, {b}, v3.{size}[{lane}]"),
+            }
+        } else if lane == 0 {
+            let mnemonic = if self.subtracts { "fmsub" } else { "fmadd" };
+            let (first, second) = if self.c_first() { (3, 2) } else { (2, 3) };
+            format!("{mnemonic} {size}0, {size}{first}, {size}{second}, {size}1")
+        } else {
+            let mnemonic = if self.subtracts { "fmls" } else { "fmla" };
+            format!("{ACCUMULATE}{mnemonic} {size}0, {size}2, v3.{size}[{lane}]")
+        };
+        let lowered = Lowered {
+            features: Vec::new(),
+            text,
+            args: vec![bytes(t), bytes(t), Some(c_bytes)],
+            results: vec![t.bytes()],
+        };
+        finish(lowered, &[t])
+    }
+}
+
+/// The body of `core::arch`'s NEON fused multiply-add `name` (`vfmaq_laneq_f64`), of `LANE`
+/// `lane`, as the instruction LLVM selects for it (`neon-fma-llvm.txt`). rustc compiles core's
+/// optimized MIR of it, with what it calls built in, so LLVM sees the negation and the splat
+/// of `c` and picks the instruction by them: which factor comes first, and which one `fmls`
+/// or `fmsub` negates. Built of its calls, as ra-jit's MIR has it, it keeps another NaN or
+/// flips the sign of another.
+pub(super) fn fused(name: &str, lane: Option<u32>) -> Option<Lowered> {
+    Some(Fused::parse(name, lane)?.instruction())
+}
+
+/// Whether the body of the fused multiply-add `name` of `LANE` `lane` ([`fused`]) splats
+/// `c` with an `#[inline(always)]` function. The instruction is of the splat built in, and
+/// rustc builds it into every codegen unit, except where `-C link-dead-code` keeps one copy
+/// in one unit: LLVM sees the splat only in that unit, and elsewhere picks the instruction
+/// for a vector it knows nothing of (`fmla v0.4s, v1.4s, v2.4s` of the splat's result).
+pub(super) fn splats_c(name: &str, lane: Option<u32>) -> bool {
+    Fused::parse(name, lane).is_some_and(Fused::splats_c)
+}
+
 /// `Lowered::text` for a list of names, for a test: each name and what it lowers to, or that
 /// it does not.
 #[cfg(test)]
@@ -627,5 +775,97 @@ aarch64.neon.facgt.i32.f16: facgt h0, h1, h2 [\"neon\", \"fp16\"]
         assert_eq!(text("simd_cast", shorts, halves, true).unwrap(), "fcvtzs v0.4h, v1.4h");
         assert_eq!(text("simd_cast", Lanes::floats(16, 8), Lanes::floats(32, 8), true), None);
         assert_eq!(text("simd_ne", shorts, halves, true), None);
+    }
+
+    /// Each lane of each of NEON's fused multiply-adds is what LLVM's instruction for it
+    /// computes (`neon-fma-llvm.txt`: `rustc --emit asm -C opt-level=0` of each instance for
+    /// aarch64-unknown-linux-gnu, nightly-2026-10-25, each lane of the result read off the
+    /// instructions as the addend, the first factor, negated or not, and the second).
+    #[test]
+    fn fused_multiply_adds_keep_the_factors_llvm_keeps() {
+        let mut failed = Vec::new();
+        for line in include_str!("neon-fma-llvm.txt").lines() {
+            let [name, lane, llvm] = line.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("{line}")
+            };
+            let lane = (!lane.is_empty()).then(|| lane.parse().unwrap());
+            let Some(fused) = Fused::parse(name, lane) else {
+                failed.push(format!("{name} {lane:?}: none"));
+                continue;
+            };
+            let minus = if fused.subtracts { "-" } else { "" };
+            let ours: Vec<String> = (0..fused.lanes.count)
+                .map(|i| {
+                    let c = match fused.c {
+                        Factor::Each => i,
+                        Factor::Scalar => 0,
+                        Factor::Lane { lane, .. } => lane,
+                    };
+                    let (b, c) = (format!("b{i}"), format!("c{c}"));
+                    let (first, second) = if fused.c_first() { (c, b) } else { (b, c) };
+                    format!("(a{i},{minus}{first},{second})")
+                })
+                .collect();
+            if ours.join(" ") != llvm {
+                failed.push(format!("{name} {lane:?}: LLVM {llvm}, ours {}", ours.join(" ")));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
+    #[test]
+    fn a_fused_multiply_add_is_the_instruction_of_its_factors() {
+        let text = |name, lane| fused(name, lane).map(|it| it.text.replace('\n', "; "));
+        let expected = [
+            ("vfmsq_f64", None, "mov v0.16b, v1.16b; fmls v0.2d, v3.2d, v2.2d"),
+            ("vfmaq_laneq_f64", Some(1), "mov v0.16b, v1.16b; fmla v0.2d, v2.2d, v3.d[1]"),
+            ("vfmsq_n_f32", None, "mov v0.16b, v1.16b; fmls v0.4s, v2.4s, v3.s[0]"),
+            (
+                "vfms_lane_f16",
+                Some(3),
+                "dup v4.4h, v3.h[3]; mov v0.16b, v1.16b; fmls v0.4h, v4.4h, v2.4h",
+            ),
+            ("vfmsd_laneq_f64", Some(0), "fmsub d0, d3, d2, d1"),
+            ("vfmsd_laneq_f64", Some(1), "mov v0.16b, v1.16b; fmls d0, d2, v3.d[1]"),
+            ("vfma_n_f64", None, "fmadd d0, d2, d3, d1"),
+            ("vfmah_lane_f16", Some(3), "mov v0.16b, v1.16b; fmla h0, h2, v3.h[3]"),
+        ];
+        for (name, lane, want) in expected {
+            assert_eq!(text(name, lane).as_deref(), Some(want), "{name} {lane:?}");
+        }
+        assert_eq!(fused("vfmsq_laneq_f64", Some(2)).map(|it| it.text), None);
+        assert_eq!(fused("vfmaq_laneq_f64", None).map(|it| it.text), None);
+        assert_eq!(fused("vfmlalq_low_f16", None).map(|it| it.text), None);
+        assert_eq!(fused("vfmaq_f64", None).unwrap().args, [Some(16), Some(16), Some(16)]);
+        assert_eq!(fused("vfmaq_lane_f32", Some(1)).unwrap().args, [Some(16), Some(16), Some(8)]);
+        assert_eq!(fused("vfmah_f16", None).unwrap().features, ["neon", "fp16"]);
+    }
+
+    /// The ones whose body calls `floatNxM_t::splat`, as core has them: a vector's `c` of
+    /// `_n`, `_lane` or `_laneq` of 32 or 64 bits, one lane of 64 bits too.
+    #[test]
+    fn the_bodies_that_splat_c_are_known() {
+        let splats = [
+            ("vfmaq_laneq_f64", Some(1)),
+            ("vfmsq_lane_f32", Some(0)),
+            ("vfms_n_f32", None),
+            ("vfma_n_f64", None),
+            ("vfms_laneq_f64", Some(1)),
+        ];
+        for (name, lane) in splats {
+            assert!(splats_c(name, lane), "{name} {lane:?}");
+        }
+        let others = [
+            ("vfmaq_f64", None),
+            ("vfmsq_f32", None),
+            ("vfmad_laneq_f64", Some(1)),
+            ("vfmss_lane_f32", Some(1)),
+            ("vfmaq_laneq_f16", Some(7)),
+            ("vfms_n_f16", None),
+            ("vfmsq_laneq_f64", Some(2)),
+        ];
+        for (name, lane) in others {
+            assert!(!splats_c(name, lane), "{name} {lane:?}");
+        }
     }
 }

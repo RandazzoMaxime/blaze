@@ -451,6 +451,10 @@ impl Entry {
         if super::backend::frame_pointers() {
             field(b"frame pointers");
         }
+        // Nor code compiled where rustc's `-C link-dead-code` decides some of it.
+        if super::backend::links_dead_code() {
+            field(b"link dead code");
+        }
         field(&[(debug != Told::Nothing) as u8]);
         // The keys of the other two stay what they were.
         if debug == Told::Lines {
