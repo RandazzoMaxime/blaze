@@ -5,9 +5,9 @@
 //! had one of 20 KB, and its tests that print a type nested two hundred deep overflowed a
 //! test thread's stack of 2 MB.
 //!
-//! Run on the function as [`promote`](super::promote) leaves it, just before Cranelift: a
-//! local's slot that nothing addresses any more takes no room at all, and the rest are put
-//! together greedily, the largest first, into one slot per group of locals of which no two
+//! Run on the function as [`promote`](super::promote) leaves it, just before Cranelift or
+//! LLVM: a local's slot that nothing addresses any more takes no room at all, and the rest are
+//! put together greedily, the largest first, into one slot per group of locals of which no two
 //! conflict ([`MirBody::frame_storage_conflicts`](hir_ty::mir::MirBody::frame_storage_conflicts)).
 
 use cranelift_codegen::ir::{self, InstructionData};
@@ -29,6 +29,93 @@ pub(super) struct FrameLocals {
 /// Shares the slots of `frame` between locals that never hold storage at once, and has
 /// `named` say where each named local now is.
 pub(super) fn share(func: &mut ir::Function, frame: &FrameLocals, named: &mut [Named]) {
+    let mut slots: Vec<ir::StackSlot> = named.iter().map(|it| it.slot).collect();
+    share_slots(func, frame, &mut slots, None);
+    for (it, slot) in named.iter_mut().zip(slots) {
+        it.slot = slot;
+    }
+}
+
+/// [`share`] for LLVM, on a copy of `func` with `named` in it: only slots whose address
+/// escapes share. LLVM's SROA takes the others apart into values, which a slot shared with
+/// one whose address escapes would keep it from; LLVM's own stack colouring shares none,
+/// as the IR has no lifetime markers.
+pub(super) fn share_escaping(
+    func: &ir::Function,
+    frame: &FrameLocals,
+    named: &mut [ir::StackSlot],
+) -> ir::Function {
+    let mut shared = func.clone();
+    let escaping = escaping(func);
+    share_slots(&mut shared, frame, named, Some(&escaping));
+    shared
+}
+
+/// The slots whose address goes anywhere but to the address of a load or a store, an
+/// offset from it, or a `memcpy`, `memmove` or `memset`.
+fn escaping(func: &ir::Function) -> rustc_hash::FxHashSet<ir::StackSlot> {
+    let dfg = &func.dfg;
+    // What each address of a slot, or an offset from one, is of.
+    let mut of: FxHashMap<ir::Value, ir::StackSlot> = FxHashMap::default();
+    loop {
+        let known = of.len();
+        for block in func.layout.blocks() {
+            for inst in func.layout.block_insts(block) {
+                let slot = match dfg.insts[inst] {
+                    InstructionData::StackAddr { stack_slot, .. } => Some(stack_slot),
+                    InstructionData::Binary { opcode: ir::Opcode::Iadd, args } => {
+                        args.iter().find_map(|it| of.get(&dfg.resolve_aliases(*it)).copied())
+                    }
+                    _ => None,
+                };
+                if let Some(slot) = slot {
+                    of.insert(dfg.first_result(inst), slot);
+                }
+            }
+        }
+        if of.len() == known {
+            break;
+        }
+    }
+    let mut escaping = rustc_hash::FxHashSet::default();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            let data = &dfg.insts[inst];
+            let followed = match *data {
+                InstructionData::Load { .. } | InstructionData::StackAddr { .. } => true,
+                InstructionData::Store { args: [value, _], .. } => {
+                    if let Some(&slot) = of.get(&dfg.resolve_aliases(value)) {
+                        escaping.insert(slot);
+                    }
+                    true
+                }
+                InstructionData::Binary { opcode: ir::Opcode::Iadd, .. } => true,
+                InstructionData::Call { func_ref, .. } => matches!(
+                    dfg.ext_funcs[func_ref].name,
+                    ir::ExternalName::LibCall(
+                        ir::LibCall::Memcpy | ir::LibCall::Memmove | ir::LibCall::Memset
+                    )
+                ),
+                _ => false,
+            };
+            if !followed {
+                escaping.extend(
+                    dfg.inst_values(inst).filter_map(|it| of.get(&dfg.resolve_aliases(it)).copied()),
+                );
+            }
+        }
+    }
+    escaping
+}
+
+/// Shares the slots of `frame`, those in `only` alone when it is given, and moves the slots
+/// of `named` along.
+fn share_slots(
+    func: &mut ir::Function,
+    frame: &FrameLocals,
+    named: &mut [ir::StackSlot],
+    only: Option<&rustc_hash::FxHashSet<ir::StackSlot>>,
+) {
     if frame.slots.is_empty() {
         return;
     }
@@ -48,16 +135,16 @@ pub(super) fn share(func: &mut ir::Function, frame: &FrameLocals, named: &mut [N
             }
         }
     }
-    for it in named.iter() {
-        addressed[it.slot.as_u32() as usize] = true;
+    for slot in named.iter() {
+        addressed[slot.as_u32() as usize] = true;
     }
     let mut order: Vec<usize> = Vec::new();
     for (at, slot) in frame.slots.iter().enumerate() {
         let Some(slot) = *slot else { continue };
-        if addressed[slot.as_u32() as usize] {
-            order.push(at);
-        } else {
+        if !addressed[slot.as_u32() as usize] {
             func.sized_stack_slots[slot].size = 0;
+        } else if only.is_none_or(|only| only.contains(&slot)) {
+            order.push(at);
         }
     }
     let slot = |at: usize| frame.slots[at].expect("a local's slot");
@@ -100,9 +187,9 @@ pub(super) fn share(func: &mut ir::Function, frame: &FrameLocals, named: &mut [N
             }
         }
     }
-    for it in named.iter_mut() {
-        if let Some(&kept) = moved.get(&it.slot) {
-            it.slot = kept;
+    for slot in named.iter_mut() {
+        if let Some(&kept) = moved.get(slot) {
+            *slot = kept;
         }
     }
 }
