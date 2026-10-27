@@ -5952,6 +5952,11 @@ pub mod sve {
     }
 }
 
+/// Each function of `core::arch`'s SVE and SVE2 of an LLVM intrinsic ra-jit has a stub of,
+/// generated (`sve_ops.rs`).
+#[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+pub mod sve_ops;
+
 /// An associated constant of an impl that is generic over a lifetime, named from a method of
 /// that impl.
 pub mod lifetime_impl_consts {
