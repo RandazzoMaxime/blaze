@@ -219,7 +219,7 @@ pub(crate) fn judge(
     reason: &str,
 ) -> Judged {
     let what = format!("{} {} of tenant `{}`", ask.op, ask.name, spec.tenant);
-    let reason = reason.trim();
+    let reason = reason.lines().next().unwrap_or_default().trim();
     let because = if reason.is_empty() { String::new() } else { format!(": {reason}") };
     match status {
         StatusCode::OK | StatusCode::NO_CONTENT => Judged::Done,
@@ -562,7 +562,7 @@ impl Gateway {
         }
     }
 
-    /// The start of an error's body, as text on one line.
+    /// The start of an error's body, as text.
     async fn reason(&self, mut body: Incoming) -> String {
         let mut bytes = Vec::new();
         let read = async {
@@ -574,8 +574,7 @@ impl Gateway {
             }
         };
         _ = tokio::time::timeout(self.patience, read).await;
-        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(REASON_MAX)]).into_owned();
-        text.lines().next().unwrap_or_default().to_owned()
+        String::from_utf8_lossy(&bytes[..bytes.len().min(REASON_MAX)]).into_owned()
     }
 }
 
