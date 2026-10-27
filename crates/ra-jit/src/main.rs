@@ -4815,7 +4815,10 @@ fn link_executable(
     );
     // What the link kept of the stand-ins is what the program can reach, the standard
     // library's unit's among them, each saying why its unit refused it.
-    if !stand_ins.is_empty() {
+    // COFF keeps every stand-in in one section (the objects have no COMDAT sections for
+    // `/OPT:REF` to take out what nothing reaches), so on Windows the stand-ins in the
+    // executable are not the ones the program reaches: one that is called says so when it runs.
+    if !stand_ins.is_empty() && !cfg!(windows) {
         let said = stand_ins.iter().map(|it| {
             let it = it.trim().trim_start_matches(hir_ty_codegen::STAND_IN_SAYS);
             cargo::whole::without_hashes(it)
