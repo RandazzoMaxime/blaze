@@ -754,7 +754,7 @@ fn lock(
                             );
                         }
                         store.insert(&key(&sha256)?, &bytes);
-                        store.flush();
+                        store.seal();
                         anyhow::ensure!(
                             store.has(&key(&sha256)?),
                             "blaze's store did not keep {} ({} bytes)",
@@ -1188,7 +1188,7 @@ mod tests {
         let store = ra_jit_store::Store::open_by_content(&store_dir).unwrap();
         let sha = sha256(&bytes);
         store.insert(&key(&sha).unwrap(), &bytes);
-        store.flush();
+        store.seal();
         drop(store);
         let mut it = entry("webrtc-sys", "x86_64-unknown-linux-gnu");
         (it.sha256, it.names) = (sha.clone(), "linux-x64-release".to_owned());

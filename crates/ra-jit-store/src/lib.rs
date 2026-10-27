@@ -1589,6 +1589,13 @@ impl Store {
         self.settle(self.tuning.seal_at);
     }
 
+    /// As [`Self::flush`], sealing what is open however little it is: what was added is then
+    /// read by [`Self::get`] and sent to other machines now.
+    pub fn seal(&self) {
+        self.settled();
+        self.settle(1);
+    }
+
     /// As [`Self::flush`], sealing the open pack if it has `seal_at` bytes.
     fn settle(&self, seal_at: u64) {
         let sealed = self.writer().settle(&self.dir, seal_at);
