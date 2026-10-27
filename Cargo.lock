@@ -733,6 +733,7 @@ dependencies = [
  "blaze-manifest",
  "blaze-registry",
  "blaze-resolve",
+ "blaze-units",
  "cargo-util-schemas",
  "rustc-hash 2.1.2",
  "semver",
@@ -807,6 +808,20 @@ dependencies = [
  "blaze-metadata",
  "blaze-resolve",
  "rustc-hash 2.1.2",
+]
+
+[[package]]
+name = "blaze-units"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blaze-manifest",
+ "blaze-resolve",
+ "cargo-util-schemas",
+ "rustc-hash 2.1.2",
+ "semver",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3444,6 +3459,7 @@ dependencies = [
  "blaze-registry",
  "blaze-resolve",
  "blaze-tree",
+ "blaze-units",
  "cargo-platform",
  "cargo-util-schemas",
  "cargo_metadata",
