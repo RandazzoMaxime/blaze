@@ -6925,6 +6925,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             if known.symbol.is_empty() {
                 unsupported!("a static that rustc's symbols name no copy of");
             }
+            self.bring_behind(&node)?;
             // A thread-local of the base is one still: the patch's code reaches it as one.
             let thread_local = is_thread_local(db, id);
             let data = self.declare_named_data(
@@ -7137,17 +7138,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             }
             // The base's copy is of the source before the edit, or the link left it out.
             if self.replaced.changed.contains(&node) || !self.symbols.linked(&known.symbol) {
-                let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
-                let compiled = compiled.as_ref().map_err(Clone::clone)?;
-                let id = self.module.declare_function(
-                    &known.symbol,
-                    Linkage::Hidden,
-                    &compiled.code.signature,
-                )?;
-                self.instances.insert(instance.clone(), id);
-                self.pending.push((instance.clone(), known.env.clone(), id));
-                return Ok(id);
+                return self.compile_again(instance, known);
             }
+            self.bring_behind(&node)?;
             return self.import(&known.symbol, sig);
         }
         if let InstanceDef::Fn(func) = def
@@ -7271,6 +7264,51 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             self.named.insert(name, id);
         }
         Ok(id)
+    }
+
+    /// The base's instance compiled into the patch under the base's symbol, which the splice
+    /// sends what called the base's copy on to.
+    fn compile_again(
+        &mut self,
+        instance: &Instance,
+        known: &patch::BaseInstance,
+    ) -> Result<FuncId> {
+        if let Some(&id) = self.instances.get(instance) {
+            return Ok(id);
+        }
+        let compiled = compiled_instance(self.db, instance.clone(), known.env.clone());
+        let compiled = compiled.as_ref().map_err(Clone::clone)?;
+        let id = self.module.declare_function(
+            &known.symbol,
+            Linkage::Hidden,
+            &compiled.code.signature,
+        )?;
+        self.instances.insert(instance.clone(), id);
+        self.pending.push((instance.clone(), known.env.clone(), id));
+        Ok(id)
+    }
+
+    /// Compiles what the base's copy of `node` reaches that the edit changed and nothing the
+    /// patch compiled reached before ([`patch::Unchanged::behind`]): the patch refers to that
+    /// copy now, and through it to code of the source before.
+    fn bring_behind(&mut self, node: &patch::Node) -> Result<()> {
+        let Some(behind) = self.replaced.behind.remove(node) else { return Ok(()) };
+        let base = self.base.expect("only a patch has what it left behind");
+        for below in behind {
+            if self.replaced.broken.contains(&below) {
+                unsupported!("what the patch reaches again reaches code of the base that changed");
+            }
+            match &below {
+                patch::Node::Instance(instance) => {
+                    self.compile_again(instance, &base.instances[instance])?;
+                }
+                patch::Node::Static(id) => {
+                    self.static_data(*id)?;
+                }
+                patch::Node::Root(_) => {}
+            }
+        }
+        Ok(())
     }
 
     fn callee_name(&self, def: InstanceDef) -> &'db str {
