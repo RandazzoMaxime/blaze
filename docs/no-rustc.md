@@ -676,7 +676,12 @@ library's crates does that by itself: it takes the unit from the store (`RA_JIT_
 fetches it from the remote, keyed by the library's crates, their cfgs and editions, the target
 and the debug info asked for (the store adds ra-jit's build and the toolchain), or compiles it
 once and keeps it there, and writes it beside `--out` as `<out>.std.o`; `harness/allrajit.py`
-checks all three ways against cargo. For G, such a build compiles every crate the program
+checks all three ways against cargo. The toolchain's commit, which the store keys
+the library by and which its debug paths name (`/rustc/<commit>/library/...`), is read from the
+toolchain's channel manifest, or for a nightly's manifest, which names it only by a short hash,
+from blaze's own pins (`pins.txt`) when the manifest's version is blaze's nightly; until
+2026-10-27 it was read out of the sysroot's `libstd` rlib, the one file rustc built a whole build
+still opened. For G, such a build compiles every crate the program
 depends on as well, not only those it names, and links them with the unit: ripgrep (60 crates)
 builds, links and runs with nothing rustc built, and 19 of its commands (searches, `--json`,
 `-U`, `-P`, `--files`, errors, `--help`) print what cargo's build does, timings aside. A function

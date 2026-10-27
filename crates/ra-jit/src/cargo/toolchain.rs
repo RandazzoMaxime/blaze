@@ -39,6 +39,11 @@ pub(crate) fn ours_says() -> &'static str {
     own::rustc_version()
 }
 
+/// The commit that toolchain was built from.
+pub(crate) fn ours_commit() -> &'static str {
+    own::commit()
+}
+
 /// The project's own toolchain, as a failure names it, when blaze builds with its release in
 /// its place.
 static IN_PLACE_OF: OnceLock<(String, &'static str)> = OnceLock::new();
