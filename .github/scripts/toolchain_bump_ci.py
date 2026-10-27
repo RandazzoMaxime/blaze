@@ -269,7 +269,9 @@ def main_train(workflow_id):
 
 def verdict(run_id, std_path):
     train = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
-    name = pin()
+    # The verdict runs main's checkout: the bump's pin is read at the train's commit.
+    name = gh("api", f"repos/{REPO}/contents/harness/toolchain?ref={train['head_sha']}",
+              "-H", "Accept: application/vnd.github.raw").strip()
     date = name.removeprefix("nightly-")
     pr = open_pr()
     if not pr:
