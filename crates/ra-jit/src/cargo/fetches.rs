@@ -1151,7 +1151,7 @@ mod tests {
         let file = profile.join(WRITTEN).join(&it.sha256).join(format!("fake-1.0.0-{target}.bin"));
         assert_eq!(
             handed.env,
-            [("FAKE_NO_DOWNLOAD".to_owned(), "1".to_owned()), ("FAKE_ARCHIVE".to_owned(), file.to_str().unwrap().to_owned())]
+            [("FAKE_ARCHIVE".to_owned(), file.to_str().unwrap().to_owned()), ("FAKE_NO_DOWNLOAD".to_owned(), "1".to_owned())]
         );
         assert_eq!(std::fs::read(&file).unwrap(), bytes);
         assert_eq!(handed.readable, [profile.join(WRITTEN)]);
