@@ -766,6 +766,31 @@ two of a body's goals share is solved for each. The slowest bodies now are nushe
 `theme_list::list` (202 ms, liveness over 48k points with no loans), `run_http_server`
 (127 ms, the walk) and `tool_router` (107 ms, constraints of a body of 57 points).
 
+With what dropping a type uses found as rustc's dropck finds it: over the strongly connected
+components of the types it drops, each expanded once, an ADT's part a query in its own
+parameters (rustc's `adt_dtorck_constraint`) that a body instantiates, and whether dropping a
+type runs code a query per type modulo regions; and drop liveness asking whether a local may
+be initialized leaving a block only of the locals drop live there. Same measure, on main
+d93d0958:
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 583 | 308 (53%) | 7 | 265 (45%) | 7 |
+| fd | 178 | 79 (44%) | 12 | 71 (40%) | 12 |
+| bat | 269 | 157 (58%) | 34 | 138 (51%) | 34 |
+| hyperfine | 208 | 77 (37%) | 9 | 66 (32%) | 8 |
+| just | 1064 | 541 (51%) | 19 | 482 (45%) | 18 |
+| axum | 3726 | 1012 (27%) | 15 | 945 (25%) | 14 |
+| helix | 3006 | 1399 (47%) | 108 | 1227 (41%) | 106 |
+| nushell | 14084 | 6502 (46%) | 108 | 5732 (41%) | 108 |
+
+The walk went from 2.6 s to 0.4 s on nushell and from 0.7 s to 0.04 s on axum, whose futures
+asked the trait solver of their drop glue on every drop; nushell's liveness from 2.2 s to
+1.5 s, `theme_list::list` from 213 ms to 92 ms and `run_http_server` from 128 ms to 12. The
+slowest bodies now are `tool_router` (108 ms, constraints), helix's `keymap::default` (108 ms,
+liveness over 37k points) and nushell's `ParseError::labels` and `ShellError::labels` (53 ms
+each, constraints).
+
 ## Debugging
 
 - `echo file.rs | ra-jit borrowck --edition 2021` prints a file's diagnostics as JSON.
