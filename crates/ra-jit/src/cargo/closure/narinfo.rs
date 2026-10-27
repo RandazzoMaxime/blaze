@@ -58,7 +58,8 @@ pub(crate) struct Sha256(pub(crate) [u8; 32]);
 impl Sha256 {
     /// `sha256:` and the hash in nix's base32 or in hex, as a narinfo writes it.
     pub(crate) fn parse(text: &str) -> anyhow::Result<Sha256> {
-        let hash = text.strip_prefix("sha256:").with_context(|| format!("`{text}` is no sha256"))?;
+        let hash =
+            text.strip_prefix("sha256:").with_context(|| format!("`{text}` is no sha256"))?;
         let hex = || -> Option<[u8; 32]> {
             let pairs = hash.as_bytes().chunks(2);
             let bytes = pairs.map(|it| u8::from_str_radix(std::str::from_utf8(it).ok()?, 16).ok());

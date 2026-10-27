@@ -92,13 +92,15 @@ impl Source {
     }
 
     async fn nar(&self, url: &str) -> anyhow::Result<Body> {
-        let file = url.strip_prefix("nar/").filter(|it| {
-            !it.is_empty() && !it.contains(['/', '\\']) && !it.starts_with('.')
-        });
+        let file = url
+            .strip_prefix("nar/")
+            .filter(|it| !it.is_empty() && !it.contains(['/', '\\']) && !it.starts_with('.'));
         let file = file.with_context(|| format!("`{url}` is not where a cache keeps a NAR"))?;
         let missing = || anyhow::anyhow!("{} has no {url}", self.name());
         Ok(match self {
-            Source::Web { nars, .. } => Body::Web(nars.read_from(file, 0).await?.ok_or_else(missing)?),
+            Source::Web { nars, .. } => {
+                Body::Web(nars.read_from(file, 0).await?.ok_or_else(missing)?)
+            }
             Source::Dir(dir) => {
                 Body::File(std::fs::File::open(dir.join("nar").join(file)).map_err(|_| missing())?)
             }
@@ -126,7 +128,8 @@ impl Read for Reading<'_> {
             Body::Web(web) => web,
         };
         while self.at == self.piece.len() {
-            let next = self.runtime.block_on(tokio::time::timeout(PATIENCE, remote::https_next(web)));
+            let next =
+                self.runtime.block_on(tokio::time::timeout(PATIENCE, remote::https_next(web)));
             match next {
                 Err(_) => return Err(io::Error::other(format!("no bytes for {PATIENCE:?}"))),
                 Ok(Err(e)) => return Err(io::Error::other(e)),
@@ -163,9 +166,11 @@ pub(crate) fn fetch(
         roots.iter().map(|it| (it.path.clone(), Some(it.clone()))).collect();
     while !level.is_empty() {
         let resolved = runtime.block_on(
-            stream::iter(level.iter().map(|(path, expected)| {
-                resolve(store, source, keys, path, expected.as_ref())
-            }))
+            stream::iter(
+                level
+                    .iter()
+                    .map(|(path, expected)| resolve(store, source, keys, path, expected.as_ref())),
+            )
             .buffer_unordered(ASKED)
             .collect::<Vec<_>>(),
         );

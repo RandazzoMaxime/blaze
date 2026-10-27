@@ -294,7 +294,8 @@ mod tests {
         assert!(roots("x86_64-darwin").is_empty());
         let names = |roots: &[Root]| roots.iter().map(|it| it.attribute).collect::<Vec<_>>();
         assert_eq!(names(&x86), names(&arm));
-        for wanted in ["clang", "lld", "glibc.dev", "pkg-config", "bash", "openssl.dev", "protobuf.out"]
+        for wanted in
+            ["clang", "lld", "glibc.dev", "pkg-config", "bash", "openssl.dev", "protobuf.out"]
         {
             assert!(names(&x86).contains(&wanted), "{wanted}");
         }
@@ -333,7 +334,11 @@ mod tests {
             }
             false => (zstd::encode_all(&made.nar[..], 3).unwrap(), "zstd"),
         };
-        let name = format!("{}.nar.{}", narinfo::base32(&Sha256::of(&file).0), if xz { "xz" } else { "zst" });
+        let name = format!(
+            "{}.nar.{}",
+            narinfo::base32(&Sha256::of(&file).0),
+            if xz { "xz" } else { "zst" }
+        );
         std::fs::create_dir_all(cache.join("nar")).unwrap();
         std::fs::write(cache.join("nar").join(&name), &file).unwrap();
         let mut references = made.references.clone();
@@ -345,7 +350,8 @@ mod tests {
             made.path.nar_size,
             references.join(",")
         );
-        let sig = base64::engine::general_purpose::STANDARD.encode(key.sign(fingerprint.as_bytes()).to_bytes());
+        let sig = base64::engine::general_purpose::STANDARD
+            .encode(key.sign(fingerprint.as_bytes()).to_bytes());
         let bases: Vec<&str> = references.iter().map(|it| &it[narinfo::STORE.len()..]).collect();
         let info = format!(
             "StorePath: {}\nURL: nar/{name}\nCompression: {compression}\nFileHash: {}\nFileSize: {}\nNarHash: {}\nNarSize: {}\nReferences: {}\nSig: test-1:{sig}\n",
@@ -361,7 +367,8 @@ mod tests {
     }
 
     fn public(key: &SigningKey) -> String {
-        let public = base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes());
         format!("test-1:{public}")
     }
 
@@ -371,14 +378,16 @@ mod tests {
         let (lib, app) = (store_path("lib-1.0"), store_path("app-1.0"));
         let tree = work.join("lib-tree");
         std::fs::create_dir_all(tree.join("lib")).unwrap();
-        let large: Vec<u8> = (0..kept::PIECE_MAX * 2 + 12345).map(|it| (it * 7 % 251) as u8).collect();
+        let large: Vec<u8> =
+            (0..kept::PIECE_MAX * 2 + 12345).map(|it| (it * 7 % 251) as u8).collect();
         std::fs::write(tree.join("lib/libbig.so"), &large).unwrap();
         std::fs::write(tree.join("lib/empty"), "").unwrap();
         let lib = made(&tree, lib, Vec::new());
         let tree = work.join("app-tree");
         std::fs::create_dir_all(tree.join("bin")).unwrap();
         std::fs::write(tree.join("bin/app"), "#!/bin/sh\necho hi\n").unwrap();
-        std::fs::set_permissions(tree.join("bin/app"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(tree.join("bin/app"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         std::os::unix::fs::symlink(format!("{}/lib", lib.path.path), tree.join("lib")).unwrap();
         std::os::unix::fs::symlink("app", tree.join("bin/app-again")).unwrap();
         let app = made(&tree, app.clone(), vec![app, lib.path.path.clone()]);
@@ -413,7 +422,11 @@ mod tests {
         assert_eq!((again.paths, again.had, again.file_bytes), (2, 2, 0));
 
         let (remote, _remote_dir) = crate::remote::tests::unsigned("closure", 1 << 30);
-        let pushed = crate::remote::tests::wait(crate::remote::push(&work.path().join("filled"), &remote, PROJECT));
+        let pushed = crate::remote::tests::wait(crate::remote::push(
+            &work.path().join("filled"),
+            &remote,
+            PROJECT,
+        ));
         pushed.unwrap();
         let taking = work.path().join("taking");
         let empty = store_at(&taking);
@@ -431,15 +444,26 @@ mod tests {
         assert_eq!(dir, laid.join(&app.path.path[narinfo::STORE.len()..]));
         assert_eq!(nar::hash_of(&dir).unwrap(), (app.path.nar_hash, app.path.nar_size));
         assert_eq!(std::fs::read_to_string(dir.join("bin/app")).unwrap(), "#!/bin/sh\necho hi\n");
-        let mode = |path: &Path| std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777;
+        let mode =
+            |path: &Path| std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!((mode(&dir), mode(&dir.join("bin/app"))), (0o555, 0o555));
-        assert_eq!(std::fs::read_link(dir.join("lib")).unwrap(), Path::new(&format!("{}/lib", lib.path.path)));
+        assert_eq!(
+            std::fs::read_link(dir.join("lib")).unwrap(),
+            Path::new(&format!("{}/lib", lib.path.path))
+        );
         let lib_dir = kept::materialize(&empty, &lib.path, &laid).unwrap();
         assert_eq!(mode(&lib_dir.join("lib/libbig.so")), 0o444);
-        assert_eq!(std::fs::metadata(lib_dir.join("lib/libbig.so")).unwrap().len(), (kept::PIECE_MAX * 2 + 12345) as u64);
+        assert_eq!(
+            std::fs::metadata(lib_dir.join("lib/libbig.so")).unwrap().len(),
+            (kept::PIECE_MAX * 2 + 12345) as u64
+        );
         // Laid out, it is not laid out again.
         assert_eq!(kept::materialize(&empty, &app.path, &laid).unwrap(), dir);
-        let left: Vec<String> = std::fs::read_dir(&laid).unwrap().map(|it| it.unwrap().file_name().into_string().unwrap()).filter(|it| it.starts_with('.') && !it.ends_with(".lock")).collect();
+        let left: Vec<String> = std::fs::read_dir(&laid)
+            .unwrap()
+            .map(|it| it.unwrap().file_name().into_string().unwrap())
+            .filter(|it| it.starts_with('.') && !it.ends_with(".lock"))
+            .collect();
         assert!(left.is_empty(), "nothing of the laying out is left beside it: {left:?}");
         kept::remove(&laid).unwrap();
     }
@@ -463,7 +487,9 @@ mod tests {
         let said = kept::materialize(&store, &made.path, &laid).unwrap_err().to_string();
         assert!(said.contains("is not the one cache.nixos.org signed"), "{said}");
         assert!(!laid.join(&made.path.path[narinfo::STORE.len()..]).exists());
-        assert!(!laid.join(format!(".{}.unpacking", &made.path.path[narinfo::STORE.len()..])).exists());
+        assert!(
+            !laid.join(format!(".{}.unpacking", &made.path.path[narinfo::STORE.len()..])).exists()
+        );
     }
 
     #[test]
@@ -473,7 +499,11 @@ mod tests {
         let store = store_at(&work.path().join("store"));
         let mut keeping = kept::Keeping::new(&store);
         nar::read(&nar[..], &mut keeping).unwrap();
-        let path = StorePath { path: info.store_path.clone(), nar_hash: info.nar_hash, nar_size: info.nar_size };
+        let path = StorePath {
+            path: info.store_path.clone(),
+            nar_hash: info.nar_hash,
+            nar_size: info.nar_size,
+        };
         keeping.finish(path.clone(), Vec::new());
         store.seal();
         let dir = kept::materialize(&store, &path, &work.path().join("nix")).unwrap();

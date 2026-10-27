@@ -218,7 +218,8 @@ impl Sink for Keeping<'_> {
             pieces.push(key);
             left -= len as u64;
         }
-        self.entries.push(Entry { path: path.to_vec(), kind: Kind::File { executable, size, pieces } });
+        self.entries
+            .push(Entry { path: path.to_vec(), kind: Kind::File { executable, size, pieces } });
         Ok(())
     }
 
@@ -259,7 +260,11 @@ pub(crate) fn manifest(store: &Store, path: &StorePath) -> anyhow::Result<Manife
     let manifest = Manifest::decode(&bytes)
         .with_context(|| format!("blaze's store has a manifest of {} it cannot read", path.path))?;
     if manifest.of != *path {
-        bail!("blaze's store has the manifest of {} under the key of {}", manifest.of.path, path.path);
+        bail!(
+            "blaze's store has the manifest of {} under the key of {}",
+            manifest.of.path,
+            path.path
+        );
     }
     Ok(manifest)
 }
