@@ -37,6 +37,13 @@ pub(crate) fn executable(
         line.after.extend(exports.iter().map(|it| format!("--export={it}")));
         return line.link(objects, exe);
     }
+    if line.windows {
+        // A DLL names what it exports on the command line; `GetProcAddress` finds the list of
+        // a proc-macro crate by it.
+        line.before.push("/DLL".to_owned());
+        line.before.extend(exports.iter().map(|it| format!("/EXPORT:{it}")));
+        return line.link(objects, exe);
+    }
     let mut listed = exe.as_os_str().to_owned();
     listed.push(".exports");
     let listed = PathBuf::from(listed);
