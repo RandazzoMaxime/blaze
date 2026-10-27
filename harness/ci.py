@@ -153,8 +153,6 @@ FAST = {
     "RA_JIT_SPLICE=1 farsplices.py": (8, ()),
     "unreached.py": (9, ()),
     "anonstatics.py": (9, ()),
-    "renamedstatics.py": (12, ()),
-    "renamedstatics.py --not-incremental": (13, (X64,)),
     "loadedits.py": (19, (X64, MAC)),
     "testselect.py": (58, (X64, MAC)),
     "doctestonce.py": (92, (X64,)),
@@ -162,9 +160,6 @@ FAST = {
     "RA_JIT_ASSEMBLER=cc asmedits.py": (12, ()),
     "includes.py": (12, ()),
     "latelisted.py": (126, (X64,)),
-    # On macOS it fails about one run in fifty, the worker compiling nothing ahead (#413):
-    # the full tier's there until that is fixed.
-    "aheadready.py": (14, (X64,)),
     "rustsrc.py": (1, ()),
     "norustc.py": (253, (X64,)),
     "check_json.py": (38, (X64,)),
@@ -237,6 +232,17 @@ def fast_of(harness):
         sys.exit(f"ci.py: {name!r} is in the fast tier and FAST has no line for it: add its seconds "
                  f"on the slowest host, and the hosts it runs on in the fast tier")
     return FAST[max(keys, key=len)]
+
+
+def check_tables():
+    """Stops at a line of FAST or CORE that names no harness: one left behind when its harness
+    went (aheadready.py and renamedstatics.py after #408) times nothing, and says nothing."""
+    labels = [label(harness) for harness in HARNESSES]
+    for table, name in ((FAST, "FAST"), (CORE, "CORE")):
+        for key in table:
+            if not any(it == key or it.startswith(key + " ") for it in labels):
+                sys.exit(f"ci.py: {name} has a line for {key!r}, which no harness in HARNESSES is: "
+                         f"take it out with its harness")
 
 
 def fast_here(backend):
@@ -344,6 +350,7 @@ def run(part):
 
 
 def main():
+    check_tables()
     arg = sys.argv[1] if len(sys.argv) in (2, 3) else "--help"
     if arg == "--parts" and sys.argv[2:] in ([], ["full"], ["fast"]):
         print(json.dumps(parts(*sys.argv[2:])))
