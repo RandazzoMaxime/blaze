@@ -471,8 +471,8 @@ pub(crate) fn failed_note(
         return format!(
             "{failed}, and wrote outside OUT_DIR, which is the one place a run may write; a \
              script that writes its package's sources runs outside with `unsandboxed-build-scripts \
-             = [\"{name}\"]` under [workspace.metadata.blaze.sandbox] in {root}, kept on this \
-             machine alone"
+             = [\"{name}\"]` under [workspace.metadata.blaze.sandbox] in {root}, and is never \
+             kept nor pushed"
         );
     }
     let unset: Vec<&str> = text
