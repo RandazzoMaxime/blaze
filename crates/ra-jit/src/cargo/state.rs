@@ -997,6 +997,21 @@ pub(crate) fn place(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Has `to` be a file of its own with what `from` has now, put there under another name and
+/// renamed over it: what was at `to` stays as it is for whoever runs it, and nothing written to
+/// `from` later reaches it. Plain cargo starts the program at `to` with no word to the daemon,
+/// which writes its own executable in place for the next start, and on Linux a program started
+/// while its file is open for writing is refused ("text file busy").
+pub(crate) fn place_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut new = to.as_os_str().to_owned();
+    new.push(format!(".{}.new", std::process::id()));
+    let new = PathBuf::from(new);
+    let _ = std::fs::remove_file(&new);
+    crate::splice::copy_file(from, &new)
+        .and_then(|()| std::fs::rename(&new, to))
+        .inspect_err(|_| _ = std::fs::remove_file(&new))
+}
+
 /// Gives `command` the environment cargo built in, so that a cargo it runs, or is, has the
 /// same units: cargo keys the crates of the workspace by their wrapper, and one run
 /// without it builds each program again and puts its own where this build's is, under a

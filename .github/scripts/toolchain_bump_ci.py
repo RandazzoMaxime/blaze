@@ -54,7 +54,12 @@ class Failed(Exception):
 
 
 def run(*argv, check=True, cwd=ROOT, env=None):
-    done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=env)
+    # GitHub's API answers a 502 now and then, and to every try at a large page of a train's jobs.
+    for wait in (10, 30, 60, None):
+        done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=env)
+        if not done.returncode or wait is None or argv[0] != "gh" or not re.search(r"HTTP 5\d\d", done.stderr):
+            break
+        time.sleep(wait)
     if check and done.returncode:
         raise Failed(f"`{' '.join(argv[:4])}` exited {done.returncode}:\n{(done.stderr or done.stdout)[-3000:]}")
     return done.stdout
@@ -83,7 +88,7 @@ def pins():
 
 def open_pr():
     found = json.loads(gh("pr", "list", "-R", REPO, "--head", BRANCH, "--state", "open",
-                          "--json", "number,title,createdAt,url"))
+                          "--json", "number,title,createdAt,url,headRefOid"))
     return found[0] if found else None
 
 
@@ -248,7 +253,7 @@ def pr():
 
 
 def jobs_of(run_id):
-    out = gh("api", "--paginate", f"repos/{REPO}/actions/runs/{run_id}/jobs?per_page=100", "--jq", ".jobs[]")
+    out = gh("api", "--paginate", f"repos/{REPO}/actions/runs/{run_id}/jobs?per_page=50", "--jq", ".jobs[]")
     return [json.loads(l) for l in out.splitlines() if l.strip()]
 
 
@@ -329,12 +334,55 @@ def base_run(run_id):
     output(run=base["id"], sha=base["head_sha"])
 
 
+def poke_auto_merge(pr):
+    """GitHub merges an auto-merge pull request when a check completes after it was set, and the
+    gate's `ci` finished hours before the train: `ci` runs again (a few seconds) so it merges."""
+    runs = json.loads(gh("api", f"repos/{REPO}/commits/{pr['headRefOid']}/check-runs?check_name=ci",
+                         "--jq", "[.check_runs[] | {id, status, conclusion, html_url}]"))
+    done = [it for it in runs if it["status"] == "completed" and it["conclusion"] == "success"]
+    found = re.search(r"/actions/runs/(\d+)/job/", done[0]["html_url"]) if done else None
+    if found:
+        gh("run", "rerun", found.group(1), "-R", REPO, "--job", str(done[0]["id"]))
+
+
+def on_main_push():
+    """The workflows a push to main starts that can be dispatched (path filters aside)."""
+    found = []
+    for name in sorted(os.listdir(os.path.join(ROOT, ".github/workflows"))):
+        text = open(os.path.join(ROOT, ".github/workflows", name)).read()
+        if re.search(r"^  push:\n    branches: \[\"?main\"?\]", text, re.M) and "\n  workflow_dispatch:" in text:
+            found.append(name)
+    return found
+
+
+def after_merge(pr):
+    """A merge that GITHUB_TOKEN's auto-merge makes starts no workflow on main (no train, no
+    gate of main): once it merges, main's push workflows are dispatched on main."""
+    for _ in range(30):
+        state = json.loads(gh("pr", "view", str(pr["number"]), "-R", REPO, "--json", "state"))["state"]
+        if state != "OPEN":
+            break
+        time.sleep(30)
+    if state != "MERGED":
+        print(f"the pull request is {state.lower()} after 15 minutes: main's next push starts its workflows")
+        return
+    for name in on_main_push():
+        gh("workflow", "run", name, "-R", REPO, "--ref", "main", check=False)
+        print(f"dispatched {name} on main")
+
+
+verdict_date = datetime.date.today().isoformat()
+
+
 def verdict(run_id, std_path):
+    global verdict_date
     train = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
+    if train["head_branch"] != BRANCH:
+        raise Failed(f"run {run_id} is a train on {train['head_branch']}, not on {BRANCH}")
     # The verdict runs main's checkout: the bump's pin is read at the train's commit.
     name = gh("api", f"repos/{REPO}/contents/harness/toolchain?ref={train['head_sha']}",
               "-H", "Accept: application/vnd.github.raw").strip()
-    date = name.removeprefix("nightly-")
+    date = verdict_date = name.removeprefix("nightly-")
     pr = open_pr()
     if not pr:
         print(f"no open pull request from {BRANCH}; nothing to decide")
@@ -383,9 +431,11 @@ def verdict(run_id, std_path):
         blocked(date, f"The bump {pr['url']} ({name}) is red.\n\n{body}")
         sys.exit(1)
     gh("pr", "merge", str(pr["number"]), "-R", REPO, "--merge", "--auto")
+    poke_auto_merge(pr)
     gh("pr", "comment", str(pr["number"]), "-R", REPO,
        "--body", f"**The bump's gates are green**: queued with `gh pr merge --auto`.\n\n{body}")
     unblocked(date, f"is green and queued ({pr['url']})")
+    after_merge(pr)
 
 
 def main():
@@ -420,6 +470,13 @@ def main():
         print(f"error: toolchain_bump_ci {args.step}: {error}", file=sys.stderr)
         if args.step == "prepare":
             open(os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "bump-failed.txt"), "w").write(str(error))
+        if args.step == "verdict":
+            try:
+                blocked(verdict_date, f"The verdict on the train {SERVER}/{REPO}/actions/runs/{args.run} "
+                        f"failed before it decided:\n\n```\n{error}\n```\n\nIt runs again with "
+                        f"`gh workflow run toolchain-bump.yaml -f train={args.run}`.")
+            except Failed as also:
+                print(f"error: and the issue could not be updated: {also}", file=sys.stderr)
         sys.exit(1)
 
 

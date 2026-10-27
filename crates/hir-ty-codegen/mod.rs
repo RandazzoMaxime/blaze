@@ -114,6 +114,27 @@ pub use home::body_file;
 mod imports;
 #[cfg(feature = "llvm")]
 mod llvm;
+
+/// The CPU of this host and its features as LLVM names them (`+avx2,-avx512f,...`), what
+/// rustc's `-C target-cpu=native` is; `None` without LLVM.
+pub fn host_cpu() -> Option<(String, String)> {
+    #[cfg(feature = "llvm")]
+    {
+        use inkwell::llvm_sys::{core::LLVMDisposeMessage, target_machine as tm};
+        let taken = |message: *mut std::ffi::c_char| {
+            // SAFETY: LLVM returns a C string the caller owns and disposes of.
+            let text = unsafe { std::ffi::CStr::from_ptr(message) }.to_string_lossy().into_owned();
+            unsafe { LLVMDisposeMessage(message) };
+            text
+        };
+        // SAFETY: neither reads anything but the host's CPU.
+        let (name, features) =
+            unsafe { (taken(tm::LLVMGetHostCPUName()), taken(tm::LLVMGetHostCPUFeatures())) };
+        Some((name, features))
+    }
+    #[cfg(not(feature = "llvm"))]
+    None
+}
 mod neon;
 mod overlap;
 mod patch;
@@ -198,6 +219,7 @@ macro_rules! unsupported {
 }
 
 // After `unsupported!`, which they use.
+mod fma;
 mod sve;
 mod wasm_simd;
 
@@ -3343,6 +3365,13 @@ pub fn mir_opt_level() -> MirOptLevel {
 
 pub const MIR_OPT: &str = "RA_JIT_MIR_OPT";
 
+/// Says whether rustc builds the program with `-C link-dead-code`, before anything of it is
+/// compiled: rustc then keeps every function, `#[inline(always)]` ones too, as one copy in
+/// one codegen unit, which LLVM inlines only into the code of that unit.
+pub fn rustc_links_dead_code(links: bool) {
+    backend::link_dead_code(links);
+}
+
 /// The body the code generator compiles of `def`: the runtime body, optimized at
 /// [`mir_opt_level`].
 fn compiled_mir_body<'db>(
@@ -4518,6 +4547,38 @@ pub fn stand_in_section(format: object::BinaryFormat) -> (&'static str, &'static
     }
 }
 
+/// The bytes of the object `product` makes, read once `product` is gone: they are written to
+/// a file first, which the kernel can keep on disk, so that a large program's object of
+/// gigabytes is not in memory twice. Where no such file can be made they are made in memory.
+fn write_object(product: cranelift_object::ObjectProduct) -> Result<Vec<u8>> {
+    use std::io::{Read as _, Seek as _, Write as _};
+    let failed = |e: &dyn fmt::Display| CodegenError::Backend(format!("writing the object: {e}"));
+    let Some(mut file) = unnamed_file() else {
+        return product.emit().map_err(|e| failed(&e));
+    };
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, &file);
+    product.object.write_stream(&mut out).map_err(|e| failed(&e))?;
+    out.flush().map_err(|e| failed(&e))?;
+    drop((out, product));
+    let len = file.seek(std::io::SeekFrom::End(0)).map_err(|e| failed(&e))?;
+    file.rewind().map_err(|e| failed(&e))?;
+    let mut object = Vec::with_capacity(len as usize);
+    file.read_to_end(&mut object).map_err(|e| failed(&e))?;
+    Ok(object)
+}
+
+/// A file of the temporary directory that is removed once it is closed, if one can be made.
+fn unnamed_file() -> Option<std::fs::File> {
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("ra-jit-object-{}-{made}", std::process::id());
+    let path = std::env::temp_dir().join(name);
+    let file = std::fs::File::options().read(true).write(true).create_new(true).open(&path).ok()?;
+    // Windows removes a file that is open once it is closed.
+    _ = std::fs::remove_file(&path);
+    Some(file)
+}
+
 /// Gives the messages of the stand-ins of `product` their bytes, in [`stand_in_section`].
 fn place_stand_ins(
     product: &mut cranelift_object::ObjectProduct,
@@ -4810,6 +4871,7 @@ fn build<'db>(
         argument_slots: Vec::new(),
         free_argument_slots: Vec::new(),
         given_away: None,
+        block: None,
         in_cleanup: false,
         aborts,
         guarded: false,
@@ -5340,7 +5402,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             std::thread::spawn(move || drop(freed));
         }
         let macho = product.object.format() == cranelift_object::object::BinaryFormat::MachO;
-        let mut object = product.emit().map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let mut object = write_object(product)?;
         if macho {
             debuginfo::settle_macho(&mut object).map_err(CodegenError::Backend)?;
         }
@@ -7936,6 +7998,8 @@ struct FunctionCx<'cx, 'db> {
     /// While a call is generated: the local its result goes to, and where the locals moved
     /// whole into it are. Nothing reads those again, so the callee can be handed them.
     given_away: Option<GivenAway>,
+    /// The block of the body being generated.
+    block: Option<BasicBlockId>,
     in_cleanup: bool,
     /// The crate it is compiled for has `panic = "abort"`: no call of it unwinds (rustc's
     /// `fn_can_unwind`), and so none has a landing pad.
@@ -9952,6 +10016,19 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         for (temp, to) in forwarded {
             self.locals.insert(temp, self.locals[to]);
         }
+        if frame.is_none()
+            && let Some((name, lowered)) = self.neon_fused()?
+        {
+            let args: Vec<_> = body
+                .param_locals
+                .iter()
+                .map(|&local| (self.locals[local].addr, body.locals[local].ty.as_ref()))
+                .collect();
+            let returned = returned_local(body);
+            let dst = self.locals[returned].addr;
+            self.neon_call(&name, &lowered, &args, dst, body.locals[returned].ty.as_ref())?;
+            return self.return_();
+        }
         for (id, _) in body.basic_blocks.iter() {
             let block = self.builder.create_block();
             self.blocks.insert(id, block);
@@ -10019,6 +10096,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 continue;
             }
             self.builder.switch_to_block(self.blocks[id]);
+            self.block = Some(id);
             self.in_cleanup = block.is_cleanup;
             if block.is_cleanup {
                 self.builder.set_cold_block(self.blocks[id]);
@@ -11245,14 +11323,110 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
     }
 
+    /// Whether `block` is the `asm!` of `panic_unwind`'s `throw_exception` on Windows: it
+    /// lays out the `_ThrowInfo` of a Rust panic (the C++ runtime's description of the
+    /// exception) in `.rdata` with image-relative offsets, and gives its address. Its operands
+    /// are that address (out), `exception_cleanup`, `TYPE_DESCRIPTOR`, the size of `Exception`
+    /// and `exception_copy`.
+    fn is_seh_throw_info(&self, block: &hir_ty::mir::InlineAsm) -> bool {
+        use hir_ty::mir::AsmOperand::{Const, Reg, Sym};
+        self.cg.target.object_format == ObjectFormat::Coff
+            && !block.naked
+            && matches!(
+                &*block.operands,
+                [Reg { output: Some(_), input: None, .. }, Sym(_), Sym(_), Const(_), Sym(_)]
+            )
+    }
+
+    /// That block, as code. A static `_ThrowInfo` holds image-relative offsets, which an
+    /// assembled block cannot have (Cranelift has no such relocation), so they are written
+    /// when the exception is thrown, to a static of the object: the runtime reads it again
+    /// when the exception is caught or dropped, after this frame is gone.
+    fn seh_throw_info(&mut self, block: &hir_ty::mir::InlineAsm, size: i128) -> Result<()> {
+        use hir_ty::mir::AsmOperand;
+        let [
+            AsmOperand::Reg { output: Some(output), .. },
+            AsmOperand::Sym(cleanup),
+            AsmOperand::Sym(type_desc),
+            _,
+            AsmOperand::Sym(copy),
+        ] = &*block.operands
+        else {
+            unsupported!("the `asm!` of `throw_exception`");
+        };
+        let OperandKind::Static(type_desc) = &type_desc.kind else {
+            unsupported!("the `asm!` of `throw_exception`");
+        };
+        let mut function = |this: &mut Self, operand: &Operand| -> Result<Value> {
+            let ty = this.operand_ty(operand)?;
+            let id = this.fn_item(ty)?;
+            let id = this.cg.declare_func_address_in_func(id, this.builder.func);
+            Ok(this.builder.ins().func_addr(ptr(), id))
+        };
+        let (cleanup, copy) = (function(self, cleanup)?, function(self, copy)?);
+        let type_desc = self.cg.static_data(*type_desc);
+        let type_desc = self.cg.declare_data_in_func(type_desc, self.builder.func);
+        let type_desc = self.builder.ins().symbol_value(ptr(), type_desc);
+        // 14 words: `_ThrowInfo` (4), `_CatchableTypeArray` (2) and `_CatchableType` (7).
+        let info = self.cg.define_data(
+            ConstBlob {
+                bytes: vec![0; 56],
+                relocs: Vec::new(),
+                fn_relocs: Vec::new(),
+                align: 8,
+                type_ids: Vec::new(),
+            },
+            true,
+        )?;
+        let info = self.cg.declare_data_in_func(info, self.builder.func);
+        let info = self.builder.ins().symbol_value(ptr(), info);
+        // The image's base is what `GetModuleHandleW(NULL)` gives.
+        let mut sig = self.cg.make_signature();
+        sig.params.push(AbiParam::new(ptr()));
+        sig.returns.push(AbiParam::new(ptr()));
+        let handle = self.cg.import("GetModuleHandleW", &sig)?;
+        let handle = self.cg.declare_func_in_func(handle, self.builder.func);
+        let null = self.builder.ins().iconst(ptr(), 0);
+        let call = self.builder.ins().call(handle, &[null]);
+        let base = self.builder.inst_results(call)[0];
+        let b = &mut self.builder;
+        let rva = |b: &mut FunctionBuilder, address: Value| {
+            let offset = b.ins().isub(address, base);
+            b.ins().ireduce(types::I32, offset)
+        };
+        let (array, catchable) = (b.ins().iadd_imm(info, 16), b.ins().iadd_imm(info, 24));
+        let words = [
+            (0, b.ins().iconst(types::I32, 0)),
+            (4, rva(b, cleanup)),
+            (8, b.ins().iconst(types::I32, 0)),
+            (12, rva(b, array)),
+            (16, b.ins().iconst(types::I32, 1)),
+            (20, rva(b, catchable)),
+            (24, b.ins().iconst(types::I32, 0)),
+            (28, rva(b, type_desc)),
+            (32, b.ins().iconst(types::I32, 0)),
+            (36, b.ins().iconst(types::I32, -1)),
+            (40, b.ins().iconst(types::I32, 0)),
+            (44, b.ins().iconst(types::I32, size as i64)),
+            (48, rva(b, copy)),
+        ];
+        for (offset, word) in words {
+            b.ins().store(MEM, word, info, offset);
+        }
+        let (addr, _) = self.place(output)?;
+        self.builder.ins().store(MEM, info, addr, 0);
+        Ok(())
+    }
+
     /// Calls the function that an `asm!` block is assembled as: see [`asm`].
     fn inline_asm(&mut self, block: &hir_ty::mir::InlineAsm) -> Result<()> {
         use hir_ty::mir::AsmOperand;
+        let seh = self.is_seh_throw_info(block);
         let mut operands = Vec::with_capacity(block.operands.len());
         let mut syms = Vec::with_capacity(block.operands.len());
         for operand in &block.operands {
             syms.push(match operand {
-                AsmOperand::Sym(_) if !block.naked => unsupported!("`asm!` with a `sym`"),
+                AsmOperand::Sym(_) if !block.naked && !seh => unsupported!("`asm!` with a `sym`"),
                 AsmOperand::Sym(Operand { kind: OperandKind::Static(id), .. }) => {
                     if is_thread_local(self.cg.db, *id) {
                         unsupported!("inline assembly with a `sym` that is thread local");
@@ -11324,6 +11498,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 AsmOperand::Label => asm::Operand::Label,
             });
+        }
+        if seh {
+            let Some(asm::Operand::Const(size)) = operands.get(3) else {
+                unsupported!("the `asm!` of `throw_exception`");
+            };
+            return self.seh_throw_info(block, *size);
         }
         let arch = self.cg.target.arch;
         let features = self.body.and_then(|it| it.owner.as_function());
@@ -12952,6 +13132,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             && let Some(name) = name.strip_prefix("llvm.")
         {
             self.llvm_intrinsic(name, args, dst, dst_ty.ty)?;
+            return self.finish_call(destination, target);
+        }
+        if self.x86_inlined_fma(func, args, destination, target, dst, dst_ty.ty)? {
             return self.finish_call(destination, target);
         }
         let values = self.operands(args)?;
@@ -15089,6 +15272,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 self.builder.ins().store(MEM, value, dst, 0);
             }
+            ("simd_fma" | "simd_relaxed_fma", _) if self.x86_fused() => {
+                self.x86_fma(name, args, dst, dst_ty)?
+            }
             (
                 "simd_add" | "simd_sub" | "simd_mul" | "simd_div" | "simd_eq" | "simd_ge"
                 | "simd_gt" | "simd_le" | "simd_lt" | "simd_neg" | "simd_fabs" | "simd_fsqrt"
@@ -15261,7 +15447,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if !lane.ty.is_float() {
                     unsupported!("`{name}` of integers");
                 }
-                self.refuse_x86_fma(name)?;
                 // AArch64's LLVM makes a vector of more lanes than one `fmla z, y, x`, the
                 // factors the other way round, which decides which of two NaNs comes out; a
                 // vector of one lane is the scalar's `fmadd`, in order.
@@ -15783,13 +15968,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builtin(name, &[float.ty, types::I32], float.ty, &[base, power])?;
                 self.builder.ins().store(MEM, value, dst, 0);
             }
+            ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" | "fma", [_, _, _])
+                if self.x86_fused() && self.scalar_of(dst_ty)?.ty != types::F128 =>
+            {
+                self.x86_fma(name, args, dst, dst_ty)?
+            }
             ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" | "fma", [a, b, c]) => {
                 let (a, scalar) = self.load_scalar(a)?;
                 let (b, _) = self.load_scalar(b)?;
                 let (c, _) = self.load_scalar(c)?;
-                if scalar.ty != types::F128 {
-                    self.refuse_x86_fma(name)?;
-                }
                 if f16_f128::soft(scalar.ty) {
                     let value = self.soft_fma(a, b, c)?;
                     self.builder.ins().store(MEM, value, dst, 0);
@@ -16317,12 +16504,59 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst: Value,
         dst_ty: Ty<'db>,
     ) -> Result<()> {
+        let args = args
+            .iter()
+            .map(|arg| Ok((self.operand(arg)?.0, self.operand_ty(arg)?)))
+            .collect::<Result<Vec<_>>>()?;
+        self.neon_call(name, lowered, &args, dst, dst_ty)
+    }
+
+    /// The instruction LLVM selects for this body when it is one of `core::arch`'s NEON fused
+    /// multiply-adds on AArch64 ([`neon::fused`]), and the function's name. Refused where
+    /// rustc's `-C link-dead-code` decides the instruction ([`neon::splats_c`]).
+    fn neon_fused(&self) -> Result<Option<(String, neon::Lowered)>> {
+        let db = self.cg.db;
+        if self.cg.target.arch != Arch::Aarch64 {
+            return Ok(None);
+        }
+        let Some(func) = self.body.and_then(|it| it.owner.as_function()) else { return Ok(None) };
+        let name = FunctionSignature::of(db, func).name.as_str();
+        if !func.krate(db).data(db).origin.is_lang() || !name.starts_with("vfm") {
+            return Ok(None);
+        }
+        let args = self.args.as_ref().map(|it| it.as_ref());
+        let lane = match args.and_then(|it| it.iter().find_map(|it| it.konst())) {
+            Some(konst) => {
+                let ConstKind::Value(lane) = konst.kind() else { return Ok(None) };
+                Some(lane.value.inner().to_leaf().to_bits(Size::from_bytes(4)) as u32)
+            }
+            None => None,
+        };
+        let Some(lowered) = neon::fused(name, lane) else { return Ok(None) };
+        if backend::links_dead_code() && neon::splats_c(name, lane) {
+            unsupported!(
+                "`{name}` where rustc has `-C link-dead-code`: whether LLVM sees the splat of \
+                 `c`, which decides the NaN that comes out, is up to the codegen unit rustc \
+                 keeps `splat` in"
+            );
+        }
+        Ok(Some((name.to_owned(), lowered)))
+    }
+
+    /// [`Self::neon_assembly`] of the operands where `args` are.
+    fn neon_call(
+        &mut self,
+        name: &str,
+        lowered: &neon::Lowered,
+        args: &[(Value, Ty<'db>)],
+        dst: Value,
+        dst_ty: Ty<'db>,
+    ) -> Result<()> {
         if args.len() != lowered.args.len() {
             unsupported!("`{name}` with {} arguments", args.len());
         }
         let mut values = vec![dst];
-        for (arg, expected) in args.iter().zip(&lowered.args) {
-            let ty = self.operand_ty(arg)?;
+        for (&(arg, ty), expected) in args.iter().zip(&lowered.args) {
             let pointer = matches!(ty.kind(), TyKind::RawPtr(..));
             let fits = match expected {
                 None => pointer,
@@ -16331,7 +16565,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             if !fits {
                 unsupported!("`{name}` of {ty:?}, which is not what its name says");
             }
-            values.push(self.operand(arg)?.0);
+            values.push(arg);
         }
         // One result, or a tuple of vectors (`int8x16x2_t`) whose fields are the registers.
         let layout = self.layout(dst_ty)?;
@@ -16402,16 +16636,38 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         args: &[Operand],
         dst: Value,
     ) -> Result<()> {
+        let mut addrs = Vec::with_capacity(args.len());
+        for (arg, load) in args.iter().zip(&lowered.loads) {
+            addrs.push(match load {
+                avx512::Load::Immediate => None,
+                _ => Some(self.operand(arg)?.0),
+            });
+        }
+        self.call_assembled_at(lowered, &addrs, dst);
+        Ok(())
+    }
+
+    /// Calls the function of `lowered`'s instructions on the operands at `addrs`.
+    fn call_assembled(&mut self, lowered: &avx512::Lowered, addrs: &[Value], dst: Value) {
+        let addrs: Vec<Option<Value>> = addrs.iter().copied().map(Some).collect();
+        self.call_assembled_at(lowered, &addrs, dst);
+    }
+
+    fn call_assembled_at(
+        &mut self,
+        lowered: &avx512::Lowered,
+        addrs: &[Option<Value>],
+        dst: Value,
+    ) {
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            8 * (1 + args.len() as u32),
+            8 * (1 + addrs.len() as u32),
             3,
         ));
         let slot = self.builder.ins().stack_addr(ptr(), slot, 0);
         self.builder.ins().store(MEM, dst, slot, 0);
-        for (i, (arg, load)) in args.iter().zip(&lowered.loads).enumerate() {
-            if *load != avx512::Load::Immediate {
-                let (addr, _) = self.operand(arg)?;
+        for (i, addr) in addrs.iter().enumerate() {
+            if let Some(addr) = *addr {
                 self.builder.ins().store(MEM, addr, slot, 8 * (i as i32 + 1));
             }
         }
@@ -16421,7 +16677,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let callee = self.cg.assembly(text, &sig);
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
         self.builder.ins().call(callee, &[slot]);
-        Ok(())
     }
 
     /// Calls the instructions `x86::lower` made of the intrinsic `name`: the arguments are
@@ -16682,6 +16937,93 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let sum = self.builder.ins().smax(sum, least);
                     let sum = self.builder.ins().ireduce(types::I16, sum);
                     self.builder.ins().store(MEM, sum, dst, lane);
+                }
+            }
+            // `minps` and `maxps`: the second operand when either is a NaN, or both are equal.
+            (
+                "x86.sse.min.ps" | "x86.sse.max.ps" | "x86.avx.min.ps.256" | "x86.avx.max.ps.256"
+                | "x86.sse2.min.pd" | "x86.sse2.max.pd" | "x86.avx.min.pd.256"
+                | "x86.avx.max.pd.256",
+                [a, b],
+            ) => {
+                let (a, ty) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let (lane, step) = if name.ends_with("pd") || name.contains(".pd.") {
+                    (types::F64, 8)
+                } else {
+                    (types::F32, 4)
+                };
+                let cond =
+                    if name.contains(".min.") { FloatCC::LessThan } else { FloatCC::GreaterThan };
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(step) {
+                    let l = self.builder.ins().load(lane, MEM, a, at);
+                    let r = self.builder.ins().load(lane, MEM, b, at);
+                    let first = self.builder.ins().fcmp(cond, l, r);
+                    let chosen = self.builder.ins().select(first, l, r);
+                    self.builder.ins().store(MEM, chosen, dst, at);
+                }
+            }
+            // `roundps` and `roundpd`: the mode is the low two bits of the immediate, or the
+            // processor's, which is to nearest (`4` and above).
+            (
+                "x86.sse41.round.ps"
+                | "x86.avx.round.ps.256"
+                | "x86.sse41.round.pd"
+                | "x86.avx.round.pd.256",
+                [a, mode],
+            ) => {
+                let (a, ty) = self.operand(a)?;
+                let Some(mode) = self.immediate(mode)? else {
+                    unsupported!("LLVM intrinsic `{name}` with a mode that is not a constant");
+                };
+                let (lane, step) = if name.ends_with("pd") || name.contains(".pd.") {
+                    (types::F64, 8)
+                } else {
+                    (types::F32, 4)
+                };
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(step) {
+                    let value = self.builder.ins().load(lane, MEM, a, at);
+                    let rounded = match if mode & 4 != 0 { 0 } else { mode & 3 } {
+                        0 => self.builder.ins().nearest(value),
+                        1 => self.builder.ins().floor(value),
+                        2 => self.builder.ins().ceil(value),
+                        _ => self.builder.ins().trunc(value),
+                    };
+                    self.builder.ins().store(MEM, rounded, dst, at);
+                }
+            }
+            // `cvttps2dq`: truncation, and the "integer indefinite" for what does not fit,
+            // which saturation gives for the negative side only.
+            ("x86.sse2.cvttps2dq" | "x86.avx.cvtt.ps2dq.256", [a]) => {
+                let (a, ty) = self.operand(a)?;
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(4) {
+                    let value = self.builder.ins().load(types::F32, MEM, a, at);
+                    let truncated = self.builder.ins().fcvt_to_sint_sat(types::I32, value);
+                    let limit = self.builder.ins().f32const(2147483648.0);
+                    let over = self.builder.ins().fcmp(
+                        FloatCC::UnorderedOrGreaterThanOrEqual,
+                        value,
+                        limit,
+                    );
+                    let indefinite = self.builder.ins().iconst(types::I32, i64::from(i32::MIN));
+                    let result = self.builder.ins().select(over, indefinite, truncated);
+                    self.builder.ins().store(MEM, result, dst, at);
+                }
+            }
+            // `psrlw` by one count for all the lanes: the low 64 bits of the second operand,
+            // and zero when it is above 15.
+            ("x86.sse2.psrl.w" | "x86.avx2.psrl.w", [a, count]) => {
+                let (a, ty) = self.operand(a)?;
+                let (count, _) = self.operand(count)?;
+                let count = self.builder.ins().load(types::I64, MEM, count, 0);
+                let over = self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, count, 15);
+                let count = self.builder.ins().ireduce(types::I16, count);
+                let zero = self.builder.ins().iconst(types::I16, 0);
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(2) {
+                    let word = self.builder.ins().load(types::I16, MEM, a, at);
+                    let shifted = self.builder.ins().ushr(word, count);
+                    let result = self.builder.ins().select(over, zero, shifted);
+                    self.builder.ins().store(MEM, result, dst, at);
                 }
             }
             // Lane by lane: the rounded average, the high half of the product and the shifts
@@ -17128,15 +17470,17 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         dst: Value,
         (a, r): (neon::Lanes, neon::Lanes),
     ) -> Result<()> {
-        if self.function_enables("avx512fp16") {
-            match name {
-                "simd_fma" => return Err(f16_f128::half_fma_refused()),
-                "simd_neg" => unsupported!(
-                    "`simd_neg` of lanes of f16 with AVX512-FP16, which LLVM folds into the \
-                     fma it feeds in some functions and not others"
-                ),
-                _ => (),
+        if name == "simd_neg" && self.function_enables("avx512fp16") && a.float && a.bits == 16 {
+            // `vpxor` with the sign of each lane, LLVM's `fneg`; one an fma folds is
+            // `Self::x86_fma`'s.
+            let [arg] = args else { unsupported!("`simd_neg` with {} arguments", args.len()) };
+            let (src, _) = self.operand(arg)?;
+            for i in 0..a.count as i32 {
+                let bits = self.builder.ins().load(types::I16, MEM, src, 2 * i);
+                let flipped = self.builder.ins().bxor_imm(bits, 0x8000);
+                self.builder.ins().store(MEM, flipped, dst, 2 * i);
             }
+            return Ok(());
         }
         let lowered = avx512::half_vector(name, a.count * a.bits / 8, r.count * r.bits / 8, |it| {
             self.function_enables(it)
@@ -17211,35 +17555,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             unsupported!("an atomic of 128 bits on AArch64 without outline atomics");
         }
         Ok(true)
-    }
-
-    /// Refuses the fused multiply-add `name` in an x86-64 function with FMA or FMA4 (by its
-    /// crate, or by its own `#[target_feature]` and what that implies, as AVX-512 does FMA).
-    /// LLVM makes it `vfmadd213` there, the factors the other way round from libm's `fma`,
-    /// which decides which of two NaNs comes out, and at `-O0` still folds the negations,
-    /// masks and shuffles around it into other forms (`vfnmadd213ss`, `vfmaddsub213ps`, a
-    /// masked `vfmadd132ps`), which keep another NaN or its sign: that depends on the code
-    /// around the call, not on the call.
-    fn refuse_x86_fma(&self, name: &str) -> Result<()> {
-        if self.cg.target.arch != Arch::X86_64 {
-            return Ok(());
-        }
-        let func = self.body.and_then(|it| it.owner.as_function());
-        let features = func.map(|func| hir_ty::TargetFeatures::from_fn(self.cg.db, func));
-        let fused = ["fma", "fma4"].into_iter().any(|feature| {
-            let atom = cfg::CfgAtom::KeyValue {
-                key: intern::sym::target_feature,
-                value: intern::Symbol::intern(feature),
-            };
-            self.env.krate.cfg_options(self.cg.db).check_atom(&atom)
-                || features.as_ref().is_some_and(|it| it.enables(feature))
-        });
-        if fused {
-            unsupported!(
-                "`{name}` in an x86-64 function with FMA, which LLVM fuses by its context"
-            );
-        }
-        Ok(())
     }
 
     /// What `ptr` held, swapped for `new` when it was `expected`: compiler_builtins'

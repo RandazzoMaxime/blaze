@@ -14,6 +14,7 @@ pub(crate) mod closure;
 pub(crate) mod compile_time;
 mod directives;
 pub(crate) mod fetches;
+mod hermetic;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
@@ -32,6 +33,7 @@ mod state;
 pub(crate) mod switch;
 pub(crate) mod toolchain;
 mod units;
+pub(crate) mod wasi_script;
 pub(crate) mod whole;
 
 use std::{collections::BTreeMap, path::Path, time::Instant};

@@ -1223,6 +1223,23 @@ impl<'a> Lower<'a> {
         let func = self.func;
         let table = &func.dfg.exception_tables[table];
         let signature = &func.dfg.signatures[table.signature()];
+        // A memory routine of Cranelift's frontend is an instruction ([`Self::libcall`]): what
+        // it returns is the address it was given.
+        if let Some(ExternalName::LibCall(libcall)) = callee {
+            self.libcall(*libcall, args, &[])?;
+            let mut returned = Vec::new();
+            for ret in &signature.returns {
+                let wide = ret.value_type == types::I64;
+                let local = self.temp(if wide { ValType::I64 } else { ValType::I32 });
+                self.get(*args.first().ok_or("wasm: a memory routine of no address")?)?;
+                if wide {
+                    self.i(I::I64ExtendI32U);
+                }
+                self.i(I::LocalSet(local));
+                returned.push(local);
+            }
+            return self.jump(block, *table.normal_return(), 0, &returned);
+        }
         let returned = self.call_returning(callee, signature, args)?;
         self.jump(block, *table.normal_return(), 0, &returned)
     }

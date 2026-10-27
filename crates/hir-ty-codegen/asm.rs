@@ -202,17 +202,6 @@ fn aarch64_extension(feature: &str) -> Option<&'static str> {
     })
 }
 
-/// Returns its first float argument with the second left in the register it was passed in,
-/// which is where a pair of floats is returned.
-pub(super) fn join_floats() -> String {
-    format!(".globl {SYMBOL}\n{SYMBOL}:\nret\n")
-}
-
-/// Answers what is in the two registers a pair of floats is returned in, as integers.
-pub(super) fn split_floats() -> String {
-    format!(".globl {SYMBOL}\n{SYMBOL}:\nmovq rax, xmm0\nmovq rdx, xmm1\nret\n")
-}
-
 /// `vcvtps2ph` makes half-precision floats of the single-precision ones at its first
 /// argument and writes them to its second. The rounding is part of the instruction, so there
 /// is one for each of the eight, and the third argument says which runs.
@@ -413,6 +402,17 @@ pub(super) fn avx512_function(loads: &[Load], text: &str, out: Out) -> String {
                 let name = vector_name(k, 16);
                 _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]\nvmovq {name}, qword ptr [rax]");
             }
+            Load::Vector(4) => {
+                let name = vector_name(k, 16);
+                _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]\nvmovd {name}, dword ptr [rax]");
+            }
+            Load::Vector(2) => {
+                let name = vector_name(k, 16);
+                _ = writeln!(
+                    s,
+                    "mov rax, qword ptr [r10 + {at}]\nmovzx eax, word ptr [rax]\nvmovd {name}, eax"
+                );
+            }
             Load::Vector(bytes) => {
                 let name = vector_name(k, bytes);
                 let width = vector_width(bytes);
@@ -443,6 +443,9 @@ pub(super) fn avx512_function(loads: &[Load], text: &str, out: Out) -> String {
     };
     match out {
         Out::Nothing => {}
+        Out::Vector(8) => _ = writeln!(s, "vmovq qword ptr [r10], xmm0"),
+        Out::Vector(4) => _ = writeln!(s, "vmovd dword ptr [r10], xmm0"),
+        Out::Vector(2) => _ = writeln!(s, "vmovd eax, xmm0\nmov word ptr [r10], ax"),
         Out::Vector(bytes) => {
             let (name, width) = (vector_name(0, bytes), vector_width(bytes));
             _ = writeln!(s, "vmovups {width} ptr [r10], {name}");

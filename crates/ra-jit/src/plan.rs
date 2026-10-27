@@ -360,6 +360,7 @@ struct Flags {
     split_debuginfo: Option<String>,
     strip: Option<String>,
     frame_pointers: bool,
+    links_dead_code: bool,
     lints_capped: bool,
     /// What `-C link-arg` and `-C link-args` give the linker, in order: rustc passes them
     /// after the native libraries, and so does ra-jit's own link.
@@ -430,6 +431,7 @@ impl Flags {
                 "force-frame-pointers" => {
                     flags.frame_pointers = on.unwrap_or(matches!(value, "always" | "non-leaf"));
                 }
+                "link-dead-code" => flags.links_dead_code = on != Some(false),
                 _ => {}
             }
         }
@@ -442,6 +444,7 @@ pub(crate) struct Plan {
     packages: FxHashMap<String, Built>,
     lto: bool,
     frame_pointers: bool,
+    links_dead_code: bool,
     lints_capped: bool,
     link_args: Vec<String>,
 }
@@ -453,6 +456,9 @@ pub(crate) struct Whole {
     pub(crate) debug: Described,
     /// Whether rustc links it from bitcode, with `lto`.
     pub(crate) lto: bool,
+    /// Whether rustc keeps every function, `#[inline(always)]` ones too, as one copy in one
+    /// codegen unit (`-C link-dead-code`), where LLVM inlines it only into that unit's code.
+    pub(crate) links_dead_code: bool,
     /// Whether `--cap-lints` or `--force-warn` is among the flags, so that a lint the source
     /// denies may not fail rustc's build.
     pub(crate) lints_capped: bool,
@@ -488,7 +494,13 @@ impl Plan {
     pub(crate) fn whole(&self) -> anyhow::Result<Whole> {
         let debug = Described { frame_pointers: self.frame_pointers, ..self.described()? };
         let link_args = self.link_args.clone();
-        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped, link_args })
+        Ok(Whole {
+            debug,
+            lto: self.lto,
+            links_dead_code: self.links_dead_code,
+            lints_capped: self.lints_capped,
+            link_args,
+        })
     }
 
     /// How the package cargo calls `id` is built, when the build has it.
@@ -594,30 +606,55 @@ fn asked_where<'a>(manifest: &'a Path, selection: &'a Selection) -> (&'a Path, O
     }
 }
 
-/// The unit graphs this process was told, by what they were asked with: a load asks for its
+/// The unit graphs one load was told, by what they were asked with: a load asks for its
 /// graph once for the plan and once for its build scripts (`cargo/compile_time.rs`).
-type Told = std::sync::Mutex<FxHashMap<String, std::sync::Arc<UnitGraph>>>;
+type Told = FxHashMap<String, std::sync::Arc<UnitGraph>>;
+
+std::thread_local! {
+    static TOLD: std::cell::RefCell<Option<Told>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The load of a workspace on this thread, while it lives: the unit graphs asked for in it
+/// are made once. A load after it makes them again, as the manifests may have changed since.
+pub(crate) struct Load {
+    outer: Option<Told>,
+}
+
+impl Load {
+    pub(crate) fn start() -> Load {
+        Load { outer: TOLD.with(|it| it.replace(Some(Told::default()))) }
+    }
+}
+
+impl Drop for Load {
+    fn drop(&mut self) {
+        TOLD.with(|it| *it.borrow_mut() = self.outer.take());
+    }
+}
 
 impl UnitGraph {
     /// The units of the build `selection` names of the package of `manifest`, for what
-    /// `asked` says: what this process was told already when it asked the same.
+    /// `asked` says: what the load under way was told already when it asked the same.
     pub(crate) fn asked(
         manifest: &Path,
         selection: &Selection,
         asked: &Asked<'_>,
     ) -> anyhow::Result<std::sync::Arc<UnitGraph>> {
-        static TOLD: std::sync::OnceLock<Told> = std::sync::OnceLock::new();
         let (dir, manifest) = asked_where(manifest, selection);
         let mut vars: Vec<_> = asked.env.iter().collect();
         vars.sort();
         let cfg = format!("{:?}", asked.cfg);
         let key = serde_json::to_string(&(dir, manifest, selection, vars, asked.triple, cfg))?;
-        let told = TOLD.get_or_init(Default::default);
-        if let Some(graph) = told.lock().unwrap_or_else(|it| it.into_inner()).get(&key) {
-            return Ok(graph.clone());
+        let told = TOLD.with(|it| it.borrow().as_ref().and_then(|it| it.get(&key).cloned()));
+        if let Some(graph) = told {
+            return Ok(graph);
         }
         let graph = std::sync::Arc::new(UnitGraph::of(dir, manifest, selection, asked)?);
-        told.lock().unwrap_or_else(|it| it.into_inner()).insert(key, graph.clone());
+        TOLD.with(|it| {
+            if let Some(told) = it.borrow_mut().as_mut() {
+                told.insert(key, graph.clone());
+            }
+        });
         Ok(graph)
     }
 
@@ -699,6 +736,7 @@ impl UnitGraph {
             packages,
             lto,
             frame_pointers: flags.frame_pointers,
+            links_dead_code: flags.links_dead_code,
             lints_capped: flags.lints_capped,
             link_args: flags.link_args.clone(),
         })
@@ -718,6 +756,15 @@ mod tests {
         assert!(kept("-Cforce-frame-pointers=non-leaf"));
         assert!(!kept("-Cforce-frame-pointers=yes -Cforce-frame-pointers=no"));
         assert!(!kept("-C link-dead-code"));
+    }
+
+    #[test]
+    fn link_dead_code_is_read_in_each_spelling() {
+        let kept = |flags: &str| Flags::parse(flags.split_whitespace()).unwrap().links_dead_code;
+        assert!(kept("-C link-dead-code"));
+        assert!(kept("-Clink_dead_code=yes"));
+        assert!(!kept("-C link-dead-code -C link-dead-code=no"));
+        assert!(!kept("-C force-frame-pointers"));
     }
 
     #[test]

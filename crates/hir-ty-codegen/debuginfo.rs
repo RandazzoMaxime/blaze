@@ -553,8 +553,9 @@ const FUNCTIONS_OF_A_UNIT: usize = 256;
 pub(super) struct Dwarf {
     /// The unit functions are being added to.
     dwarf: DwarfUnit,
-    /// The units that have all their functions.
-    full: Vec<gimli::write::Unit>,
+    /// The units that have all their functions, written as each is full: their entries,
+    /// kept until the object was written, held gigabytes of a large program's build.
+    full: Written,
     /// What the names of the files the entries of the units are read from start with, when
     /// they are kept apart from what is linked, and the units that are.
     apart: Option<(String, Vec<split::Apart>)>,
@@ -619,7 +620,7 @@ impl Dwarf {
     fn of(encoding: Encoding, directory: Vec<u8>, variables: bool, apart: Option<String>) -> Self {
         let mut context = Dwarf {
             dwarf: DwarfUnit::new(encoding),
-            full: Vec::new(),
+            full: Written::default(),
             apart: apart.map(|name| (name, Vec::new())),
             id: FxHasher::default(),
             addresses: Vec::new(),
@@ -703,7 +704,30 @@ impl Dwarf {
         }
         let ranges = unit.ranges.add(RangeList(ranges));
         unit.get_mut(root).set(DW_AT_ranges, AttributeValue::RangeListRef(ranges));
-        self.full.push(unit);
+        if let Err(why) = self.write_unit(unit) {
+            self.full.failed.get_or_insert(why);
+        }
+    }
+
+    /// Writes a unit that has all its functions: into the sections every unit shares, or
+    /// into sections of its own when grouped. The strings it names are written last, once
+    /// every unit has added its own.
+    fn write_unit(&mut self, unit: gimli::write::Unit) -> Result<(), String> {
+        let mut units = gimli::write::UnitTable::default();
+        units.add(unit);
+        let (line_strings, strings) = (&mut self.dwarf.line_strings, &mut self.dwarf.strings);
+        let full = &mut self.full;
+        full.units += 1;
+        if !self.grouped {
+            return units.write(&mut full.shared, line_strings, strings).map_err(|e| e.to_string());
+        }
+        let mut out = Sections::new(SectionWriter::default());
+        units.write(&mut out, line_strings, strings).map_err(|e| e.to_string())?;
+        let group = Some(full.units - 1);
+        out.for_each_mut(|id, section: &mut SectionWriter| {
+            full.grouped.push(Section { id, group, written: std::mem::take(section) });
+            Ok::<_, String>(())
+        })
     }
 
     fn file(&mut self, name: &str) -> FileId {
@@ -1188,39 +1212,20 @@ impl Dwarf {
     /// linker reads on threads of their own.
     fn sections(mut self) -> Result<Vec<Section>, String> {
         self.end_unit();
-        let mut sections = Vec::new();
-        if self.full.is_empty() {
+        let Written { units, mut shared, grouped: mut sections, failed } = self.full;
+        if let Some(why) = failed {
+            return Err(why);
+        }
+        if units == 0 {
             return Ok(sections);
         }
-        let mut written = |group, unwritten: &Sections<SectionWriter>| {
-            unwritten.for_each(|id, section: &SectionWriter| {
-                sections.push(Section { id, group, written: section.clone() });
-                Ok::<_, String>(())
-            })
-        };
-        if !self.grouped {
-            let mut dwarf = gimli::write::Dwarf::new();
-            (dwarf.strings, dwarf.line_strings) = (self.dwarf.strings, self.dwarf.line_strings);
-            for unit in self.full {
-                dwarf.units.add(unit);
-            }
-            let mut out = Sections::new(SectionWriter::default());
-            dwarf.write(&mut out).map_err(|e| e.to_string())?;
-            written(None, &out)?;
-            return Ok(sections);
-        }
-        let (mut strings, mut line_strings) = (self.dwarf.strings, self.dwarf.line_strings);
-        for (group, unit) in self.full.into_iter().enumerate() {
-            let mut units = gimli::write::UnitTable::default();
-            units.add(unit);
-            let mut out = Sections::new(SectionWriter::default());
-            units.write(&mut out, &mut line_strings, &mut strings).map_err(|e| e.to_string())?;
-            written(Some(group), &out)?;
-        }
-        let mut out = Sections::new(SectionWriter::default());
-        line_strings.write(&mut out.debug_line_str).map_err(|e| e.to_string())?;
-        strings.write(&mut out.debug_str).map_err(|e| e.to_string())?;
-        written(None, &out)?;
+        let (strings, line_strings) = (self.dwarf.strings, self.dwarf.line_strings);
+        line_strings.write(&mut shared.debug_line_str).map_err(|e| e.to_string())?;
+        strings.write(&mut shared.debug_str).map_err(|e| e.to_string())?;
+        shared.for_each_mut(|id, section: &mut SectionWriter| {
+            sections.push(Section { id, group: None, written: std::mem::take(section) });
+            Ok::<_, String>(())
+        })?;
         Ok(sections)
     }
 
@@ -1242,6 +1247,28 @@ impl Dwarf {
         let (sections, files) = split.finish();
         place(product, sections)?;
         Ok(files)
+    }
+}
+
+/// The units of a [`Dwarf`] that are written.
+struct Written {
+    units: usize,
+    /// The sections every unit shares: all of each unit's but when grouped, and the strings.
+    shared: Sections<SectionWriter>,
+    /// When grouped, the sections of each unit.
+    grouped: Vec<Section>,
+    /// Why a unit could not be written, which the sections then say.
+    failed: Option<String>,
+}
+
+impl Default for Written {
+    fn default() -> Self {
+        Written {
+            units: 0,
+            shared: Sections::new(SectionWriter::default()),
+            grouped: Vec::new(),
+            failed: None,
+        }
     }
 }
 

@@ -277,7 +277,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   "one type is more general than the other". So a closure parameter `x: fn(&u32)` whose
   expected type is `fn(&'1 u32)` needs `'1: 'static`. A function item cast to a `for<'a> fn`
   keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables,
-  and a closure cast to one is its signature's `fn` pointer, related the same way. A projection
+  and a closure cast to one is its signature's `fn` pointer, related the same way. The item's
+  elided `&mut dyn Trait` is `&'a mut (dyn Trait + 'a)` there, rustc's object lifetime default,
+  so `fn f(_: &mut dyn Trait)` is a `fn(&mut dyn Trait)` (ruff's `record: T::record`). A projection
   rust-analyzer normalized under a `for<'a>` stays as written in a `let`'s type: rustc
   normalizes it for the placeholder, so `let _: for<'a> fn(<&'a () as Trait>::Ty) = |_| {}`
   with only `impl Trait for &'static ()` needs the placeholder to be `'static`, rustc's
@@ -490,10 +492,11 @@ With no borrow checker, the 246 units rustc accepts would pass. Now:
 
 | Mode | In scope | Pass | rustc accepts, ra-jit too | rustc rejects, same errors |
 |---|---|---|---|---|
-| Polonius | 1585 | 1545 (97.5%) | 246 of 246 | 1299 of 1339 |
-| NLL | 1583 | 1542 (97.4%) | 227 of 227 | 1315 of 1356 |
+| Polonius | 1590 | 1587 (99.8%) | 246 of 246 | 1341 of 1344 |
+| NLL | 1588 | 1585 (99.8%) | 227 of 227 | 1358 of 1361 |
 
-465 units are out of scope; 344 of them need a nightly feature. CI runs the scoring on Linux
+460 units are out of scope; 346 of them need a nightly feature (at 68be5dec, nightly-2026-10-27,
+rustc's tests at 12433c30). CI runs the scoring on Linux
 and fails below a floor a few units under the count there, on any error in a unit rustc
 accepts, and on any unit the checker panics on, as a panic hides every error in its file.
 
@@ -505,18 +508,17 @@ every type of another crate would be an error the bodies using it do not show.
 `harness/borrowck_apps.py` runs it over every application of `apps/apps.json` at its pinned rev,
 with what `cargo metadata` needs that a clone lacks (bun's vendored crates, which its own build
 fetches), plus the harness's `corpus` and `mixfutures` crates (which CI checks too), and lists
-each app's errors and panics. At
-47793534, 20 of the 23 check clean; nushell (53, E0716 in its tests), ruff (19, E0716 and
-"lifetime may not live long enough") and rust-analyzer (1, E0515) get errors rustc does not
-give.
+each app's errors and panics. At 68be5dec all 22 applications, `corpus` and `mixfutures` check
+clean; at 47793534 nushell (53, E0716 in its tests), ruff (19, E0716 and "lifetime may not live
+long enough") and rust-analyzer (1, E0515) got errors rustc does not give.
 
 ## What is left
 
-Every failing unit is one where rustc gives an error ra-jit does not, or gives it on another
-line or with another code. By what is wrong, most first: 15 with an error on another line or
-with another code, then, of the errors not reported, 5 "lifetime may not live long enough",
-3 each of E0507, E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
-then one each of five more. The causes, grouped:
+Three units fail in each mode, all an error rustc gives that ra-jit does not:
+`higher-ranked-auto-trait-11#no_assumptions` and `implementation-not-general-enough-ice-133252`
+(the first cause below) and `supertrait-mentions-GAT` (the second; rustc reports it on the dummy
+span of an obligation of its own, where no item's well-formedness check is). The other causes
+are what the rules still leave out where no failing unit shows it now:
 
 - **Higher-ranked regions and placeholders**: auto traits of a coroutine's witness (`T: Send`
   of an `async` block holding a `for<'a>` future) are not proven with placeholders.
@@ -739,9 +741,62 @@ nushell's constraints went from 10.7 s to 4.4 s, `custom_value_op` from 811 ms t
 `serve_plugin_io` from 368 ms to 12 ms. A body's first check pays for the goals no body proved
 before it, each in a solver cache of its own: less in all on nushell (31.7 s to 28.9 s) and
 helix, more on axum (5.2 s to 6.7 s), whose 16-tuple impls each prove goals no other body
-does. The slowest bodies now are nushell's `theme_list::list` (240 ms, liveness over 48k
-points with no loans), `stream_parallel_values` (186 ms, constraints) and `run_http_server`
-(133 ms, moves).
+does.
+
+With whether a type is `Copy` and normalizing canonical queries too (a type's regions
+`'static` for `Copy`, numbered for normalizing, as rustc's `type_op_normalize`), and dominators
+by semi-NCA with dominance read from the tree's entry and exit numbers, as rustc's. Same
+measure, on main 5b58cc84:
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 610 | 325 (53%) | 7 | 280 (46%) | 7 |
+| fd | 190 | 89 (47%) | 16 | 81 (43%) | 15 |
+| bat | 278 | 197 (71%) | 63 | 180 (65%) | 63 |
+| hyperfine | 206 | 81 (39%) | 8 | 71 (35%) | 7 |
+| just | 1076 | 602 (56%) | 19 | 546 (51%) | 18 |
+| axum | 3887 | 1699 (44%) | 32 | 1642 (42%) | 32 |
+| helix | 3130 | 1509 (48%) | 111 | 1334 (43%) | 105 |
+| nushell | 14709 | 9686 (66%) | 202 | 8842 (60%) | 203 |
+
+Moves went from 1.7 s to 0.8 s on nushell and from 0.8 s to 0.1 s on axum, and
+`stream_parallel_values` (186 ms, one normalization) left the slowest bodies. The first check
+on axum went from 6.7 s to 8.3 s: each query has a solver cache of its own, so a nested goal
+two of a body's goals share is solved for each. The slowest bodies now are nushell's
+`theme_list::list` (202 ms, liveness over 48k points with no loans), `run_http_server`
+(127 ms, the walk) and `tool_router` (107 ms, constraints of a body of 57 points).
+
+With what dropping a type uses found as rustc's dropck finds it: over the strongly connected
+components of the types it drops, each expanded once, an ADT's part a query in its own
+parameters (rustc's `adt_dtorck_constraint`) that a body instantiates, and whether dropping a
+type runs code a query per type modulo regions; and drop liveness asking whether a local may
+be initialized leaving a block only of the locals drop live there. Same measure, on main
+d93d0958:
+
+| App | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|
+| ripgrep | 583 | 308 (53%) | 7 | 265 (45%) | 7 |
+| fd | 178 | 79 (44%) | 12 | 71 (40%) | 12 |
+| bat | 269 | 157 (58%) | 34 | 138 (51%) | 34 |
+| hyperfine | 208 | 77 (37%) | 9 | 66 (32%) | 8 |
+| just | 1064 | 541 (51%) | 19 | 482 (45%) | 18 |
+| axum | 3726 | 1012 (27%) | 15 | 945 (25%) | 14 |
+| helix | 3006 | 1399 (47%) | 108 | 1227 (41%) | 106 |
+| nushell | 14084 | 6502 (46%) | 108 | 5732 (41%) | 108 |
+
+The walk went from 2.6 s to 0.4 s on nushell and from 0.7 s to 0.04 s on axum, whose futures
+asked the trait solver of their drop glue on every drop; nushell's liveness from 2.2 s to
+1.5 s, `theme_list::list` from 213 ms to 92 ms and `run_http_server` from 128 ms to 12. The
+slowest bodies now are `tool_router` (108 ms, constraints), helix's `keymap::default` (108 ms,
+liveness over 37k points) and nushell's `ParseError::labels` and `ShellError::labels` (53 ms
+each, constraints).
+
+A goal whose answer names a placeholder of a `for<'a>`, or a variable of a universe past the
+root, is proven by the query too: its universes are the query's own, which the body makes anew
+in the same order and instantiates, as rustc's canonical query response. It was proven again in
+the body on every check, and one such goal of rmcp's `#[tool_router]`,
+`(Tool, fn): IntoToolRoute<_, AsyncMethodAdapter<..>>`, took nushell's `tool_router` 107 ms; it
+is 0.3 ms now. Nothing else moves (bench/results/2026-10-27-borrowck-speed-placeholders).
 
 ## Debugging
 

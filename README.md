@@ -37,10 +37,10 @@ blaze test    # like cargo test
 blaze build   # like cargo build
 ```
 
-The first build runs cargo, then waits a few seconds for blaze to load your project. Then change
-a function and build again: it's back in milliseconds, and the `Finished` line says `[blaze]`.
-Every other cargo command passes straight through to cargo. Where cargo is
-installed, `cargo blaze run` is the same as `blaze run`.
+The first build loads your project and compiles every crate of it, with no cargo build and no
+rustc. Then change a function and build again: it's back in milliseconds, and the `Finished` line
+says `[blaze]`. The other cargo commands (`fmt`, `clippy`, `doc`, `tree` and the rest) are blaze's
+own too, and run no cargo. Where cargo is installed, `cargo blaze run` is the same as `blaze run`.
 
 ## How fast
 
@@ -71,7 +71,7 @@ it again from scratch. A program that opts in can take the new code while it kee
 - **macOS on Apple silicon and Linux.** Windows x86-64 (MSVC) builds and takes live edits
   through blaze too, run by hand and not in CI, with no installer and no sandbox yet
   ([platforms.md](docs/platforms.md#windows-x86-64-msvc)).
-- **blaze is its own toolchain.** It builds every project with its own Rust, `blaze-2026-10-25`
+- **blaze is its own toolchain.** It builds every project with its own Rust, `blaze-2026-10-27`
   (today the nightly of that date), whatever the project pins; stable code and
   `#![feature(...)]` code build. Your toolchain and CI stay the final word
   ([why](docs/toolchain.md)).

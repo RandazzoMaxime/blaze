@@ -22,7 +22,7 @@ engine, so the two have to be installed side by side, with `ra-jit-rustc` and
 [installer](../install.sh) and `cargo install` both do that:
 
     curl -fsSL https://ix.dev/blaze | sh
-    cargo +nightly-2026-10-25 install --locked cargo-blaze
+    cargo +nightly-2026-10-27 install --locked cargo-blaze
 
 From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less
 the PGO a release adds ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)); 0.1.0 has no such
@@ -40,7 +40,7 @@ same LLVM. `cargo build -p ra-jit --release` is the quicker build the harnesses 
 working on blaze; it is not what ships.
 
 `cargo blaze` builds with the one toolchain blaze compiles, the dated nightly in
-`harness/toolchain` (`nightly-2026-10-25`), whatever toolchain the project names (a
+`harness/toolchain` (`nightly-2026-10-27`), whatever toolchain the project names (a
 `rust-toolchain.toml`, `rustup override`, `+toolchain`, `RUSTUP_TOOLCHAIN` or rustup's
 default): it runs cargo, rustc and the daemon under that nightly by naming it in
 `RUSTUP_TOOLCHAIN` and `CARGO`. The nightly builds what older releases built, so a project on a
@@ -52,10 +52,10 @@ directory: cargo keys what it builds by the rustc, so neither rebuilds the other
 ([support.md](support.md#toolchain)).
 
 Where the nightly comes from, in this order: `RUSTC` naming a rustc whose `rustc -V` line is
-the pinned one's (`rustc 1.101.0-nightly (12433c307 2026-10-24)`: the whole line, since every
-nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-25`
+the pinned one's (`rustc 1.101.0-nightly (16d1ffac1 2026-10-26)`: the whole line, since every
+nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-27`
 with `rust-src`, when rustup has it; else blaze's own copy in
-`~/.blaze/toolchains/nightly-2026-10-25-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
+`~/.blaze/toolchains/nightly-2026-10-27-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
 out a toolchain. blaze downloads its copy the first time it needs it, once, with a line on
 stderr while it does: rustc, cargo, the standard library and its source from the Rust project's
 own servers, 97 MB on macOS, 134 MB on Linux x86-64 and 118 MB on Linux ARM64 (548 MB on macOS
@@ -84,6 +84,10 @@ set, the `BLAZE_` one wins.
 
 `blaze <command>` is the same as `cargo blaze <command>`, for a machine where blaze brought
 its own Rust and there is no `cargo` on the path.
+
+A plain `cargo blaze check` checks libraries and binaries. Tests, examples and benchmarks
+are checked with their dev-dependencies when dev targets are selected (`--tests`,
+`--all-targets`, and the other dev-target flags).
 
 `build`, `run` and `test` take the flags cargo takes and leave the same files in the same
 places under `target/`. `check` is what the daemon says of the source as it builds the
@@ -427,6 +431,43 @@ unprivileged user namespace alone, and costs a mount per bind, about 20 µs each
 a view and 0.33 ms bare (median of 50, an arm64 ix VM of 16 cores, 2026-10-27). On macOS
 a view is not made (decided): the spec's other fields apply and the binds are not read.
 
+With `RA_JIT_SCRIPT_VIEW=on` (Linux; off until CI pushes the closure to the shared remote) a
+build script runs in such a view, its closure (`cargo/hermetic`): its package read-only with
+the target directory and `.git` below it hidden, its `OUT_DIR` written, the `OUT_DIR`s its
+`DEP_*` variables name, the toolchain and ra-jit's own rustc, and the pinned nixpkgs closure
+at `/nix/store`: clang, lld, binutils, glibc, the Linux headers, pkg-config, bash (also
+`/bin/sh`), coreutils, make, sed, awk, grep, diff and find, with a crate's libraries added.
+blaze fetches and verifies the closure itself (`ra-jit closure fetch`, no `nix` binary) and
+lays it out from the store or the remote (`ra-jit closure materialize`). A crate's libraries
+are, first, the workspace's:
+
+```toml
+[workspace.metadata.blaze.system-deps]
+openssl-sys = ["openssl.out", "openssl.dev"]   # nixpkgs attributes of harness/closure_pins.py
+```
+
+else the shipped table's (`cargo/hermetic/libs.toml`, by version), else none. Its environment
+is cargo's documented variables for scripts (`CARGO`, `CARGO_*` but `CARGO_HOME`, `DEP_*`,
+`OUT_DIR`, `TARGET`, `HOST`, `PROFILE`, `OPT_LEVEL`, `DEBUG`, `NUM_JOBS`, `RUSTC`, `RUSTDOC`,
+the jobserver's), what it declares with `rerun-if-env-changed`, `build-script-env`, what
+`blaze lock --fetches` hands it, and the closure's: `PATH` of its `bin`s, `CC`, `CXX`, `AR`,
+`PKG_CONFIG(_PATH)`, `NIX_CFLAGS_COMPILE` and `NIX_LDFLAGS` of its libraries (with
+`-ffile-prefix-map` of the package to `/package` and the target directory to `/target`),
+`HOME=/homeless-shelter`, `TMPDIR=/tmp`. Never the runner's: no other variable, ra-jit's own
+neither. A run is kept under one key of what it saw: what the script was built from, its
+arguments and environment with the checkout's and target directory's paths taken out, its
+package's source (`.cargo-checksum.json`, a git checkout's commit, a path package's tree),
+each closure path's NarHash and its dependencies' `OUT_DIR` trees; nothing of what it read,
+as it can read nothing else. One whose files name where it ran is kept for that place alone.
+A failed run says what it was given and what it lacked: a library (the `system-deps` line to
+add), a write outside `OUT_DIR` (the way out), a variable. Over the bench corpus 425 of 434
+runs succeed in their closure, 24 of them with libraries of the table, and every one is a
+store hit on the same machine and from another's store pulled from the remote, at the same
+checkout path (`bench/results/2026-10-27-bscache/closure.md`). A script cargo's rustc compiled
+is keyed by its bytes, which name `CARGO_HOME`, so another checkout path misses it yet.
+`RA_JIT_KEY_TRACE=<dir>` writes each key's fields to `<dir>/<key>.txt`, to see what two
+machines' keys differ in.
+
 Compiling a build script, running it and building a proc macro are each an entry of the
 store, so they travel with `ra-jit cache push` and `pull` and through the gateway like any
 compiled function ([remote-cache.md](remote-cache.md)). Each is kept under two keys
@@ -462,7 +503,9 @@ With `RA_JIT_STATS` each hit says so (`ra-jit: a run the store kept`, `ra-jit: a
 store kept: ...`), where cargo shows what a script printed.
 
 Every proc-macro server a load starts, the toolchain's and ra-jit's own, runs in the sandbox
-too, writing nothing: no `OUT_DIR`, only the empty temporary directories. A server is started
+too, writing nothing: no `OUT_DIR`, only the empty temporary directories. It is given what a
+test is given and ra-jit's and rust-analyzer's own variables, not the shell's; a crate's
+variables come with each expansion. A server is started
 once, when a load first needs it, and serves every expansion after, so the sandbox costs its
 start (about 8 ms on Linux, 25 ms on macOS) and nothing per expansion. The packages of
 `unsandboxed-proc-macros` are expanded by servers of their own, started outside. The hook is
@@ -490,6 +533,102 @@ sees the directories of the libraries of the loads before it started, so a works
 `/tmp` loaded later by the same daemon is not seen by it on Linux; doctests and the
 `blaze-build-script` crate's own runner (`harness/scripts.py` only) are not sandboxed.
 
+### Build scripts under WASI (an experiment, off by default)
+
+A build script can instead be compiled for `wasm32-wasip1` and run under Wasmtime. Nothing
+of the host is reachable but what is handed to it, and the module is not built for the host
+it runs on. It is off unless asked for, and asking needs a ra-jit built with the feature `wasi`
+(`cargo build --release -p ra-jit --features wasi`), which adds Wasmtime to it:
+
+- `RA_JIT_BUILD_SCRIPTS=wasi` runs every build script so, or
+- in the workspace's root manifest, `wasi-build-scripts = ["pkg", ...]` (`["*"]` for all)
+  under `[workspace.metadata.blaze.sandbox]` runs those packages' scripts so.
+
+When the wrapper is asked for a build script it also builds it for `wasm32-wasip1`, from the
+same description, beside where rustc links it (`build_script_build.wasm`). The standard
+library of that build is the toolchain's with one file of blaze's in place of
+`std/src/sys/process/unsupported.rs` (`crates/blaze-wasi/std/process.rs`, `ra-jit
+--run-tool`), so `std::process::Command` works. A command runs on the host when its output
+is first needed: `wait`, `output`, a read of its stdout. ra-jit refuses that std when the
+toolchain's file is not the one it was written against. Without `--run-tool` a wasip1 build
+keeps rustc's behaviour: `Command` is unsupported.
+
+When cargo runs the script, the module runs in its place:
+
+| | under WASI |
+|---|---|
+| files | the package's directory, read-only, at its path and at `.`; `OUT_DIR`, writable, at its path; nothing else. `std::env::current_dir()` is `/` (wasi-libc's), not the package's directory, though relative paths are found in it |
+| environment | the variables cargo documents for build scripts (`CARGO_*` of the package, features and cfgs, `OUT_DIR`, `TARGET`, `HOST`, `DEP_*`, `RUSTC`, ...) and no other |
+| commands | the toolchain's `rustc` (the `RUSTC` it is given, which is ra-jit's: [above](#build-scripts-and-proc-macros-run-in-a-sandbox)), C and C++ compilers (`cc`, `c++`, `gcc`, `g++`, `clang`, `clang++`, `cpp`, with a target's prefix or a version), their archivers (`ar`, `ranlib`, `llvm-ar`, `llvm-ranlib`) and `pkg-config`: each runs in the sandbox the script would have run in, with the environment the script gave it over the sandbox's for C toolchains (`PATH`, `CC`, Nix's wrappers). Anything else is refused, naming the program: the script sees `PermissionDenied` |
+| record | every command, with the program that ran, its arguments, how it ended or why it was refused, in `ra-jit-wasi-tools.jsonl` beside `OUT_DIR` |
+
+What it printed is checked as a native run's is. A run is kept in the store under the Nix
+model's key: the module's bytes, the package's files, the environment and arguments with
+the checkout's and target directory's places unplaced, the toolchain, and each command it
+may run as `PATH` finds it. There are no read sets. A module ra-jit can't build, or a run
+that fails, is an error: the native script does not run instead.
+
+`RA_JIT_BUILD_SCRIPTS=wasi-compare` is for measuring it. The module runs first and what it
+printed and wrote is set aside in `ra-jit-wasi/` beside `OUT_DIR`, then the native script
+runs for cargo. `harness/bswasi.py` compares the two over the bench corpus;
+[the report](reports/BSWASI.md) has which scripts run unchanged and why the others don't.
+
+### Proc macros run as WebAssembly
+
+By default every proc macro of a load is built by blaze, from its source, as a WebAssembly
+module (`wasm32-wasip1`, a WASI reactor), and blaze expands with it in its own process under
+Wasmtime and Cranelift (`crates/ra-jit-macro-wasm`): no rustc-built code runs, and no
+proc-macro server is started for it. In ra-jit's own target directory the module is built
+from cargo's unit graph, with the build scripts (`cargo/compile_time.rs`). Elsewhere it is
+built from the load's own description of the macro's crate and what it depends on
+(`load_cargo::described`), whoever compiled the macro's library. Either build is kept in the
+store like a build script's. The macro's `proc_macro` crate is a shim
+(`crates/ra-jit-macro-wasm/guest/proc_macro.rs`) whose handles go to the host by imports, so
+`syn`, `quote` and `proc-macro2` build unchanged. A module is linked with the wasi-libc of
+the toolchain's `wasm32-wasip1` target. When the toolchain does not have that target, blaze
+runs `rustup target add wasm32-wasip1` for it, once.
+
+A module sees only what cargo documents for a proc macro:
+
+- Its package's directory, read-only, at `/blaze/package`: `CARGO_MANIFEST_DIR` names it, and
+  `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), ..))` or a `std::fs` read below it
+  works. Nothing else of the machine is there. A write fails with `EROFS`, a path out of the
+  package with `ENOTCAPABLE`.
+- The variables cargo sets for a crate (`CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`,
+  `CARGO_PKG_*`, `CARGO_CRATE_NAME`, `CARGO_PRIMARY_PACKAGE`, `CARGO_BIN_NAME`, `OUT_DIR`), never
+  the environment of the shell or the daemon.
+- A clock that reads 0 and random bytes that are the same on every run.
+
+Each expansion is kept in the store. Its first key is what the module was built of (two
+builds of one source are not the same bytes), the macro, its input and the variables. Its
+second key adds the file reads the host recorded: each path, relative to the package, and
+what that file held. A later expansion is found only while each of those reads holds the
+same as before; the format is `cargo/keyed.rs`'s. The expansion's own keys hold no absolute
+path and no host triple. But what a module was built of names the checkout's paths, so for
+now only the same checkout finds it. An expansion that asked the compiler about a span (its
+source text, file, line or a join) is not kept. A module's machine code is kept too, for
+the machine that compiled it: a new process loads it in about 3 ms rather than compiling it
+again (4 to 11 s for the corpus's macros). The list of a module's macros is kept in a
+`.macros` file beside it, so a load compiles nothing; a module is compiled, or loaded from
+the store, when one of its macros first expands.
+
+A proc macro that can't be built or loaded as a module fails the load, naming it:
+
+    error: the proc macro `my_derive` cannot run as WebAssembly: ...
+      name its package in `native-proc-macros` under [workspace.metadata.blaze] in /home/me/ws/Cargo.toml to expand it natively, or set RA_JIT_PROC_MACRO_WASM=0 for every proc macro
+
+It is never expanded natively instead. The ways out, in the workspace's root manifest:
+
+```toml
+[workspace.metadata.blaze]
+native-proc-macros = ["sqlx-macros"]   # by package name
+```
+
+A package listed there, and every proc macro under `RA_JIT_PROC_MACRO_WASM=0`, is expanded
+as before: rustc's library, by the toolchain's proc-macro server in the sandbox
+([above](#build-scripts-and-proc-macros-run-in-a-sandbox)). A value that is not a list of
+names is an error.
+
 ### Running only the tests that have not passed
 
 With `RA_JIT_TESTS=affected`, `cargo ra-jit test` runs, of each test executable the daemon
@@ -505,6 +644,11 @@ test and inputs are the same.
 At each build the daemon hashes every test's code with the code of every function it calls,
 directly or through others, in any crate of the workspace or its dependencies, and its
 attributes (`#[ignore]`, `#[should_panic]`). The standard library is named by the toolchain.
+A function of a crate outside the workspace, instantiated with types of such crates, is hashed
+by its stable name, which stands for its code and all it calls as it does for the compiled
+functions the store keeps; what the hash needs of what is below it (whether that reaches code
+ra-jit can't compile, or the world outside) is kept in the store under the name, so a daemon
+that starts with the store compiles none of the dependencies to hash the tests.
 A test's pass is kept under a key of that hash and of what else it is a function of:
 
 - the ra-jit that ran it (every key of the store has it);
@@ -572,9 +716,10 @@ On a CI runner's shape (a fresh target directory and daemon, with the store main
 every test that passed on main is skipped. After a one-function edit, only the tests that reach
 the function run: just ran 344 of its 515 passing tests and took 171 from main, nushell 42 of 67,
 cargo none of 8, and `verify` found every pass kept to pass again on seven projects. On these
-projects it is not yet faster than running every test: the daemon's walk for each test's hash
-on a fresh daemon (8.5 s and 3.6 s for axum's two test programs) costs more than the short tests
-it skips (axum 20.6 s against 13.1 s for every test, nushell 21.3 s against 17.2 s;
+projects it is not yet faster than running every test, whose tests are short: the walk for the
+tests' hashes on a fresh daemon takes 0.94 s for axum and 0.45 s for just, down from 6.2 s and
+7.6 s before dependencies were hashed by name, and the run takes 13.5 s against 11.9 s for every
+test (axum) and 32.3 s against 28.8 s (just;
 [the numbers](../bench/results/2026-10-27-testcache/README.md)).
 
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
@@ -772,7 +917,11 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_EMIT` | LLVM instruction selection: `optimized` or `fast` | `optimized`; `fast` at level 0 |
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
+| `RA_JIT_PROC_MACRO_WASM` | `0` expands proc macros natively, with rustc's libraries, rather than as WebAssembly ([above](#proc-macros-run-as-webassembly)) | WebAssembly |
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not the pinned nightly, rather than with the pinned nightly, for a project pinned to a nightly near it; nothing checks that it agrees ([support.md](support.md#toolchain)) | not set |
+
+`RA_JIT_BUILD_SCRIPTS` (`wasi`, `wasi-compare`, `native`) is read by the wrapper and by each
+run of a build script ([above](#build-scripts-under-wasi-an-experiment-off-by-default)).
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
 is: `affected` runs the tests that have not passed as they are now, by the passes the store

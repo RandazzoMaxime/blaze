@@ -1031,6 +1031,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- An integration test that names a program (`env!("CARGO_BIN_EXE_app")`) builds when its
+  build starts the daemon's worker: the worker was started with the variables of its build
+  but not the places cargo set, so its load, which compiles before the first request is read,
+  failed `` `env!("CARGO_BIN_EXE_app")` in it names a variable that is not set ``. A cold
+  `cargo ra-jit test --test it` failed every time; under plain cargo after `ra-jit enable`, the
+  `cargo test` after an edit failed when the edit's load won the race (the release train's
+  plain-cargo row "`cargo test`, edited").
 - A daemon that patches what rustc linked no longer stops at the first build that reaches a
   thread-local, or a static written at run time, of a crate edited before any build reached
   it (``static `__RUST_STD_INTERNAL_VAL` of crate `smid` with state, whose first value is not
@@ -1851,6 +1858,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   64.4 s and 64.3 s before, 58.0 s and 57.5 s after.
 - `blaze disable` removes the `bin` directory of cargo's home that `enable` made for the links
   of `cargo fmt` and `cargo clippy`, when nothing else is in it: the home is as it was.
+- A load refused for configuration is retried on the next build, so editing or deleting
+  `.cargo/config.toml` no longer leaves `cargo blaze run` reporting an old refusal until
+  `cargo blaze stop` (#597). Reported by @enricoschaaf.
+
+- A plain `cargo blaze check` leaves integration tests, examples and benchmarks out of its
+  diagnostics, as `cargo check` does. Those targets were checked without their
+  dev-dependencies, producing false unresolved imports and method errors; explicitly
+  selecting dev targets still checks them with their dependencies (#634, reported by
+  @om606bosch; also #632).
 
 ## [0.1.0] - 2026-10-20
 

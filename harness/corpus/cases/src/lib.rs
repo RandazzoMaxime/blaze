@@ -2305,6 +2305,45 @@ pub mod const_pointers {
     }
 }
 
+/// Constants whose raw pointer, of a type that says nothing of the pointee, points at
+/// pointers: std's `io::Error` of a message is a `NonNull<()>` to a `&str` and a kind.
+pub mod const_behind_raw {
+    use std::ptr::NonNull;
+
+    struct Message {
+        text: &'static str,
+        kind: u8,
+    }
+    struct Erased(NonNull<()>);
+    unsafe impl Sync for Erased {}
+
+    const fn erase(message: &'static Message) -> Erased {
+        Erased(NonNull::from_ref(message).cast())
+    }
+    const PROMOTED: Erased =
+        erase(const { &Message { text: "failed to fill whole buffer", kind: 3 } });
+    const NAMED: &Message = &Message { text: "a named one", kind: 4 };
+    const OF_NAMED: Erased = erase(NAMED);
+    static WORDS: [&str; 2] = ["two", "words"];
+    struct Raw<T>(*const T);
+    unsafe impl<T> Sync for Raw<T> {}
+    static OF_STATIC: Raw<[&'static str; 2]> = Raw(&raw const WORDS);
+    static TWICE: Raw<Raw<[&'static str; 2]>> = Raw(&raw const OF_STATIC);
+
+    fn shown(erased: &Erased) -> String {
+        let message = unsafe { erased.0.cast::<Message>().as_ref() };
+        format!("{}/{}", message.text, message.kind)
+    }
+
+    pub fn run() -> String {
+        use std::io::Read;
+        let eof = (&b""[..]).read_exact(&mut [0; 1]).unwrap_err();
+        let words = unsafe { &*(*TWICE.0).0 };
+        let (promoted, named) = (shown(&PROMOTED), shown(&OF_NAMED));
+        format!("{promoted} {named} {} {eof} {:?}", words.join(" "), eof.kind())
+    }
+}
+
 pub mod const_unsized_struct {
     #[repr(transparent)]
     pub struct Bytes {
@@ -2862,6 +2901,36 @@ pub mod async_frames {
         let second = leaf(first as u8).await;
         let third = leaf(second as u8).await;
         first + second + third + checksum(view)
+    }
+
+    /// Runs a closure on its second poll, as `spawn_blocking`'s handle does, scribbling over
+    /// itself on the first.
+    struct Later<F> {
+        scratch: [u64; 8],
+        run: Option<F>,
+    }
+    impl<F: FnOnce() -> u64 + Unpin> Future for Later<F> {
+        type Output = u64;
+        fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u64> {
+            if self.scratch[0] == 0 {
+                self.scratch = [u64::MAX - 1; 8];
+                return Poll::Pending;
+            }
+            Poll::Ready(self.run.take().unwrap()())
+        }
+    }
+
+    /// A `move` closure copies `size` and leaves it live across the await of the closure.
+    async fn captured(n: u64) -> u64 {
+        let size = n;
+        let more = Later { scratch: [0; 8], run: Some(move || size + 1) }.await;
+        let label = format!("{size}");
+        Twice(false).await;
+        more * 1000 + size + label.len() as u64
+    }
+
+    pub fn captured_copy() -> (u64, u64) {
+        (block_on(captured(1181)), block_on(captured(7)))
     }
 
     pub fn shared() -> (Vec<u64>, bool) {
