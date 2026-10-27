@@ -1009,6 +1009,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
+  `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
+  libraries as rustc does; it left them out. A program linked with
+  `-Wl,-no_compact_unwind` had `__unwind_info` all the same, and a `-Wl,-headerpad` was not
+  the least room the splice's header file asks for (`harness/nocompact.py`,
+  `harness/headerpad.py` on macOS).
 - The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
   that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
   `fn store(self, db: &dyn Db) -> &Store` in `impl Id<'_>` returns a borrow of `db`. It

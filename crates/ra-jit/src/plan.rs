@@ -380,6 +380,9 @@ struct Flags {
     strip: Option<String>,
     frame_pointers: bool,
     lints_capped: bool,
+    /// What `-C link-arg` and `-C link-args` give the linker, in order: rustc passes them
+    /// after the native libraries, and so does ra-jit's own link.
+    link_args: Vec<String>,
 }
 
 impl Flags {
@@ -465,6 +468,8 @@ impl Flags {
                     });
                 }
                 "split-debuginfo" => flags.split_debuginfo = Some(value.to_owned()),
+                "link-arg" => flags.link_args.push(value.to_owned()),
+                "link-args" => flags.link_args.extend(value.split_whitespace().map(str::to_owned)),
                 "strip" => flags.strip = Some(value.to_owned()),
                 // `always` and `non-leaf` keep them too, `non-leaf` in more functions than asked.
                 "force-frame-pointers" => {
@@ -514,10 +519,11 @@ pub(crate) struct Plan {
     lto: bool,
     frame_pointers: bool,
     lints_capped: bool,
+    link_args: Vec<String>,
 }
 
 /// What a plan says of a program as a whole.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Whole {
     /// What the build has a debugger told of the code.
     pub(crate) debug: Described,
@@ -526,6 +532,9 @@ pub(crate) struct Whole {
     /// Whether `--cap-lints` or `--force-warn` is among the flags, so that a lint the source
     /// denies may not fail rustc's build.
     pub(crate) lints_capped: bool,
+    /// What the flags give the linker (`-C link-arg`, `-C link-args`), which the daemon's own
+    /// link passes as rustc's does.
+    pub(crate) link_args: Vec<String>,
 }
 
 impl Plan {
@@ -561,7 +570,8 @@ impl Plan {
     /// What the plan says of the programs cargo was asked to build.
     pub(crate) fn whole(&self) -> anyhow::Result<Whole> {
         let debug = Described { frame_pointers: self.frame_pointers, ..self.described()? };
-        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped })
+        let link_args = self.link_args.clone();
+        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped, link_args })
     }
 
     /// How the package cargo calls `id` is built, when the build has it.
@@ -728,6 +738,7 @@ impl UnitGraph {
             lto,
             frame_pointers: flags.frame_pointers,
             lints_capped: flags.lints_capped,
+            link_args: flags.link_args.clone(),
         })
     }
 }
@@ -755,6 +766,13 @@ mod tests {
         assert!(capped("--force-warn non_snake_case"));
         assert!(!capped("-D warnings -A dead_code"));
         assert!(!capped("--cap-lintsx"));
+    }
+
+    #[test]
+    fn link_args_are_read_in_order_in_each_spelling() {
+        let words = ["-C", "link-arg=-Wl,-no_compact_unwind", "-Clink-args=-a -b", "-C", "link_arg=-c"];
+        let args = Flags::parse(words.into_iter());
+        assert_eq!(args.unwrap().link_args, ["-Wl,-no_compact_unwind", "-a", "-b", "-c"]);
     }
 
     #[test]
