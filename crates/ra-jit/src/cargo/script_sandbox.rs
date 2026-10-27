@@ -513,7 +513,13 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
     command.arg(sandbox::COMMAND).arg(&spec_file).arg("--").arg(script.real).args(script.args);
     command.current_dir(script.cwd).stdin(stdin);
     let mut output = command.output().with_context(|| running(script))?;
-    let lines = sandbox::read_record(&record);
+    let mut lines = sandbox::read_record(&record);
+    // glibc asks nscd for any user or host it looks up; in a closure, that is all it is.
+    if in_view.is_some()
+        && let Some(lines) = &mut lines
+    {
+        lines.retain(|it| !(it.reached == Reached::Net && it.what.contains("/nscd/socket")));
+    }
     let package = script.package();
     if output.status.code() == Some(sandbox::COULD_NOT)
         && lines.is_none()
