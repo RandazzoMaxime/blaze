@@ -285,7 +285,7 @@ AFTER = {
 }
 # Steps that fail now and then for a reason not yet found, each with its issue. In the fast tier
 # (ci.py's RA_JIT_CI_TIER) a wrong one is printed as such and not counted, so it does not hold up
-# the merge queue; everywhere else, the nightly full tier included, it counts.
+# the merge queue; everywhere else, the release train's full tier included, it counts.
 FLAKY = {"that test taken out of the sandbox": "https://github.com/indexable-inc/blaze/issues/412"}
 RAN = re.compile(r"^test (\S+) \.\.\. (ok|ignored|FAILED)", re.M)
 # A library with a `#[bench]`, which is nightly's: built with RUSTC_BOOTSTRAP=1.

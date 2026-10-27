@@ -7,9 +7,10 @@
 Run it in the lane's worktree, on its branch, with everything committed and the local gate
 passed. It pushes the branch, opens its pull request (titled "Merge <branch>: <what it does>",
 which with " (#N)" is the merge commit's subject) or takes the one already open, and asks for it
-to be queued once its own checks pass: the pull request's run is the fast tier on Linux x86-64
-(about 10 minutes). The queue then runs the fast tier on every platform on the branch merged
-onto main and the entries ahead of it (about 12 minutes), and merges it with a merge commit, as `git merge --no-ff` would; main moves only to
+to be queued once its own checks pass: the pull request's run is the merge gate, the build and
+the unit tests on Linux x86-64 (about 5 minutes). The queue then runs the gate on the branch
+merged onto main and the entries ahead of it, and merges it with a merge commit, as `git merge
+--no-ff` would; every harness runs after that, in the release train (train.yaml). Main moves only to
 what it tested. land.py waits until then and exits 0 with the commit main is at, or exits 1 and
 says why the pull request was not queued or left the queue (a check that failed, a conflict
 with main). GitHub

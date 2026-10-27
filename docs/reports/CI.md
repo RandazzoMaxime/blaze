@@ -116,3 +116,21 @@ per failed job; every harness gets a daemon home of its own; rustc's tests come 
 cache; `testselect.py`'s flaky step is quarantined in the fast tier (#412); the flake's `dist`
 checks its binaries with `build_release.py --nix`. The numbers after are in harness.md's CI
 section once measured.
+
+## 2026-10-27: a merge gate of minutes, and the release train
+
+The queue still took 35 to 45 minutes a run after the change above, with no wait for a runner:
+the builds took 2 to 5 minutes (sccache hits), the unit tests 3 to 6, and the rest was
+harnesses, `quick-2` taking 20 to 30 minutes on each platform. Every entry of the queue paid
+that, for failures the harnesses could as well report on main with the commits they came in.
+
+What changed: the merge gate (`ra-jit.yaml`, the `ci` check) is the build and the unit tests on
+Linux x86-64, `harness/imports.py` and `harness/rustcsites.py`; `cargo fmt --check` is gone,
+and `fmt.yaml` formats main after each push. Everything else is the release train
+(`train.yaml`), on each push to main, one at a time on the newest commit: the full tier on four
+platforms, and `nix-live.yaml` (not blocking until it has been green a while). Its `core` part,
+36 to 47 minutes as one job in the nightly of 2026-10-26, is packed into `core-1` ...
+`core-N` by measured seconds, so that no part is longer than `wholeprogram.py` (19 minutes on
+macOS). A green train releases main when it has changes since the last release, through
+`pgo.yaml` and `release.yaml`; a red one opens or adds to one issue. The nightly schedules of
+`ra-jit.yaml` and `nix-live.yaml` are gone; `nix/units` was regenerated, after a week stale.

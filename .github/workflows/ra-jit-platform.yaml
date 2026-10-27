@@ -1,8 +1,9 @@
 # One platform of ra-jit.yaml: its unit tests, one build of ra-jit with both producers, and the
 # harnesses of the tier against that build, split into parts (harness/ci.py) that each run on a
-# machine of their own. The tier `warm` (a push to main) is the unit tests and the build alone,
-# which write the caches the other runs read. Each platform builds on its own kind of machine, so nothing is
-# cross-compiled or emulated but what `buildmodel.py` builds for other targets.
+# machine of their own. The tiers `gate` (the merge gate's, ra-jit.yaml) and `warm` (a push to
+# main, which writes the caches the other runs read) are the unit tests and the build alone;
+# `full` is the release train's (train.yaml). Each platform builds on its own kind of machine,
+# so nothing is cross-compiled or emulated but what `buildmodel.py` builds for other targets.
 name: ra-jit platform
 on:
   workflow_call:
@@ -16,7 +17,7 @@ on:
         type: string
         required: true
       tier:
-        description: "`fast` (the fast tier's harnesses), `full` (every harness), as in harness/ci.py, or `warm` (none)"
+        description: "`fast` (the fast tier's harnesses), `full` (every harness), as in harness/ci.py, or `gate` and `warm` (none)"
         type: string
         required: true
       borrowck:
@@ -40,7 +41,7 @@ on:
         type: boolean
         default: false
       bun-e2e:
-        description: reduced Bun nightly blocker fixtures
+        description: the reduced fixtures of what kept Bun from building
         type: boolean
         default: false
 
@@ -135,12 +136,12 @@ jobs:
           path: target/release/ra-jit.tar
           retention-days: 3
       - id: parts
-        if: inputs.tier != 'warm'
+        if: (inputs.tier == 'fast' || inputs.tier == 'full')
         run: echo "parts=$($PYTHON harness/ci.py --parts ${{ inputs.tier }})" >> "$GITHUB_OUTPUT"
 
   harness:
     name: harness (${{ matrix.backend }}, ${{ matrix.part }})
-    if: inputs.tier != 'warm'
+    if: (inputs.tier == 'fast' || inputs.tier == 'full')
     needs: build
     runs-on: ${{ inputs.os }}
     # A fast part is about four minutes of harnesses: one that hangs ends here, not at the hour.
@@ -171,7 +172,7 @@ jobs:
       # `debuginfo.py` has perf unwind what ra-jit built, which it says it did not run where
       # there is no perf or the kernel does not let this user sample.
       - name: perf
-        if: runner.os == 'Linux' && matrix.part == 'core'
+        if: runner.os == 'Linux' && startsWith(matrix.part, 'core-')
         continue-on-error: true
         run: |
           sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-generic
@@ -217,7 +218,7 @@ jobs:
 
   bun-e2e:
     name: Bun E2E fixtures
-    if: inputs.bun-e2e && inputs.tier != 'warm'
+    if: inputs.bun-e2e && (inputs.tier == 'fast' || inputs.tier == 'full')
     needs: build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 15
@@ -238,10 +239,10 @@ jobs:
       - run: $PYTHON harness/bun_repros.py
 
   # The borrow checker against rustc's own borrow-check tests (docs/borrowck.md), at the
-  # commit of the nightly whose verdicts they are scored by, with a floor under the passes.
+  # commit of the pinned toolchain whose verdicts they are scored by, with a floor under the passes.
   borrowck:
     name: borrowck
-    if: inputs.borrowck && inputs.tier != 'warm'
+    if: inputs.borrowck && (inputs.tier == 'fast' || inputs.tier == 'full')
     needs: build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 30
@@ -271,13 +272,13 @@ jobs:
           sys.exit(bool(bad) or not lines or "files" not in lines[-1])' "$RUNNER_TEMP/$crate.json" $crate
           done
 
-  # The few run-pass tests of rustc's that the nightly claims run, or a run on another
+  # The few run-pass tests of rustc's that claims.yaml's full run, or a run on another
   # platform, once caught ra-jit failing (harness/ui-pinned.txt), from the tests of the pinned
   # toolchain. Their workspaces are under a link, as they are under /tmp on macOS: rustc's
   # dep-info names their files where they are, and ra-jit is given them through the link.
   pinned-ui:
     name: pinned run-pass tests
-    if: inputs.pinned-ui && inputs.tier != 'warm'
+    if: inputs.pinned-ui && (inputs.tier == 'fast' || inputs.tier == 'full')
     needs: build
     runs-on: ${{ inputs.os }}
     timeout-minutes: 20

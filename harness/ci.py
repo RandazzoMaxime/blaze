@@ -13,8 +13,9 @@ ones where the platform matters (code generation and the ABI, the object format 
 the sandbox, live edits, the store's files). They are packed into parts `quick-1` ... `quick-N`
 of about PART_SECS each, per host and backend, by the seconds FAST says each takes on the
 slowest host, so a new or slower harness moves the others, not the time of the tier. The full
-tier, nightly and by hand, is every harness, in the parts core, keys-N, buildmodel, store-kills,
-store and daemon (docs/harness.md, "CI").
+tier, the release train's (every push to main) and by hand, is every harness, in the parts
+core-1 ... core-N (packed as the fast tier is, to about CORE_SECS by the seconds CORE says),
+keys-N, buildmodel, store-kills, store and daemon (docs/harness.md, "CI").
 
 Each harness runs with an RA_JIT_HOME of its own (a harness may set its own over it), so no
 daemon or socket of one harness is seen by the next. RA_JIT_CACHE is left alone: set, it turns
@@ -191,6 +192,38 @@ FAST = {
 # What a fast part is packed to: with the build before it and the job's own set-up, about ten
 # minutes from the start of the run.
 PART_SECS = 240
+# The full tier's part `core`, packed as the fast tier is: the seconds each harness took on the
+# slowest host it runs on (the train's 2026-10-26 run 40283386868, the slower backend), keyed
+# as FAST is. As one part it took 36 to 47 minutes on Linux and macOS, every other part 25 or
+# less; wholeprogram.py alone is 19 minutes on macOS, and nothing packs a part below that.
+# A harness CORE does not name counts CORE_DEFAULT.
+CORE = {
+    "wholeprogram.py": 1155,
+    "debuginfo.py": 500,
+    "bigbinary.py": 457,
+    "fuzz/fuzz.py check": 264,
+    "norustc.py": 229,
+    "breakers.py": 189,
+    "latelisted.py": 91,
+    "splices.py": 89,
+    "farfile.py": 84,
+    "tiers.py": 79,
+    "coldbuild.py": 62,
+    "doctestonce.py": 54,
+    "fuzz/edits.py smoke": 52,
+    "testselect.py": 51,
+    "fuzz/fuzz.py smoke": 41,
+    "difftest.py corpus": 34,
+    "check_json.py": 32,
+    "worktrees.py --overlay": 30,
+    "worktrees.py": 27,
+    "growth.py": 26,
+    "backends.py corpus": 26,
+    "worktrees.py --join --together": 26,
+    "loadedits.py": 20,
+}
+CORE_DEFAULT = 15
+CORE_SECS = 600
 # The Ubuntu packages a part's harnesses use on Linux: valgrind shows where a program difftest
 # built goes wrong, gdb the threads of a daemon that hangs.
 APT = {"difftest.py": "valgrind", "worktrees.py": "gdb", "debuginfo.py": "gdb"}
@@ -223,25 +256,43 @@ def fast_here(backend):
     return chosen
 
 
-def fast_parts(backend):
-    """The fast tier here under `backend`, packed into parts of about PART_SECS (the longest
-    first into the part with the least so far): {part: [harness, ...]}, each in HARNESSES' order."""
-    chosen = fast_here(backend)
-    count = max(1, math.ceil(sum(secs for _, secs in chosen) / PART_SECS)) if chosen else 0
+def pack(chosen, secs_per_part, prefix):
+    """[(harness, seconds), ...] packed into parts of about `secs_per_part` (the longest first
+    into the part with the least so far): {prefix-N: [harness, ...]}, each in HARNESSES' order."""
+    longest = max((secs for _, secs in chosen), default=0)
+    total = sum(secs for _, secs in chosen)
+    # As many parts as the total needs, but no more than leave the longest harness alone in one.
+    count = max(1, math.ceil(total / max(secs_per_part, longest))) if chosen else 0
     loads, members = [0] * count, [[] for _ in range(count)]
     for index, (_, secs) in sorted(enumerate(chosen), key=lambda it: (-it[1][1], it[0])):
         part = loads.index(min(loads))
         loads[part] += secs
         members[part].append(index)
-    return {f"quick-{n + 1}": [chosen[i][0] for i in sorted(members[n])] for n in range(count)}
+    return {f"{prefix}-{n + 1}": [chosen[i][0] for i in sorted(members[n])] for n in range(count)}
+
+
+def fast_parts(backend):
+    """The fast tier here under `backend`, in parts of about PART_SECS."""
+    return pack(fast_here(backend), PART_SECS, "quick")
+
+
+def core_secs(harness):
+    name = label(harness)
+    keys = [key for key in CORE if name == key or name.startswith(key + " ")]
+    return CORE[max(keys, key=len)] if keys else CORE_DEFAULT
 
 
 def full_parts(backend):
-    parts = {}
+    """The full tier here under `backend`: its named parts, and `core` in parts of about
+    CORE_SECS (core-1 ... core-N)."""
+    parts, core = {}, []
     for harness in HARNESSES:
         if harness[3](backend):
-            parts.setdefault(harness[0], []).append(harness)
-    return parts
+            if harness[0] == "core":
+                core.append((harness, core_secs(harness)))
+            else:
+                parts.setdefault(harness[0], []).append(harness)
+    return {**pack(core, CORE_SECS, "core"), **parts}
 
 
 def parts(tier="full"):
@@ -308,7 +359,8 @@ def main():
             if harness[4] is not None:
                 secs, hosts = fast_of(harness)
                 fast = f"fast {secs:3d} s {','.join(hosts) or 'all'}"
-            print(f"{harness[0]:12} {fast:28} {label(harness)}")
+            part = f"core {core_secs(harness)} s" if harness[0] == "core" else harness[0]
+            print(f"{part:12} {fast:28} {label(harness)}")
     elif arg.startswith("-"):
         print(__doc__)
         sys.exit(0 if arg == "--help" else 2)
