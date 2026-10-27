@@ -21,7 +21,7 @@ pub mod text;
 pub mod world;
 
 pub use comments::{Comment, Discussion, FormError, Viewer};
-pub use render::{Blocks, NavItem, Page};
+pub use render::{Blocks, NavItem, Page, Served};
 pub use world::{Entity, Id, Scalar, Value, World};
 
 /// A site ready to render: the world and the indexes the TS builds once per isolate (pages, the top bar, refs).
@@ -31,6 +31,7 @@ pub struct Site {
     pages: Vec<Page>,
     nav: Vec<NavItem>,
     refs: Option<Id>,
+    served: Served,
     /// Per discussable page (by URL): its blocks from a comment-less render, which says where comments hang.
     threads: std::collections::BTreeMap<String, Blocks>,
 }
@@ -49,7 +50,8 @@ impl Site {
         let pages = render::pages(&world, site);
         let nav = render::bar(&world, &pages)?;
         let refs = world.lookup("refs");
-        let mut site = Site { world, site, pages, nav, refs, threads: Default::default() };
+        let served = Served::of(&world, site)?;
+        let mut site = Site { world, site, pages, nav, refs, served, threads: Default::default() };
         for p in site.pages.clone() {
             if site.is_discussable(&p)
                 && let Some(b) = site.render(&p.url, &[], &Discussion::default())?.blocks
@@ -68,6 +70,11 @@ impl Site {
     /// The site in a flecs-snapshot document (what the build writes to `site.cbor`).
     pub fn from_snapshot(bytes: &[u8]) -> Result<Site, String> {
         Site::new(snapshot::load(bytes)?)
+    }
+
+    /// Where the site is served (`Served` on `site`).
+    pub fn served(&self) -> &Served {
+        &self.served
     }
 
     pub fn world(&self) -> &World {
@@ -95,6 +102,7 @@ impl Site {
             pages: &self.pages,
             nav: &self.nav,
             refs: self.refs,
+            served: &self.served,
         };
         spoken::lines(&s, page)
     }
@@ -116,6 +124,7 @@ impl Site {
                 pages: &self.pages,
                 nav: &self.nav,
                 refs: self.refs,
+                served: &self.served,
             };
             render::render(&s, &page, discussion)
         });

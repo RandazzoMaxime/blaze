@@ -355,7 +355,7 @@ fn asked_crates(
         for bin in package.targets.iter().filter(|it| it.kind.contains(&TargetKind::Bin)) {
             let wanted = match picks_targets {
                 false => true,
-                true => flags.bins || flags.bin.iter().any(|name| *name == bin.name),
+                true => flags.bins || flags.bin.contains(&bin.name),
             };
             if !wanted || lib_name.as_deref() == Some(&bin.name.replace('-', "_")) {
                 continue;
@@ -428,7 +428,10 @@ fn open(page: &Path) {
         None if cfg!(windows) => "explorer".into(),
         None => "xdg-open".into(),
     };
-    if let Err(why) = std::process::Command::new(&opener).arg(page).status() {
+    let dir = page.parent().unwrap_or(page);
+    let mut command =
+        toolchain::command(&opener, dir, &FxHashMap::<String, Option<String>>::default());
+    if let Err(why) = command.arg(page).status() {
         say::error(&format!(
             "could not open {} with {}: {why}",
             page.display(),

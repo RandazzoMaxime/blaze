@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 use regex_lite::Regex;
 
 use crate::js;
+use crate::render::Served;
 use crate::world::{Id, World};
 
 pub fn esc(t: &str) -> String {
@@ -45,6 +46,8 @@ fn safe_href(h: &str) -> bool {
 pub struct Refs<'w> {
     pub world: &'w World,
     pub parent: Option<Id>,
+    /// Where the site is served: a link to a site path (`/rfcs/x`) goes under its base.
+    pub served: &'w Served,
 }
 
 impl Refs<'_> {
@@ -74,7 +77,11 @@ pub fn inline(text: &str, refs: &Refs, wher: &str, cited: &mut Vec<Id>) -> Resul
             if !safe_href(href) {
                 return Err(format!("{wher}: link {href} is not http(s), / or #"));
             }
-            html += &format!("<a href=\"{}\">{}</a>", esc(href), inline(label, refs, wher, cited)?);
+            html += &format!(
+                "<a href=\"{}\">{}</a>",
+                esc(&refs.served.href(href)),
+                inline(label, refs, wher, cited)?
+            );
         } else {
             let name = g(4).or(g(6)).expect("a reference");
             let r = refs.get(name).ok_or_else(|| format!("{wher}: no reference refs.{name}"))?;
@@ -90,7 +97,10 @@ pub fn inline(text: &str, refs: &Refs, wher: &str, cited: &mut Vec<Id>) -> Resul
                 Some(label) => inline(label, refs, wher, cited)?,
                 None => esc(&js::string(v.get("label"))),
             };
-            html += &format!("<a href=\"{}\">{shown}</a>", esc(&js::string(v.get("href"))));
+            html += &format!(
+                "<a href=\"{}\">{shown}</a>",
+                esc(&refs.served.href(&js::string(v.get("href"))))
+            );
         }
     }
     Ok(html + &esc(&text[last..]))
