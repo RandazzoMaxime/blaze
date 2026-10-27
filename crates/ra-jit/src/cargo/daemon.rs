@@ -298,7 +298,12 @@ impl WorkerConfig {
         if self.selection.dev_deps {
             args.push("--dev-deps".into());
         }
+        // Where the build was asked, from the root of the checkout when it is in it.
         if let Some(asked_in) = &self.selection.asked_in {
+            let asked_in = match asked_in.as_os_str().is_empty() {
+                true => root.to_owned(),
+                false => root.join(asked_in),
+            };
             args.extend(["--asked-in".into(), asked_in.into()]);
         }
         for krate in crates {

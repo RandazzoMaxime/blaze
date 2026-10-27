@@ -74,8 +74,15 @@ impl Linked {
         // Taken before the daemon answers: whoever is given the program waits for the write.
         let lock = Writing::ahead(&binary);
         Linked(std::thread::spawn(move || {
-            Baseline::parse(&binary, &patch?, &object, false)?.laid_out(binary, lock)
+            Baseline::parse(&binary, Some(&patch?), &object, false)?.laid_out(binary, lock)
         }))
+    }
+
+    /// As [`Linked::read`], of an executable linked with the object alone, no patch: a patch
+    /// is then spliced into it with the read baseline. Read here and now, for the splice.
+    pub(crate) fn read_bare(binary: PathBuf, object: &Path) -> anyhow::Result<Baseline> {
+        let lock = Writing::ahead(&binary);
+        Baseline::parse(&binary, None, object, false)?.laid_out(binary, lock)
     }
 
     /// As [`Linked::read`], of what rustc linked, which `binary` is another name of: it is
@@ -93,7 +100,7 @@ impl Linked {
                 let (binary, copy) = (binary.clone(), copy.clone());
                 std::thread::spawn(move || std::fs::copy(binary, copy))
             };
-            let parsed = Baseline::parse(&binary, &patch, &object, true);
+            let parsed = Baseline::parse(&binary, Some(&patch), &object, true);
             copying.join().map_err(|_| anyhow::anyhow!("copying the executable panicked"))??;
             let mut parsed = parsed?;
             // Whoever takes the file meanwhile takes either, which are the same, and waits for
@@ -230,8 +237,14 @@ impl Parsed {
 }
 
 impl Baseline {
-    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`.
-    fn parse(path: &Path, patch: &[u8], object: &Path, rustcs: bool) -> anyhow::Result<Parsed> {
+    /// Reads the executable at `path`, which was linked with `patch` ahead of `object`, or
+    /// with `object` alone.
+    fn parse(
+        path: &Path,
+        patch: Option<&[u8]>,
+        object: &Path,
+        rustcs: bool,
+    ) -> anyhow::Result<Parsed> {
         let file = File::open(path)?;
         let stamp = Stamp::of(&file)?;
         // SAFETY: the daemon is the one that has the link write the file, and it does not
@@ -252,22 +265,26 @@ impl Baseline {
             );
         }
         let (image, baked) = if bytes.starts_with(b"\0asm") {
-            (Executable::Wasm(wasm::Module::read(bytes.to_vec())?), wasm::defined(patch)?)
+            let baked = patch.map(wasm::defined).transpose()?.unwrap_or_default();
+            (Executable::Wasm(wasm::Module::read(bytes.to_vec())?), baked)
         } else {
             let image = match object::FileKind::parse(&*bytes)? {
                 object::FileKind::MachO64 => Executable::MachO(macho::Image::read(&bytes)?),
                 object::FileKind::Pe64 => {
                     let object = std::fs::read(object)?;
-                    Executable::Pe(pe::Image::read(&bytes, path, &[patch, &object])?)
+                    let objects: Vec<&[u8]> = patch.into_iter().chain([&*object]).collect();
+                    Executable::Pe(pe::Image::read(&bytes, path, &objects)?)
                 }
                 _ => Executable::Elf(Image::read(&bytes)?),
             };
-            let patch = object::File::parse(patch)?;
-            let baked = patch
-                .symbols()
-                .filter(|it| it.is_definition() && !it.is_local())
-                .filter_map(|it| it.name_bytes().ok().map(Box::from))
-                .collect();
+            let baked = match patch {
+                Some(patch) => object::File::parse(patch)?
+                    .symbols()
+                    .filter(|it| it.is_definition() && !it.is_local())
+                    .filter_map(|it| it.name_bytes().ok().map(Box::from))
+                    .collect(),
+                None => Vec::new(),
+            };
             (image, baked)
         };
         Ok(Parsed { image, baked, stamp })
@@ -336,7 +353,7 @@ impl Baseline {
         let patch = std::fs::read(patch);
         let lock = Writing::ahead(&path);
         let linked = Linked(std::thread::spawn(move || {
-            let mut parsed = Baseline::parse(&path, &patch?, &object, false)?;
+            let mut parsed = Baseline::parse(&path, Some(&patch?), &object, false)?;
             let Executable::Elf(image) = &mut parsed.image else {
                 bail!("the executable is ELF no more")
             };
