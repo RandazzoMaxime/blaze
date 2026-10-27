@@ -462,8 +462,13 @@ harness mistake shows.
 A unit passes when ra-jit's set of borrow-check errors, as (error code, line), is rustc's
 set. Errors rustc gives no code are named by their message. A unit is out of scope, with a
 counted reason, when it cannot say anything about the borrow checker: it needs a nightly
-feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, or rustc
-stops before borrow checking.
+feature, an auxiliary crate or another file, a `-Z` flag other than Polonius, rustc
+stops before borrow checking, or rust-analyzer reports an error in it that rustc does not.
+For those, rust-analyzer's type checking follows rustc's in what it reports:
+
+- No "type annotations needed" (E0282) in a body that already has an error, as rustc's
+  `InferCtxt::tainted_by_errors` suppresses it at writeback and where a type must be known
+  (`hir-ty/src/infer.rs`, `InferenceDiagnostic::taints_body`).
 
 With no borrow checker, the 246 units rustc accepts would pass. Now:
 
