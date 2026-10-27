@@ -42,10 +42,10 @@ lays out, mangles and passes values as the pinned nightly does.
 |---|---|---|---|---|---|
 | Cranelift | yes (1) | yes (1) | yes (1) | yes (1) | does not apply (2) |
 | LLVM | yes (1) | yes (1) | yes (1) | yes (1) | no |
-| Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, ahead of rustc's rlibs (2) |
+| Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, with nothing of rustc's (2) |
 | Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes (2) |
 | Debug info | yes (6) | yes (6) | lines only (7) | unverified (7) | no |
-| `cargo blaze` | yes (8) | unverified (9) | yes, by hand (9) | yes, by hand (9) | no |
+| `cargo blaze` | yes (8) | unverified (9) | yes, by hand (9) | yes, by hand (9) | `wasm32-wasip1` and `wasm32-unknown-unknown` cdylibs, by hand (2) |
 | Disk store | yes (10) | yes (10) | yes (10) | yes (10) | unverified |
 | Remote store | yes, not real AWS (11) | unverified | unverified | unverified | unverified |
 | Fuzzed | yes (12) | no | no | no | no |
@@ -57,13 +57,16 @@ lays out, mangles and passes values as the pinned nightly does.
    `includes`, `worktrees` and `keys` ran on every leg. Under LLVM, `backends.py` reports no
    corpus function left to Cranelift on any of the four. Local: 822 of 822 under both.
 2. wasm32 uses its own lowering from Cranelift IR, not Cranelift's or LLVM's code
-   generation. `wasm32-wasip1` under wasmtime, 2026-10-27, arm64 ix VM, pinned nightly:
-   corpus MATCH with 913 of 914 functions from ra-jit, stress 100 of 100, splices 71 of 71,
-   breakers 176 of 176 ([platforms.md](platforms.md), wasm32). The train runs the corpus and
-   stress for it on every push to main. That is ahead of rustc's rlibs: with nothing of
-   rustc's, programs and the std unit compile but do not link yet. No unwinding is emitted;
-   the wasm targets are `panic=abort`. `wasm32-unknown-unknown` was only exercised through
-   one Dioxus page, on an earlier branch ([reports/WASM32.md](reports/WASM32.md)).
+   generation. `wasm32-wasip1` under wasmtime, 2026-10-27, arm64 ix VMs, pinned nightly,
+   main fdc1c53f15: corpus MATCH with 957 of 959 functions from ra-jit (964 of 966 with
+   simd128 and relaxed-simd), stress 100 of 100, splices 71 of 71. With nothing of rustc's,
+   wasip1 programs, a program over blaze-manifest and blaze-resolve, wasm-host's `no_std`
+   simd128 guests and two Cloudflare Workers (workers-rs, wasm-bindgen) build, link and answer
+   as rustc's builds ([platforms.md](platforms.md), wasm32); `cargo blaze build --target
+   wasm32-wasip1` built the second by hand, its build scripts and proc macros blaze's too,
+   and `cargo blaze build` the guest and, under worker-build, both workers. The train runs the corpus,
+   stress and `allrajit_wasm.py` on every push to main. No unwinding is emitted; the wasm
+   targets are `panic=abort`. Modules are 8 to 50 times the size of rustc's.
 3. `splices.py` 71 of 71 in CI on both Linux architectures; `farsplices.py` 6 of 6 on
    AArch64, where a branch reaches only 128 MB. Not every edit can be spliced: about 60 of
    the 71 steps are, and the rest link in full by design (an executable somebody else

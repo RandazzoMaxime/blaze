@@ -222,6 +222,35 @@ both, its vendored sources being made by its own build (`harness/bunprep.py`): c
 missing `vendor/lolhtml` first, blaze-metadata the missing `vendor/rust-argon2`, as it reads
 path packages in another order than cargo's resolver asks for them.
 
+The `ctdeps` part (named only: it builds what it compares) holds blaze's own build of a load's
+build scripts and proc macros (`crates/ra-jit/src/cargo/compile_time.rs`, in place of
+rust-analyzer's `cargo check --compile-time-deps`) to cargo's. For harness/norustc/fixture and
+each bench project, copied into a directory of its own, and for a build and a test load (the
+test adds `--cfg-test`, cargo's `--all-targets`, and the project's `test=[...]` flags of
+`bench.py`), it runs `cargo check --compile-time-deps --message-format=json` as rust-analyzer's
+`build_command` does and reads the messages as `WorkspaceBuildScripts` does, then `ra-jit
+compile-time-deps` with the same flags, which loads the workspace as a build's daemon does
+(`--own-target`) and prints what the load read. Per package it compares the script's cfgs and
+variables (`OUT_DIR` and other paths replaced), every file of `OUT_DIR` by sha256 (its own path
+replaced in the bytes), and which packages have a proc macro built; a difference fails the part.
+cargo's target directory is named so that its `OUT_DIR`s are as long as blaze's, which keeps
+the offsets in a C library the same. An object or archive is hashed without its debug info,
+whose string table gcc orders by the strings' hashes, so another `OUT_DIR` reorders it; a
+configure log's temporary file names (`ccXXXXXX.o`) and `config.status`'s split strings are
+read as one; a probe's output (autocfg's `autocfg_<random>_N`, `probeN.ll` before autocfg 1.2)
+only has to be there, as ra-jit writes it empty. When both fail, they count as the same
+failure when blaze names the package cargo named, and the result says why when each stopped at
+something the machine or checkout lacks (a program a script spawns, the linker, a path package).
+
+On main 8470a70e6a (#658, arm64 ix VM, 2026-10-27), 10 of 14 equal: the fixture, ripgrep,
+cargo, bat, hyperfine, just, axum, nushell, helix and bevy. fd differs only in jemalloc's
+`config.log` and `config.status`, which record `SHELL`: the build-script sandbox gives a script
+only the variables `script_sandbox.rs` `given` lets through, so `configure` records its own
+`/bin/sh` where cargo's run had the shell's; with `BLAZE_SANDBOX=off` its 9 packages are equal.
+biome stops at a syn-1 proc macro ra-jit cannot compile (`darling_macro`, #327). zed fails for
+both (cargo at gcc's missing `-fuse-ld=lld`, blaze at `cmake`), and bun for both at a path
+package its own build makes (`harness/bunprep.py`).
+
 ## Decisions
 
 **cargo's schema crate, pinned.** `cargo-util-schemas = "=0.14.3"` is the version cargo 1.99.0

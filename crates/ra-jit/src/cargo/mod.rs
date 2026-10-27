@@ -9,7 +9,11 @@ mod affected;
 mod ancestor;
 pub(crate) mod cli;
 mod client;
+#[cfg(unix)]
+pub(crate) mod closure;
+pub(crate) mod compile_time;
 mod directives;
+pub(crate) mod fetches;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
@@ -18,6 +22,7 @@ pub(crate) mod own_macro;
 pub(crate) mod own_script;
 mod package;
 pub(crate) mod plan;
+mod results;
 pub(crate) mod run;
 pub(crate) mod sandboxed;
 pub(crate) mod say;
@@ -84,6 +89,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
                 FAILED
             }
         },
+        Asked::Lock(args) => fetches::command(&args)?,
         Asked::Help => {
             println!("{HELP}");
             0
@@ -111,6 +117,8 @@ usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
   enable, disable    plain `cargo build|run|test|check` through blaze, and back
   toolchain          blaze's own toolchain, which it builds every project with, downloaded once
                      if it has none (`--path`: its directory)
+  lock --fetches     records what build scripts download, by sha256, in Cargo.fetches.lock
+                     (`--target <triple>`, the host's by default); a build hands it to them
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 
@@ -223,10 +231,10 @@ const FAILED: i32 = 101;
 
 /// What the `Finished` line says the build was: ra-jit's, and the remote's failure if the
 /// daemon's last exchange with it failed (`RA_JIT_REMOTE=off` stops using it).
-fn ra_jit_tag() -> String {
+fn blaze_tag() -> String {
     match crate::remote::noted_down() {
-        Some(down) => format!("ra-jit, remote down: {down}"),
-        None => "ra-jit".to_owned(),
+        Some(down) => format!("blaze, remote down: {down}"),
+        None => "blaze".to_owned(),
     }
 }
 
@@ -259,7 +267,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let finished = |profile: &str| {
         let took = started.elapsed().as_secs_f64();
-        let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", ra_jit_tag());
+        let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", blaze_tag());
         say::status(asked.flags.quiet, "Finished", &finished);
         messages::passed(format);
     };
@@ -296,7 +304,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
             Some(daemon::Reply::Checked { errors: None }) => {}
             Some(daemon::Reply::Checked { errors: Some(errors) }) => said.push(errors),
             Some(daemon::Reply::Cold { reason }) => {
-                eprintln!("error: ra-jit could not check the workspace: {reason}");
+                eprintln!("error: blaze could not check the workspace: {reason}");
                 return Ok(FAILED);
             }
             reply => anyhow::bail!("the daemon answered a check with {reply:?}"),
@@ -384,7 +392,7 @@ pub(super) fn built(checkout: &Checkout) -> Result<Vec<Result<(), String>>, NotB
             Ok(_) => Ok(Ok(())),
             Err(NotBuilt::Error(said)) => Err(NotBuilt::Error(said)),
             Err(NotBuilt::Failed(why)) => {
-                Ok(Err(format!("ra-jit did not build {}: {why}", program.binary.display())))
+                Ok(Err(format!("blaze did not build {}: {why}", program.binary.display())))
             }
             Err(NotBuilt::Cargos(why)) => Ok(Err(why)),
         })
@@ -451,7 +459,7 @@ fn store_status() -> String {
         Ok(None) => "no limit".to_owned(),
         Err(why) => why,
     };
-    format!("store: {} MB, {most} (`ra-jit cache gc` collects it), {}", held >> 20, dir.display())
+    format!("store: {} MB, {most} (`blaze cache gc` collects it), {}", held >> 20, dir.display())
 }
 
 /// `cargo ra-jit status`: the daemon, its workers, the store, and how the builds of each
@@ -492,7 +500,7 @@ fn status() -> anyhow::Result<i32> {
         Some(Reply::Restart { version }) => {
             let _ = writeln!(
                 said,
-                "daemon: another build of ra-jit, version {version}; the next build replaces it"
+                "daemon: another build of blaze, version {version}; the next build replaces it"
             );
         }
         _ => said.push_str("daemon: not running\n"),

@@ -9,11 +9,14 @@ the merge gate and the release train, and the train's verdict queues it or says 
     answers FILE...         merge answers.py --write's rustc.json of each host into the tree's
     pr                      commit the answers, push, open or update the pull request, start
                             the train on BRANCH and on BASE, the main commit BRANCH is on
+    base-run RUN            outputs run, sha: BASE's train that the train run RUN of BRANCH is
+                            compared with, waited for; the std count's base build is its
     verdict RUN STD.json    the train run RUN of BRANCH and the std count: no job or harness
                             red that is green on BASE's train (main's own are cancelled by the
                             next merge more often than not), and the std unit refusing no more
-                            than main's: queue the pull request; else comment and open or
-                            update the issue
+                            than main's: queue the pull request; red on the first attempt:
+                            run the failed jobs again; else comment and open or update the
+                            issue
     blocked FILE [--date D] open or update the issue with what FILE says failed
 
 git pushes with the checkout's token, RA_JIT_BOT_TOKEN, since a push with GITHUB_TOKEN starts no
@@ -41,6 +44,8 @@ TITLED = re.compile(r"^Toolchain bump to (\d{4}-\d{2}-\d{2}) is blocked$")
 GATHERERS = {"train", "train issue", "release"}
 NOT_BLOCKING = ("nix / ", "linux x64 / bench")
 FAILED = {"failure", "cancelled", "timed_out"}
+# Attempts of the bump's train before red that main does not have blocks it.
+ATTEMPTS = 2
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -315,6 +320,15 @@ def base_train(train, wait=datetime.timedelta(minutes=120)):
     return main_train(train["workflow_id"]), f"main's newest finished train (main's {on[:10]} has none)"
 
 
+def base_run(run_id):
+    """Outputs run and sha of the train the bump's train RUN is compared with (`base_train`)."""
+    base, which = base_train(json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}")))
+    if not base:
+        raise Failed("no train of main to compare with")
+    print(f"compared with {which}: {base['html_url']}")
+    output(run=base["id"], sha=base["head_sha"])
+
+
 def verdict(run_id, std_path):
     train = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
     # The verdict runs main's checkout: the bump's pin is read at the train's commit.
@@ -356,6 +370,14 @@ def verdict(run_id, std_path):
     if already:
         lines += ["", "Red here and on main too (not counted against the bump):", *already]
     body = "\n".join(lines)
+    attempt = train.get("run_attempt", 1)
+    # A harness that fails one run in ten (a timing, a port) would otherwise block a day's bump:
+    # the red jobs run again, and the verdict of that attempt decides.
+    if new and attempt < ATTEMPTS and subprocess.run(["gh", "run", "rerun", str(run_id), "-R", REPO, "--failed"]).returncode == 0:
+        gh("pr", "comment", str(pr["number"]), "-R", REPO, "--body",
+           f"**Red here and green on main: running the failed jobs again** (attempt {attempt + 1} "
+           f"of {ATTEMPTS}), and that attempt decides.\n\n{body}")
+        return
     if new or std_worse:
         gh("pr", "comment", str(pr["number"]), "-R", REPO, "--body", f"**The bump is blocked.**\n\n{body}")
         blocked(date, f"The bump {pr['url']} ({name}) is red.\n\n{body}")
@@ -372,6 +394,7 @@ def main():
     sub.add_parser("prepare").add_argument("--date")
     sub.add_parser("answers").add_argument("files", nargs="+")
     sub.add_parser("pr")
+    sub.add_parser("base-run").add_argument("run")
     v = sub.add_parser("verdict")
     v.add_argument("run")
     v.add_argument("std", nargs="?")
@@ -386,6 +409,8 @@ def main():
             answers(args.files)
         elif args.step == "pr":
             pr()
+        elif args.step == "base-run":
+            base_run(args.run)
         elif args.step == "verdict":
             verdict(args.run, args.std)
         else:

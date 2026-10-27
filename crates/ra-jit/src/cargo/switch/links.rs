@@ -32,7 +32,7 @@ pub(crate) struct Link {
 
 /// `cargo-blaze`, installed next to this ra-jit.
 fn target() -> anyhow::Result<PathBuf> {
-    let this = std::env::current_exe().context("ra-jit does not know where it is installed")?;
+    let this = std::env::current_exe().context("blaze does not know where it is installed")?;
     Ok(this.with_file_name(format!("cargo-blaze{}", std::env::consts::EXE_SUFFIX)))
 }
 

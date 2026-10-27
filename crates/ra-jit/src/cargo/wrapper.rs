@@ -153,7 +153,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
         && let Err(error) = unit.record(stamp, &copies, unit.linked.then_some(line), &unit.source)
     {
         // The build is good; the daemon has no part in this crate until it is built again.
-        eprintln!("warning: ra-jit did not record `{}`: {error:#}", unit.id);
+        eprintln!("warning: blaze did not record `{}`: {error:#}", unit.id);
     }
     if plain && status.success() {
         // The program is rustc's now: the builds that had it are loaded again from this one.
@@ -216,7 +216,7 @@ fn for_load(compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::R
     let record = unit.as_record(stamp_now(), Vec::new(), None);
     let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
     let failed = |what: String, why: String| {
-        anyhow::anyhow!("ra-jit did not build {what} of `{package}` for the load: {why}")
+        anyhow::anyhow!("blaze did not build {what} of `{package}` for the load: {why}")
     };
     if unit.script {
         let dir = unit.records.join(&unit.id);
@@ -277,7 +277,7 @@ fn loaded_later() -> Result<(), String> {
     let cargo = Cargo::above()?;
     let typed = cargo.args.join(" ");
     let asked =
-        cli::of_cargo(&cargo.args).ok_or(format!("`cargo {typed}` is not a build ra-jit loads"))?;
+        cli::of_cargo(&cargo.args).ok_or(format!("`cargo {typed}` is not a build blaze loads"))?;
     if let Some(why) = asked.only_cargo() {
         return Err(why);
     }
@@ -497,7 +497,7 @@ impl Unit {
                 "metadata" => outputs.push(out_dir.join(format!("lib{stem}.rmeta"))),
                 "dep-info" => {}
                 other => {
-                    anyhow::bail!("cargo asks for `--emit={other}`, which ra-jit does not write")
+                    anyhow::bail!("cargo asks for `--emit={other}`, which blaze does not write")
                 }
             }
         }
@@ -675,7 +675,7 @@ impl Unit {
 
 /// Adds to `files` every Rust file below `dir` but those of a package nested in it (a
 /// directory with a manifest that is not `manifest`), of a hidden directory or of `target`.
-fn rust_files(
+pub(crate) fn rust_files(
     dir: &Path,
     manifest: Option<&Path>,
     files: &mut Vec<PathBuf>,

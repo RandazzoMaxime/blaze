@@ -50,6 +50,8 @@ const EMPTIED: &[&str] =
 enum Does {
     /// Looks at its paths: noted only when reads are recorded.
     Look,
+    /// Runs the program at its path: noted, as a read of it, only when reads are recorded.
+    Run,
     /// Opens its path with the flags in this argument: a write when they ask for one.
     Open(usize),
     /// Asks whether its path is there, with the mode in this argument: the test marker when
@@ -88,7 +90,7 @@ const CALLS: &[Call] = &[
     call(4, &[(None, 0, false)], Does::Look),       // stat
     call(6, &[(None, 0, false)], Does::Look),       // lstat
     call(21, &[(None, 0, false)], Does::Access(1)), // access
-    call(59, &[(None, 0, false)], Does::Look),      // execve
+    call(59, &[(None, 0, false)], Does::Run),       // execve
     call(76, &[(None, 0, true)], Does::Change),     // truncate
     call(80, &[(None, 0, false)], Does::Look),      // chdir
     call(82, &[(None, 0, true), (None, 1, true)], Does::Change), // rename
@@ -111,7 +113,7 @@ const CALLS: &[Call] = &[
     call(268, &[(Some(0), 1, true)], Does::Change), // fchmodat
     call(269, &[(Some(0), 1, false)], Does::Access(2)), // faccessat
     call(316, &[(Some(0), 1, true), (Some(2), 3, true)], Does::Change), // renameat2
-    call(322, &[(Some(0), 1, false)], Does::Look),  // execveat
+    call(322, &[(Some(0), 1, false)], Does::Run),   // execveat
     call(332, &[(Some(0), 1, false)], Does::Look),  // statx
     // openat2's flags are in a structure the filter can't read: it is always asked about.
     call(437, &[(Some(0), 1, true)], Does::Change), // openat2
@@ -140,9 +142,9 @@ const CALLS: &[Call] = &[
     call(56, &[(Some(0), 1, true)], Does::Open(2)), // openat
     call(78, &[(Some(0), 1, false)], Does::Look),  // readlinkat
     call(79, &[(Some(0), 1, false)], Does::Look),  // newfstatat
-    call(221, &[(None, 0, false)], Does::Look),    // execve
+    call(221, &[(None, 0, false)], Does::Run),     // execve
     call(276, &[(Some(0), 1, true), (Some(2), 3, true)], Does::Change), // renameat2
-    call(281, &[(Some(0), 1, false)], Does::Look), // execveat
+    call(281, &[(Some(0), 1, false)], Does::Run),  // execveat
     call(291, &[(Some(0), 1, false)], Does::Look), // statx
     // openat2's flags are in a structure the filter can't read: it is always asked about.
     call(437, &[(Some(0), 1, true)], Does::Change), // openat2
@@ -289,7 +291,7 @@ pub(super) fn run(spec: &Spec, program: Option<&[OsString]>) -> Result<i32, Stri
         let code = match sandbox(spec, uid, gid, &made, program.is_none()) {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("ra-jit: the sandbox could not be made: {error}");
+                eprintln!("blaze: the sandbox could not be made: {error}");
                 super::COULD_NOT
             }
         };
@@ -397,7 +399,7 @@ fn sandbox(
         let code = match first_process(&cwd, made, probe) {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("ra-jit: the sandbox could not be made: {error}");
+                eprintln!("blaze: the sandbox could not be made: {error}");
                 super::COULD_NOT
             }
         };
@@ -952,7 +954,7 @@ fn first_process(cwd: &CString, made: &Made<'_>, probe: bool) -> Result<i32, Str
     }
     if program == 0 {
         let error = exec(made);
-        eprintln!("ra-jit: could not run {}: {error}", made.argv[0].to_string_lossy());
+        eprintln!("blaze: could not run {}: {error}", made.argv[0].to_string_lossy());
         unsafe { libc::_exit(127) };
     }
     unsafe { libc::close(made.socket) };
@@ -1054,7 +1056,7 @@ fn filter_program(recorded: bool, reads: bool, socket: libc::c_int) -> Vec<libc:
                 vec![insn(LD_W_ABS, 0, 0, low(0)), insn(JEQ_K, 0, 1, socket as u32), allow, notify]
             }
             (true, true, _) | (true, false, Does::Change | Does::Address) => vec![notify],
-            (true, false, Does::Look) => continue,
+            (true, false, Does::Look | Does::Run) => continue,
             (true, false, Does::Open(flags)) => {
                 vec![insn(LD_W_ABS, 0, 0, low(flags)), insn(JSET_K, 0, 1, WRITES), notify, allow]
             }
@@ -1087,6 +1089,12 @@ fn install(program: &[libc::sock_filter]) -> Result<libc::c_int, String> {
         )
     };
     if listener < 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EBUSY) {
+            return Err("a seccomp filter: this process is in a sandbox already, whose seccomp \
+                        listener the kernel takes as the only one a process has; run this \
+                        outside it (a test with `unsandboxed-tests`)"
+                .to_owned());
+        }
         return Err(os("a seccomp filter"));
     }
     Ok(listener as libc::c_int)
@@ -1261,8 +1269,10 @@ fn noted(notif: &Notif, call: &Call, recorder: &mut Recorder, viewed: bool) -> O
         if writes && written && !recorder.may_write(&path) && refused_write(&seen) {
             recorder.refused_write(thread, &path);
         }
-        if recorder.reads() {
-            recorder.read(thread, &path);
+        match call.does {
+            _ if !recorder.reads() => {}
+            Does::Look | Does::Access(_) => recorder.looked(thread, &path),
+            _ => recorder.read(thread, &path),
         }
     }
     None

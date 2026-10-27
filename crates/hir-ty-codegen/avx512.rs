@@ -1,13 +1,16 @@
-//! x86's AVX-512 intrinsics of LLVM that `core::arch` calls (`llvm.x86.avx512.*`, and the
-//! VNNI ones of AVX, `llvm.x86.avx2.vpdp*`): the masked conversions, compares, estimates,
-//! truncations, compressions and dot products. LLVM defines each as the instruction it selects
-//! for it, so that instruction is the lowering that agrees with it in every lane: in how it
-//! rounds, saturates and treats a NaN, a denormal or a lane the mask leaves alone, and in the
-//! reciprocal estimates, whose tables only the hardware has. [`lower`] says which instruction an
-//! intrinsic is; the code generator calls it as a function of its own (`asm::avx512_function`)
-//! on registers loaded from where its operands are: argument `i` into `zmm{i+1}` (`ymm`, `xmm`
-//! by its size), `k{i+1}` for a mask, `r11` for an address. The result is left in `zmm0`,
-//! `k0` (`k0` and `k1` for a pair of masks) or `rax`.
+//! x86's AVX-512 intrinsics of LLVM that `core::arch` calls (`llvm.x86.avx512.*`, those of
+//! AVX512-FP16 and AVX512-BF16, `llvm.x86.avx512fp16.*` and `llvm.x86.avx512bf16.*`, the VNNI
+//! ones of AVX, `llvm.x86.avx2.vpdp*`, and AVX-NE-CONVERT's, `llvm.x86.vcvtne*` and
+//! `llvm.x86.vbcstne*`): the masked conversions, compares, estimates, truncations,
+//! compressions, complex products and dot products. LLVM defines each as the instruction it
+//! selects for it, so that instruction is the lowering that agrees with it in every lane: in
+//! how it rounds, saturates and treats a NaN, a denormal or a lane the mask leaves alone, and
+//! in the reciprocal estimates, whose tables only the hardware has. [`lower`] says which
+//! instruction an intrinsic is; the code generator calls it as a function of its own
+//! (`asm::avx512_function`) on registers loaded from where its operands are: argument `i` into
+//! `zmm{i+1}` (`ymm`, `xmm` by its size), `k{i+1}` for a mask, `r11` for an address, `rcx`
+//! (`ecx`) for an integer. The result is left in `zmm0`, `k0` (`k0` and `k1` for a pair of
+//! masks) or `rax`.
 //!
 //! A mask of all ones, which LLVM drops from the instruction, and a source of zeros, which it
 //! makes the `{z}` form, are kept here as a merge into that source under that mask: the same
@@ -34,6 +37,8 @@ pub(super) enum Load {
     Mask(u32),
     /// An address, into `r11`.
     Pointer,
+    /// An integer of this many bytes (4 or 8), into `ecx` or `rcx`.
+    Int(u32),
     /// Nothing: a constant that is part of the instruction.
     Immediate,
 }
@@ -162,14 +167,13 @@ fn lowered(
         (!it.pointer && matches!(it.bytes, 1 | 2 | 4 | 8)).then_some(it.bytes)
     };
     let pointer = |at: usize| args.get(at).is_some_and(|it| it.pointer).then_some(());
+    let int = |at: usize| {
+        let it = args.get(at)?;
+        (!it.pointer && matches!(it.bytes, 4 | 8)).then_some(it.bytes)
+    };
     let round = |at: usize, kind: Rounding| rounding(args.get(at).and_then(|it| it.constant), kind);
     let out = |bytes: u32| reg(bytes, 0);
     let vector_result = matches!(result, 16 | 32 | 64).then_some(result);
-    let (family, words) = words.split_first()?;
-    let (masked, words) = match words.split_first() {
-        Some((&"mask", rest)) => (true, rest),
-        _ => (false, words),
-    };
     let ok = |text: String, loads: Vec<Load>, out: Out| Some(Ok(Lowered { text, loads, out }));
     // An error of the operands, which LLVM would refuse.
     macro_rules! check {
@@ -180,6 +184,43 @@ fn lowered(
             }
         };
     }
+    let (family, words) = words.split_first()?;
+    // AVX512-FP16's complex multiply-adds of pairs of halves: the products of the first two
+    // vectors (`vfcmadd` the first by the conjugate of the second) added to the third, which
+    // the result is, under the mask of the fourth, the other lanes the third's (`mask`) or
+    // zeros (`maskz`); rounded as a fifth says where there is one. `csh` is of the low pair,
+    // the others the first vector's.
+    if *family == "avx512fp16"
+        && let &[how @ ("mask" | "maskz"), op @ ("vfmadd" | "vfcmadd"), lanes @ ("cph" | "csh")] =
+            words
+    {
+        let (a, b, c, k, result) = (vector(0)?, vector(1)?, vector(2)?, mask(3)?, vector_result?);
+        let scalar = lanes == "csh";
+        if a != result || b != result || c != result || (scalar && result != 16) {
+            return None;
+        }
+        let rounding = match args.len() {
+            4 if !scalar => String::new(),
+            5 if scalar || width == Some(64) => check!(round(4, Rounding::Round)),
+            _ => return None,
+        };
+        let zeros = if how == "maskz" { " {z}" } else { "" };
+        let text = format!(
+            "vmovaps {0}, {3}\n{op}c{1} {0} {{k4}}{zeros}, {2}, {4}{rounding}",
+            out(result),
+            &lanes[1..],
+            arg(a, 0),
+            arg(c, 2),
+            arg(b, 1),
+        );
+        let mut loads = vec![Load::Vector(a), Load::Vector(b), Load::Vector(c), Load::Mask(k)];
+        loads.extend((args.len() == 5).then_some(Load::Immediate));
+        return ok(text, loads, Out::Vector(result));
+    }
+    let (masked, words) = match words.split_first() {
+        Some((&"mask", rest)) => (true, rest),
+        _ => (false, words),
+    };
     match (*family, masked, words, args.len()) {
         // Each lane of the mask where the two compare as the predicate says, under the mask of
         // the fourth operand.
@@ -204,6 +245,116 @@ fn lowered(
                 Load::Immediate,
             ];
             ok(text, loads, Out::Mask(k))
+        }
+        // Whether the low halves compare as the predicate says, as 0 or 1, with whether to
+        // suppress exceptions: LLVM compares into a mask register and moves it out, the bits
+        // above it zero.
+        ("avx512fp16", false, &["vcomi", "sh"], 4) => {
+            if vector(0)? != 16 || vector(1)? != 16 || result != 4 {
+                return None;
+            }
+            let predicate = match args[2].constant {
+                Some(it @ 0..32) => it,
+                Some(it) => return Some(Err(format!("of predicate {it}"))),
+                None => return Some(Err("of a predicate that is not a constant".to_owned())),
+            };
+            let sae = check!(round(3, Rounding::Sae));
+            let text = format!("vcmpsh k0, xmm1, xmm2{sae}, {predicate}\nkmovw eax, k0");
+            let loads = vec![Load::Vector(16), Load::Vector(16), Load::Immediate, Load::Immediate];
+            ok(text, loads, Out::Int(4))
+        }
+        // An integer of 32 or 64 bits (`si64`), signed or not (`usi`), to the low half, the
+        // others the first vector's, rounded as the third operand says.
+        (
+            "avx512fp16",
+            false,
+            &[op @ ("vcvtsi2sh" | "vcvtusi2sh" | "vcvtsi642sh" | "vcvtusi642sh")],
+            3,
+        ) => {
+            let (a, bytes) = (vector(0)?, int(1)?);
+            if a != 16 || result != 16 || bytes != if op.contains("64") { 8 } else { 4 } {
+                return None;
+            }
+            let rounding = check!(round(2, Rounding::Round));
+            let from = if bytes == 8 { "rcx" } else { "ecx" };
+            // Intel's syntax has the rounding before the integer register.
+            let text = format!("{} xmm0, xmm1{rounding}, {from}", op.replace("64", ""));
+            ok(text, vec![Load::Vector(a), Load::Int(bytes), Load::Immediate], Out::Vector(16))
+        }
+        // Pairs of single floats to bfloat16s, rounded to nearest even: those of the second
+        // vector in the low half, the first's in the high one.
+        ("avx512bf16", false, &["cvtne2ps2bf16"], 2) => {
+            let (a, result) = (vector(0)?, vector_result?);
+            if vector(1)? != a || result != a {
+                return None;
+            }
+            let text = format!("vcvtne2ps2bf16 {}, {}, {}", out(result), arg(a, 0), arg(a, 1));
+            ok(text, vec![Load::Vector(a), Load::Vector(a)], Out::Vector(result))
+        }
+        // Single floats to bfloat16s, rounded to nearest even, in a vector of half the size.
+        // AVX-NE-CONVERT has the instruction too, in an encoding of its own, so where the
+        // function has that as well LLVM's choice is not known here.
+        ("avx512bf16", false, &["cvtneps2bf16"], 1) => {
+            let a = vector(0)?;
+            if a < 32 || result != a / 2 {
+                return None;
+            }
+            if features.contains(&"avxneconvert") {
+                return Some(Err("in a function with AVX-NE-CONVERT too".to_owned()));
+            }
+            let text = format!("{{evex}} vcvtneps2bf16 {}, {}", out(result), arg(a, 0));
+            ok(text, vec![Load::Vector(a)], Out::Vector(result))
+        }
+        // The same of four, merged into the second operand under the mask of the third.
+        ("avx512bf16", true, &["cvtneps2bf16"], 3) => {
+            let (a, src, k) = (vector(0)?, vector(1)?, mask(2)?);
+            if a != 16 || src != 16 || result != 16 {
+                return None;
+            }
+            let text = "vmovaps xmm0, xmm2\nvcvtneps2bf16 xmm0 {k3}, xmm1".to_owned();
+            ok(text, vec![Load::Vector(a), Load::Vector(src), Load::Mask(k)], Out::Vector(16))
+        }
+        // The sum of each single float of the first vector and the products of the two pairs
+        // of bfloat16s of the other two at it.
+        ("avx512bf16", false, &["dpbf16ps"], 3) => {
+            let (src, a, b, result) = (vector(0)?, vector(1)?, vector(2)?, vector_result?);
+            if src != result || a != result || b != result {
+                return None;
+            }
+            let text = format!(
+                "vmovaps {0}, {1}\nvdpbf16ps {0}, {2}, {3}",
+                out(result),
+                arg(src, 0),
+                arg(a, 1),
+                arg(b, 2),
+            );
+            ok(text, vec![Load::Vector(src), Load::Vector(a), Load::Vector(b)], Out::Vector(result))
+        }
+        // AVX-NE-CONVERT's, one word each, `128` or `256` bits of result: a bfloat16 or a
+        // half at an address made a single float in every lane (`vbcstne`), those at the even
+        // (`vcvtnee`) or odd (`vcvtneo`) places of the vector at an address made single floats,
+        // or single floats made bfloat16s rounded to nearest even. LLVM may encode the last by
+        // AVX512-BF16's instruction where the function has that too.
+        (name, false, &[], 1) if let Some((op, bits)) = no_exceptions_convert(name) => {
+            let bytes = bits / 8;
+            if op == "vcvtneps2bf16" {
+                let a = vector(0)?;
+                if a != bytes || result != 16 {
+                    return None;
+                }
+                if features.contains(&"avx512bf16") {
+                    return Some(Err("in a function with AVX512-BF16 too".to_owned()));
+                }
+                let text = format!("{{vex}} vcvtneps2bf16 xmm0, {}", arg(a, 0));
+                return ok(text, vec![Load::Vector(a)], Out::Vector(16));
+            }
+            pointer(0)?;
+            if result != bytes {
+                return None;
+            }
+            let read = if op.starts_with("vbcst") { "word" } else { memory(bytes)? };
+            let text = format!("{op} {}, {read} ptr [r11]", out(result));
+            ok(text, vec![Load::Pointer], Out::Vector(result))
         }
         // Of the first vector, merged into the second under the mask of the third, rounded as
         // a fourth says where there is one (the 512-bit forms).
@@ -259,7 +410,9 @@ fn lowered(
         // Lane by lane of two vectors, or (`psll` and the other shifts) of a vector by the
         // count in the low 64 bits of the second; `max` and `min` with whether to suppress
         // exceptions.
-        ("avx512", false, _, 2 | 3) if let Some(op) = lanewise(words, args.len()) => {
+        ("avx512" | "avx512fp16", false, _, 2 | 3)
+            if let Some(op) = lanewise(words, args.len()) =>
+        {
             let (a, b, result) = (vector(0)?, vector(1)?, vector_result?);
             let sae = match args.len() {
                 3 => check!(round(2, Rounding::Sae)),
@@ -285,19 +438,23 @@ fn lowered(
             let text = format!("vpconflict{lanes} {}, {}", out(result), arg(a, 0));
             ok(text, vec![Load::Vector(a)], Out::Vector(result))
         }
-        // 64-bit integers to floats, rounded as the second operand says: in any direction at
-        // 512 bits, only the current one below.
+        // 64-bit integers to floats, and integers of 16, 32 or 64 bits to halves, rounded as
+        // the second operand says: in any direction at 512 bits, only the current one below.
         ("avx512", false, &[op @ ("sitofp" | "uitofp"), "round", to, from], 2) => {
             let (a, result) = (vector(0)?, vector_result?);
             let split = ['f', 'i'];
-            let ((count, to_bits), (from_count, "64")) =
-                (to.split_once(split)?, from.split_once(split)?)
-            else {
-                return None;
-            };
+            let ((count, to_bits), (from_count, from_bits)) =
+                (to.split_once(split)?, from.split_once(split)?);
             let float = match to_bits {
+                "16" if to.contains('f') => "ph",
                 "32" if to.contains('f') => "ps",
                 "64" if to.contains('f') => "pd",
+                _ => return None,
+            };
+            let int = match (from_bits, float) {
+                ("64", _) => "qq",
+                ("32", "ph") => "dq",
+                ("16", "ph") => "w",
                 _ => return None,
             };
             if count != from_count || !from.contains('i') {
@@ -308,7 +465,8 @@ fn lowered(
                 return Some(Err("of a rounding below 512 bits".to_owned()));
             }
             let unsigned = if op == "uitofp" { "u" } else { "" };
-            let text = format!("vcvt{unsigned}qq2{float} {}, {}{rounding}", out(result), arg(a, 0));
+            let text =
+                format!("vcvt{unsigned}{int}2{float} {}, {}{rounding}", out(result), arg(a, 0));
             ok(text, vec![Load::Vector(a), Load::Immediate], Out::Vector(result))
         }
         // The sum of each 32-bit lane of the first vector and the products of the bytes
@@ -346,7 +504,9 @@ fn lowered(
         }
         // The low lane to an integer of 32 or 64 bits, rounded as the second operand says
         // (`cvtt` toward zero, with whether to suppress exceptions).
-        ("avx512", false, &[op], 2) if op.starts_with("vcvts") || op.starts_with("cvtts") => {
+        ("avx512" | "avx512fp16", false, &[op], 2)
+            if op.starts_with("vcvts") || op.starts_with("cvtts") || op.starts_with("vcvtts") =>
+        {
             let op = op.trim_start_matches('v');
             let (op, bits) = match op.strip_suffix("64") {
                 Some(op) => (op, 64),
@@ -356,7 +516,7 @@ fn lowered(
                 Some(of) => (Rounding::Sae, of),
                 None => (Rounding::Round, op.strip_prefix("cvt")?),
             };
-            if !matches!(of, "ss2si" | "sd2si" | "ss2usi" | "sd2usi") {
+            if !matches!(of, "ss2si" | "sd2si" | "ss2usi" | "sd2usi" | "sh2si" | "sh2usi") {
                 return None;
             }
             let a = vector(0)?;
@@ -432,10 +592,65 @@ fn lowered(
     }
 }
 
+/// The instruction LLVM selects for the generic intrinsic `name` of `core::intrinsics::simd`
+/// on a vector of halves of `from` bytes, giving `to` bytes, in a function with the target
+/// features `features` (implied ones included): AVX512-FP16's of the lanes for the arithmetic,
+/// operands in order, and F16C's `vcvtph2ps` for `simd_cast` to single floats where the
+/// function does not have AVX512-FP16, which converts by its own. `None` for any other.
+pub(super) fn half_vector(
+    name: &str,
+    from: u32,
+    to: u32,
+    features: impl Fn(&str) -> bool,
+) -> Option<Lowered> {
+    let fp16 =
+        features("avx512fp16") && (from == 64 || matches!(from, 16 | 32) && features("avx512vl"));
+    let (text, loads) = match name {
+        "simd_add" | "simd_sub" | "simd_mul" | "simd_div" if fp16 && from == to => {
+            let op = &name["simd_".len()..];
+            let text = format!("v{op}ph {}, {}, {}", reg(to, 0), arg(from, 0), arg(from, 1));
+            (text, vec![Load::Vector(from); 2])
+        }
+        "simd_fsqrt" if fp16 && from == to => {
+            (format!("vsqrtph {}, {}", reg(to, 0), arg(from, 0)), vec![Load::Vector(from)])
+        }
+        "simd_cast"
+            if features("f16c")
+                && !features("avx512fp16")
+                && matches!((from, to), (8, 16) | (16, 32)) =>
+        {
+            (format!("vcvtph2ps {}, xmm1", reg(to, 0)), vec![Load::Vector(from)])
+        }
+        _ => return None,
+    };
+    Some(Lowered { text, loads, out: Out::Vector(to) })
+}
+
+/// The instruction of an AVX-NE-CONVERT intrinsic named `name` (`vcvtneebf162ps128`), and the
+/// bits of its result.
+fn no_exceptions_convert(name: &str) -> Option<(&str, u32)> {
+    let (op, bits) = match name.split_at_checked(name.len().checked_sub(3)?)? {
+        (op, "128") => (op, 128),
+        (op, "256") => (op, 256),
+        _ => return None,
+    };
+    let known = [
+        "vbcstnebf162ps",
+        "vbcstnesh2ps",
+        "vcvtneebf162ps",
+        "vcvtneeph2ps",
+        "vcvtneobf162ps",
+        "vcvtneoph2ps",
+        "vcvtneps2bf16",
+    ];
+    known.contains(&op).then_some((op, bits))
+}
+
 /// The instruction of an intrinsic of two vectors and nothing else, of `count` operands.
 fn lanewise(words: &[&str], count: usize) -> Option<String> {
     Some(match (words, count) {
         (&[op @ ("max" | "min"), lanes @ ("ps" | "pd")], 3) => format!("v{op}{lanes}"),
+        (&[op @ ("max" | "min"), "ph"], 2 | 3) => format!("v{op}ph"),
         (&[op @ ("psll" | "psrl" | "psra"), lanes @ ("d" | "q" | "w")], 2) => {
             format!("v{op}{lanes}")
         }
@@ -449,6 +664,31 @@ fn lanewise(words: &[&str], count: usize) -> Option<String> {
 /// The instruction of an intrinsic of one vector merged into a source under a mask, and what
 /// a fourth operand says where there is one.
 fn unary(family: &str, masked: bool, words: &[&str]) -> Option<(String, Option<Rounding>)> {
+    if family == "avx512fp16" {
+        return Some(match (masked, words) {
+            // Between halves and integers or other floats: rounded as the operand says, or
+            // toward zero (`vcvtt`) and widening, which are exact, with whether to suppress
+            // exceptions.
+            (
+                true,
+                &[
+                    op @ ("vcvtph2w" | "vcvtph2uw" | "vcvtph2dq" | "vcvtph2udq" | "vcvtph2qq"
+                    | "vcvtph2uqq" | "vcvtps2phx" | "vcvtpd2ph" | "vcvtdq2ph" | "vcvtudq2ph"
+                    | "vcvtqq2ph" | "vcvtuqq2ph"),
+                ],
+            ) => (op.to_owned(), Some(Rounding::Round)),
+            (
+                true,
+                &[
+                    op @ ("vcvttph2w" | "vcvttph2uw" | "vcvttph2dq" | "vcvttph2udq" | "vcvttph2qq"
+                    | "vcvttph2uqq" | "vcvtph2psx" | "vcvtph2pd"),
+                ],
+            ) => (op.to_owned(), Some(Rounding::Sae)),
+            (true, &["getexp", "ph"]) => ("vgetexpph".to_owned(), Some(Rounding::Sae)),
+            (true, &[op @ ("rcp" | "rsqrt"), "ph"]) => (format!("v{op}ph"), None),
+            _ => return None,
+        });
+    }
     if family != "avx512" {
         return None;
     }
@@ -497,13 +737,40 @@ fn unary(family: &str, masked: bool, words: &[&str]) -> Option<(String, Option<R
 /// The instruction of an intrinsic of two vectors merged into a source under a mask, what a
 /// fifth operand says where there is one, and whether it is of the low lane alone.
 fn binary(family: &str, masked: bool, words: &[&str]) -> Option<(String, Option<Rounding>, bool)> {
-    if family != "avx512" {
-        return None;
-    }
     let words = match words.split_last() {
         Some((&"round", rest)) => rest,
         _ => words,
     };
+    if family == "avx512fp16" {
+        return Some(match (masked, words) {
+            (true, &["scalef", "ph"]) => ("vscalefph".to_owned(), Some(Rounding::Round), false),
+            (true, &[op @ ("max" | "min" | "getexp"), "sh"]) => {
+                (format!("v{op}sh"), Some(Rounding::Sae), true)
+            }
+            (true, &[op @ ("sqrt" | "scalef"), "sh"]) => {
+                (format!("v{op}sh"), Some(Rounding::Round), true)
+            }
+            (true, &[op @ ("rcp" | "rsqrt"), "sh"]) => (format!("v{op}sh"), None, true),
+            (true, &[op @ ("vcvtss2sh" | "vcvtsd2sh")]) => {
+                (op.to_owned(), Some(Rounding::Round), true)
+            }
+            (true, &[op @ ("vcvtsh2ss" | "vcvtsh2sd")]) => {
+                (op.to_owned(), Some(Rounding::Sae), true)
+            }
+            // Products of pairs of halves as complex numbers (`vfcmul` by the conjugate of
+            // the second), each pair one lane of the mask.
+            (true, &[op @ ("vfmul" | "vfcmul"), "cph"]) => {
+                (format!("{op}cph"), Some(Rounding::Round), false)
+            }
+            (true, &[op @ ("vfmul" | "vfcmul"), "csh"]) => {
+                (format!("{op}csh"), Some(Rounding::Round), true)
+            }
+            _ => return None,
+        });
+    }
+    if family != "avx512" {
+        return None;
+    }
     Some(match (masked, words) {
         (true, &["scalef", lanes @ ("ps" | "pd")]) => {
             (format!("vscalef{lanes}"), Some(Rounding::Round), false)
@@ -613,6 +880,39 @@ mod tests {
             ("x86.avx512.vp2intersect.d.512", "64 64", 4, &[]),
             ("x86.avx512.vp2intersect.q.128", "16 16", 2, &[]),
             ("x86.avx512.rcp14.ps.512", "32 32 1", 32, &[]),
+            ("x86.avx512fp16.vcomi.sh", "16 16 4=1 4=8", 4, &[]),
+            ("x86.avx512fp16.vcvtsi642sh", "16 8 4=11", 16, &[]),
+            ("x86.avx512fp16.vcvtusi2sh", "16 4 4=4", 16, &[]),
+            ("x86.avx512fp16.vcvttsh2usi32", "16 4=8", 4, &[]),
+            ("x86.avx512fp16.vcvtsh2si64", "16 4=10", 8, &[]),
+            ("x86.avx512.sitofp.round.v16f16.v16i32", "64 4=10", 32, &[]),
+            ("x86.avx512.uitofp.round.v8f16.v8i16", "16 4=4", 16, &[]),
+            ("x86.avx512.sitofp.round.v4f32.v4i32", "16 4=4", 16, &[]),
+            ("x86.avx512fp16.mask.vfmadd.cph.512", "64 64 64 2 4=9", 64, &[]),
+            ("x86.avx512fp16.maskz.vfcmadd.csh", "16 16 16 1 4=10", 16, &[]),
+            ("x86.avx512fp16.mask.vfmul.cph.256", "32 32 32 1", 32, &[]),
+            ("x86.avx512fp16.mask.vfcmul.csh", "16 16 16 1 4=8", 16, &[]),
+            ("x86.avx512fp16.max.ph.128", "16 16", 16, &[]),
+            ("x86.avx512fp16.min.ph.512", "64 64 4=8", 64, &[]),
+            ("x86.avx512fp16.mask.vcvtph2w.512", "64 64 4 4=9", 64, &[]),
+            ("x86.avx512fp16.mask.vcvttph2qq.256", "16 32 1", 32, &[]),
+            ("x86.avx512fp16.mask.vcvtpd2ph.512", "64 16 1 4=11", 16, &[]),
+            ("x86.avx512fp16.mask.vcvtph2psx.512", "32 64 2 4=8", 64, &[]),
+            ("x86.avx512fp16.mask.rsqrt.ph.256", "32 32 2", 32, &[]),
+            ("x86.avx512fp16.mask.getexp.sh", "16 16 16 1 4=8", 16, &[]),
+            ("x86.avx512fp16.mask.sqrt.sh", "16 16 16 1 4=9", 16, &[]),
+            ("x86.avx512fp16.mask.vcvtss2sh.round", "16 16 16 1 4=11", 16, &[]),
+            ("x86.avx512fp16.mask.vcvtsh2sd.round", "16 16 16 1 4=8", 16, &[]),
+            ("x86.avx512fp16.mask.scalef.ph.512", "64 64 64 4 4=10", 64, &[]),
+            ("x86.avx512bf16.cvtne2ps2bf16.256", "32 32", 32, &[]),
+            ("x86.avx512bf16.cvtneps2bf16.512", "64", 32, &[]),
+            ("x86.avx512bf16.cvtneps2bf16.256", "32", 16, &["avxneconvert"]),
+            ("x86.avx512bf16.mask.cvtneps2bf16.128", "16 16 1", 16, &[]),
+            ("x86.avx512bf16.dpbf16ps.128", "16 16 16", 16, &[]),
+            ("x86.vcvtneps2bf16256", "32", 16, &[]),
+            ("x86.vcvtneps2bf16128", "16", 16, &["avx512bf16"]),
+            ("x86.vcvtneoph2ps256", "p", 32, &[]),
+            ("x86.vbcstnebf162ps128", "p", 16, &[]),
         ]);
         let expected = "\
 x86.avx512.mask.cmp.ps.512: vcmpps k0 {k4}, zmm1, zmm2, {sae}, 1 Mask(2)
@@ -651,6 +951,39 @@ x86.avx512.vpshufbitqmb.512: vpshufbitqmb k0, zmm1, zmm2 Mask(8)
 x86.avx512.vp2intersect.d.512: vp2intersectd k0, zmm1, zmm2 Masks(2, 2)
 x86.avx512.vp2intersect.q.128: vp2intersectq k0, xmm1, xmm2 Masks(1, 1)
 x86.avx512.rcp14.ps.512: none
+x86.avx512fp16.vcomi.sh: vcmpsh k0, xmm1, xmm2, {sae}, 1; kmovw eax, k0 Int(4)
+x86.avx512fp16.vcvtsi642sh: vcvtsi2sh xmm0, xmm1, {rz-sae}, rcx Vector(16)
+x86.avx512fp16.vcvtusi2sh: vcvtusi2sh xmm0, xmm1, ecx Vector(16)
+x86.avx512fp16.vcvttsh2usi32: vcvttsh2usi eax, xmm1, {sae} Int(4)
+x86.avx512fp16.vcvtsh2si64: vcvtsh2si rax, xmm1, {ru-sae} Int(8)
+x86.avx512.sitofp.round.v16f16.v16i32: vcvtdq2ph ymm0, zmm1, {ru-sae} Vector(32)
+x86.avx512.uitofp.round.v8f16.v8i16: vcvtuw2ph xmm0, xmm1 Vector(16)
+x86.avx512.sitofp.round.v4f32.v4i32: none
+x86.avx512fp16.mask.vfmadd.cph.512: vmovaps zmm0, zmm3; vfmaddcph zmm0 {k4}, zmm1, zmm2, {rd-sae} Vector(64)
+x86.avx512fp16.maskz.vfcmadd.csh: vmovaps xmm0, xmm3; vfcmaddcsh xmm0 {k4} {z}, xmm1, xmm2, {ru-sae} Vector(16)
+x86.avx512fp16.mask.vfmul.cph.256: vmovaps ymm0, ymm3; vfmulcph ymm0 {k4}, ymm1, ymm2 Vector(32)
+x86.avx512fp16.mask.vfcmul.csh: vmovaps xmm0, xmm3; vfcmulcsh xmm0 {k4}, xmm1, xmm2, {rn-sae} Vector(16)
+x86.avx512fp16.max.ph.128: vmaxph xmm0, xmm1, xmm2 Vector(16)
+x86.avx512fp16.min.ph.512: vminph zmm0, zmm1, zmm2, {sae} Vector(64)
+x86.avx512fp16.mask.vcvtph2w.512: vmovaps zmm0, zmm2; vcvtph2w zmm0 {k3}, zmm1, {rd-sae} Vector(64)
+x86.avx512fp16.mask.vcvttph2qq.256: vmovaps ymm0, ymm2; vcvttph2qq ymm0 {k3}, xmm1 Vector(32)
+x86.avx512fp16.mask.vcvtpd2ph.512: vmovaps xmm0, xmm2; vcvtpd2ph xmm0 {k3}, zmm1, {rz-sae} Vector(16)
+x86.avx512fp16.mask.vcvtph2psx.512: vmovaps zmm0, zmm2; vcvtph2psx zmm0 {k3}, ymm1, {sae} Vector(64)
+x86.avx512fp16.mask.rsqrt.ph.256: vmovaps ymm0, ymm2; vrsqrtph ymm0 {k3}, ymm1 Vector(32)
+x86.avx512fp16.mask.getexp.sh: vmovaps xmm0, xmm3; vgetexpsh xmm0 {k4}, xmm1, xmm2, {sae} Vector(16)
+x86.avx512fp16.mask.sqrt.sh: vmovaps xmm0, xmm3; vsqrtsh xmm0 {k4}, xmm1, xmm2, {rd-sae} Vector(16)
+x86.avx512fp16.mask.vcvtss2sh.round: vmovaps xmm0, xmm3; vcvtss2sh xmm0 {k4}, xmm1, xmm2, {rz-sae} Vector(16)
+x86.avx512fp16.mask.vcvtsh2sd.round: vmovaps xmm0, xmm3; vcvtsh2sd xmm0 {k4}, xmm1, xmm2, {sae} Vector(16)
+x86.avx512fp16.mask.scalef.ph.512: vmovaps zmm0, zmm3; vscalefph zmm0 {k4}, zmm1, zmm2, {ru-sae} Vector(64)
+x86.avx512bf16.cvtne2ps2bf16.256: vcvtne2ps2bf16 ymm0, ymm1, ymm2 Vector(32)
+x86.avx512bf16.cvtneps2bf16.512: {evex} vcvtneps2bf16 ymm0, zmm1 Vector(32)
+x86.avx512bf16.cvtneps2bf16.256: `llvm.x86.avx512bf16.cvtneps2bf16.256` in a function with AVX-NE-CONVERT too
+x86.avx512bf16.mask.cvtneps2bf16.128: vmovaps xmm0, xmm2; vcvtneps2bf16 xmm0 {k3}, xmm1 Vector(16)
+x86.avx512bf16.dpbf16ps.128: vmovaps xmm0, xmm1; vdpbf16ps xmm0, xmm2, xmm3 Vector(16)
+x86.vcvtneps2bf16256: {vex} vcvtneps2bf16 xmm0, ymm1 Vector(16)
+x86.vcvtneps2bf16128: `llvm.x86.vcvtneps2bf16128` in a function with AVX512-BF16 too
+x86.vcvtneoph2ps256: vcvtneoph2ps ymm0, ymmword ptr [r11] Vector(32)
+x86.vbcstnebf162ps128: vbcstnebf162ps xmm0, word ptr [r11] Vector(16)
 ";
         assert_eq!(described, expected);
     }

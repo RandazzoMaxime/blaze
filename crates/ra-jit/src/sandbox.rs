@@ -169,8 +169,11 @@ impl Bind {
 /// What a line of a record says was reached.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Reached {
-    /// `R`: a path opened, looked at, listed, run or read as a link.
+    /// `R`: a path opened, listed or run.
     Read,
+    /// `L`: a path only looked at (`stat`, `access`, `chdir`, `readlink`): what it is, whether
+    /// it can be run, a link's text and a file's size, but not what is in it.
+    Looked,
     /// `W`: a write the sandbox refused: outside the overlays, the writable directories and
     /// the program's own empty ones.
     Write,
@@ -184,6 +187,7 @@ impl Reached {
     fn letter(self) -> char {
         match self {
             Reached::Read => 'R',
+            Reached::Looked => 'L',
             Reached::Write => 'W',
             Reached::Net => 'N',
             Reached::Incomplete => 'X',
@@ -193,6 +197,7 @@ impl Reached {
     fn of(letter: &str) -> Option<Reached> {
         Some(match letter {
             "R" => Reached::Read,
+            "L" => Reached::Looked,
             "W" => Reached::Write,
             "N" => Reached::Net,
             "X" => Reached::Incomplete,
@@ -201,7 +206,7 @@ impl Reached {
     }
 }
 
-/// A line of a record: `R`, `W`, `N` or `X`, the test, and the path, the address or why, by
+/// A line of a record: `R`, `L`, `W`, `N` or `X`, the test, and the path, the address or why, by
 /// tabs. The test is libtest's name of the one whose thread made the call, as [`MARK`] said,
 /// or empty when that is not known (another thread, a child process, the program before or
 /// after its tests): what has an empty test is taken to be every test's of the run. A record
@@ -283,7 +288,8 @@ impl Recorder {
     /// that knows the test of a call itself, not by its thread. A read is kept only when reads
     /// are recorded and it is an input, as [`Recorder::read`] keeps it.
     pub(crate) fn reached(&mut self, reached: Reached, test: String, what: &str) {
-        if reached == Reached::Read && !(self.reads && self.input(what)) {
+        let read = matches!(reached, Reached::Read | Reached::Looked);
+        if read && !(self.reads && self.input(what)) {
             return;
         }
         // A tab or a line break would end the field: what has one is not recorded, and the
@@ -348,6 +354,13 @@ impl Recorder {
     /// `thread` read `path`, made whole: recorded when reads are and it is an input.
     pub(crate) fn read(&mut self, thread: u64, path: &str) {
         self.reached(Reached::Read, self.test(thread), path);
+    }
+
+    /// `thread` looked at `path`, made whole, without opening it: recorded as [`Self::read`]
+    /// records a read.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn looked(&mut self, thread: u64, path: &str) {
+        self.reached(Reached::Looked, self.test(thread), path);
     }
 
     /// Whether a write to `path` is the program's to make.
@@ -460,7 +473,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> ! {
     std::process::exit(match backend(&spec, Some(&program)) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("ra-jit: the sandbox could not be made: {error}");
+            eprintln!("blaze: the sandbox could not be made: {error}");
             COULD_NOT
         }
     })

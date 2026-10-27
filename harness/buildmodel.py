@@ -533,7 +533,7 @@ def judge_doctests(want, got):
     if w != g or (not names and want[0] != got[0]):
         lines = [f"cargo's `{a}`, ra-jit's `{b}`" for a, b in zip(w, g) if a != b]
         return "WRONG", (lines[0] if lines else f"cargo's ends with {want[0]} after {len(w)} lines, ra-jit's with {got[0]} after {len(g)}")[:300]
-    built = re.findall(r"doctests: (\d+) built by ra-jit, (\d+) not built", got[2])
+    built = re.findall(r"doctests: (\d+) built by blaze, (\d+) not built", got[2])
     if not built:
         return "WRONG", "ra-jit did not say what it built for the doctests"
     tests = sum(l.startswith("test ") and not l.startswith("test result") for l in want[1])
