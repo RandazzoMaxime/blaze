@@ -613,6 +613,8 @@ fn main() {
     #[cfg(feature = "nightly")]
     println!("simd_lanes {}", cases::simd_lanes::run());
     #[cfg(feature = "nightly")]
+    println!("fma_nans {}", cases::fma_nans::run());
+    #[cfg(feature = "nightly")]
     println!("unsized_params {}", cases::unsized_params::run());
     #[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
     println!("soft_floats {}", cases::soft_floats::run());

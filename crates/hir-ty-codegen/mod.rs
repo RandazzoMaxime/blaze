@@ -14947,12 +14947,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if !lane.ty.is_float() {
                     unsupported!("`{name}` of integers");
                 }
+                // AArch64's LLVM makes a vector of more lanes than one `fmla z, y, x`, the
+                // factors the other way round, which decides which of two NaNs comes out; a
+                // vector of one lane is the scalar's `fmadd`, in order.
+                let swapped = self.cg.target.arch == Arch::Aarch64 && count > 1;
                 let lanes: Vec<Value> = (0..count)
                     .map(|i| {
                         let offset = (i * lane.ty.bytes() as u64) as i32;
                         let [x, y, z] =
                             [a, b, c].map(|v| self.builder.ins().load(lane.ty, MEM, v, offset));
-                        self.builder.ins().fma(x, y, z)
+                        if swapped {
+                            self.builder.ins().fma(y, x, z)
+                        } else {
+                            self.builder.ins().fma(x, y, z)
+                        }
                     })
                     .collect();
                 for (i, value) in lanes.into_iter().enumerate() {
