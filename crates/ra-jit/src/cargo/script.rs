@@ -595,13 +595,13 @@ fn take<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
 }
 
 #[cfg(unix)]
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_executable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     metadata.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
-fn is_executable(_: &std::fs::Metadata) -> bool {
+pub(crate) fn is_executable(_: &std::fs::Metadata) -> bool {
     false
 }
 

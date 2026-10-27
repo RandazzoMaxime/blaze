@@ -1,0 +1,84 @@
+# The system libraries a build script is given besides the toolchain, by crate: what
+# crate2nix's defaultCrateOverrides is to nixpkgs. Each name is a nixpkgs attribute and output
+# (`openssl.dev`) that `closure/pins.txt` pins per host. A crate not here gets the toolchain
+# and the sysroot only. `versions` is a semver requirement (all versions when left out).
+# A workspace adds or replaces entries in `build-script-libs` under
+# `[workspace.metadata.blaze.sandbox]`: `openssl-sys = ["openssl.out", "openssl.dev"]`.
+
+[openssl-sys]
+libs = ["openssl.out", "openssl.dev"]
+
+[libz-sys]
+libs = ["zlib.out", "zlib.dev", "zlib.static"]
+
+[libgit2-sys]
+libs = ["libgit2.out", "libgit2.dev", "openssl.out", "openssl.dev", "zlib.out", "zlib.dev"]
+
+[libssh2-sys]
+libs = ["libssh2.out", "libssh2.dev", "openssl.out", "openssl.dev", "zlib.out", "zlib.dev"]
+
+[curl-sys]
+libs = ["curl.out", "curl.dev", "openssl.out", "openssl.dev", "zlib.out", "zlib.dev"]
+
+[libsqlite3-sys]
+libs = ["sqlite.out", "sqlite.dev"]
+
+[zstd-sys]
+libs = ["zstd.out", "zstd.dev"]
+
+[lzma-sys]
+libs = ["xz.out", "xz.dev"]
+
+[bzip2-sys]
+libs = ["bzip2.out", "bzip2.dev"]
+
+[onig_sys]
+libs = ["oniguruma.out", "oniguruma.dev"]
+
+[alsa-sys]
+libs = ["alsa-lib.out", "alsa-lib.dev"]
+
+[libudev-sys]
+libs = ["systemd.out", "systemd.dev"]
+
+[freetype-sys]
+libs = ["freetype.out", "freetype.dev", "zlib.out", "zlib.dev", "bzip2.out", "libpng.out"]
+
+[yeslogic-fontconfig-sys]
+libs = ["fontconfig.out", "fontconfig.dev", "freetype.out", "freetype.dev"]
+
+[servo-fontconfig-sys]
+libs = ["fontconfig.out", "fontconfig.dev", "freetype.out", "freetype.dev"]
+
+[glib-sys]
+libs = ["glib.out", "glib.dev"]
+
+[gobject-sys]
+libs = ["glib.out", "glib.dev"]
+
+[gio-sys]
+libs = ["glib.out", "glib.dev"]
+
+[x11]
+libs = ["libX11.out", "libX11.dev", "xorgproto.out"]
+
+[x11-dl]
+libs = ["libX11.out", "libX11.dev", "xorgproto.out"]
+
+[xkbcommon-sys]
+libs = ["libxkbcommon.out", "libxkbcommon.dev"]
+
+[wayland-sys]
+libs = ["wayland.out", "wayland.dev"]
+
+[libdbus-sys]
+libs = ["dbus.out", "dbus.dev"]
+
+[protobuf-src]
+libs = ["cmake.out"]
+
+[wasmtime-c-api-impl]
+libs = ["cmake.out"]
+
+[aws-lc-sys]
+libs = ["cmake.out"]

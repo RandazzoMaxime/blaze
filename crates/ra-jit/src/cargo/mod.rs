@@ -10,6 +10,7 @@ mod ancestor;
 pub(crate) mod cli;
 mod client;
 mod directives;
+mod hermetic;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
