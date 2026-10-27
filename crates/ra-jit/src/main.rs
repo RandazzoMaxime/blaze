@@ -6585,6 +6585,8 @@ struct Target {
     /// The executable blaze links the program into itself, with nothing of rustc's: a build
     /// from nothing (docs/no-rustc.md, step K).
     exe: Option<PathBuf>,
+    /// `exe` is a shared library, a `cdylib` (#262).
+    shared: bool,
     /// What its link takes that rustc compiled. Code rustc instantiated for one program is in
     /// that program's own objects, so another has to be told where its copies are. Empty for
     /// the files the daemon was started with.
@@ -6603,6 +6605,7 @@ impl Target {
             link_cmd: args.link_cmd.clone(),
             splice: args.splice.clone(),
             exe: args.exe.clone(),
+            shared: args.shared,
             symbol_files: args.symbol_files.clone(),
         }
     }
@@ -6613,8 +6616,18 @@ impl Target {
 
     /// The daemon's arguments, were it started for this program.
     fn args(self, daemon: &Args, checkouts: &Checkouts) -> anyhow::Result<Args> {
-        let Target { project, krate, batch, out, patch, link_cmd, splice, exe, symbol_files } =
-            self;
+        let Target {
+            project,
+            krate,
+            batch,
+            out,
+            patch,
+            link_cmd,
+            splice,
+            exe,
+            shared,
+            symbol_files,
+        } = self;
         let project = project.unwrap_or_else(|| daemon.project.clone());
         let Parts { root: checkout, base, members, debug, lints_capped, link_args } =
             checkouts.parts(&project)?;
@@ -6640,6 +6653,7 @@ impl Target {
             link_cmd,
             splice,
             exe,
+            shared,
             symbol_files,
             rustc_binary: None,
             by_symbol: Vec::new(),
@@ -6678,6 +6692,7 @@ impl Target {
                     link_cmd,
                     splice,
                     exe,
+                    shared: false,
                     symbol_files,
                 }))
             }
@@ -6697,7 +6712,8 @@ impl Target {
 
     /// The fields after the request's name on its line, each after a tab. Empty is absent.
     fn parse(fields: &[&str]) -> Option<Target> {
-        let &[project, krate, out, patch, link_cmd, splice, exe, ref symbol_files @ ..] = fields
+        let &[project, krate, out, patch, link_cmd, splice, exe, shared, ref symbol_files @ ..] =
+            fields
         else {
             return None;
         };
@@ -6712,6 +6728,7 @@ impl Target {
             link_cmd: given(link_cmd),
             splice: given(splice).map(PathBuf::from),
             exe: given(exe).map(PathBuf::from),
+            shared: shared == "shared",
             symbol_files: symbol_files.iter().map(PathBuf::from).collect(),
         })
     }
@@ -6734,14 +6751,15 @@ impl Target {
             None => self.krate.clone(),
         };
         let mut fields = format!(
-            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.project.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             crates,
             self.out.display(),
             self.patch.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             self.link_cmd.as_deref().unwrap_or_default(),
             self.splice.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
-            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default()
+            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
+            if self.shared { "shared" } else { "" }
         );
         for file in &self.symbol_files {
             fields.push('\t');

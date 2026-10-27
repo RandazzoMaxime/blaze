@@ -106,6 +106,13 @@ pub(crate) struct Plan {
     /// `binary` linked by blaze, with nothing of rustc's (docs/no-rustc.md, step K).
     #[serde(default)]
     pub(crate) whole: bool,
+    /// Whether `binary` is a shared library, a `cdylib`, which exports the functions and
+    /// statics its crate names with `#[no_mangle]` or `#[export_name]` (#262). It is built
+    /// again on what the worker has loaded and linked again each time, not patched: a patch
+    /// spliced into it would not export a function an edit adds or the new value of an
+    /// exported static, and the splice reads no Mach-O library.
+    #[serde(default)]
+    pub(crate) shared: bool,
 }
 
 /// The library of the workspace among `records` that wrote the file a link line names. The
@@ -155,6 +162,7 @@ impl Plan {
                 .flatten(),
             stamp: unit.stamp,
             whole: false,
+            shared: false,
         };
         // rustc's object of the names the program keeps is moved to its copy, which stays when
         // the target directory is cleaned. GNU ld takes the panic runtime by it.
@@ -945,6 +953,7 @@ mod tests {
             stamp: 0,
             package: None,
             whole: false,
+            shared: false,
         };
         let response = dir.join("link.args");
         let link = LinkLine::parse(LINE).unwrap().present();
@@ -1016,6 +1025,7 @@ mod tests {
             package: None,
             stamp: 0,
             whole: false,
+            shared: false,
         };
         let response = dir.join("link.args");
         let command = LinkLine::parse(LINE)
