@@ -513,6 +513,10 @@ def project(name, spec, work, mode):
         said = wrong and re.search(r"^failures:\n(.*?)^failures:", mine.stdout, re.M | re.S)
         if said:
             print("".join(f"      {line}\n" for line in said[1].splitlines()[:60]), end="", flush=True)
+        # What ra-jit said when it failed and cargo did not: the files are gone with the work
+        # directory, and CI keeps only this.
+        elif wrong and mine.returncode != 0 and other.returncode == 0:
+            print("".join(f"      {line}\n" for line in mine.stderr.strip().splitlines()[-30:]), end="", flush=True)
 
     def runs(label):
         if ask:
