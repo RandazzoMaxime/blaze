@@ -277,7 +277,7 @@ def ra_jit(root, crates, out, *extra, env=None):
 
 
 def linked(ran, what):
-    said = re.search(r"^linked .* in (\S+), (\d+) functions in it ra-jit could not compile$",
+    said = re.search(r"^linked .* in (\S+), (\d+) functions in it blaze could not compile$",
                      ran.stderr, re.M)
     if not said:
         raise SystemExit(f"FAIL: {what}: ra-jit did not say it linked:\n{ran.stderr[-8000:]}")
@@ -381,7 +381,7 @@ def app(name, work, server):
         os.makedirs(os.path.dirname(binary), exist_ok=True)
         ran, took = ra_jit(root, [crate], os.path.join(work, f"{name}.o"), "--own-target",
                            "--exe", binary, env=env)
-        left = re.search(r"(\d+) functions in it ra-jit could not compile$", ran.stderr, re.M)
+        left = re.search(r"(\d+) functions in it blaze could not compile$", ran.stderr, re.M)
         ours, theirs = built_macros(own)
         # A library the store had is written with no build of it, which leaves a log.
         linked_now = {it for it in ours if glob.glob(
@@ -427,7 +427,7 @@ def app(name, work, server):
 
 def compared(stderr):
     """What `RA_JIT_PROC_MACRO_COMPARE` found, from the build's report."""
-    said = re.findall(r"compared with ra-jit's server: (\d+) calls \((\d+) derives, "
+    said = re.findall(r"compared with blaze's server: (\d+) calls \((\d+) derives, "
                       r"(\d+) attributes, (\d+) function-like\), (\d+) expanded otherwise, "
                       r"(\d+) failed by both, (\d+) not compared"
                       r"(?: \(expanded otherwise: ([^)]*)\))?(?: \(not compared: ([^)]*)\))?",

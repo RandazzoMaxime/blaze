@@ -6,7 +6,10 @@ Each check is a harness run with `RA_JIT_TARGET` set, in a process of its own, s
 target reaches everything the harness imports before it reads it:
 
   - corpus: `difftest.py corpus` for wasm32-wasip1 under wasmtime, against cargo's build;
-  - stress: `stress.py` for wasm32-wasip1, the daemon's edits on a small std program.
+  - stress: `stress.py` for wasm32-wasip1, the daemon's edits on a small std program;
+  - allrajit: `allrajit_wasm.py`, programs and libraries with nothing of rustc's (wasip1
+    programs, a wasm32-unknown-unknown cdylib and a `#![no_std]` simd128 guest), their target
+    their own.
 
 Needs the targets (`rustup target add wasm32-wasip1 wasm32-unknown-unknown`) and wasmtime on
 PATH, which the flake's `wasm` shell has (`nix develop .#wasm`). What each check printed last
@@ -29,11 +32,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CHECKS = [
     ("corpus", "wasm32-wasip1", ["difftest.py", "corpus", "--bin", "runner", "--crate", "cases"], 1800),
     ("stress", "wasm32-wasip1", ["stress.py"], 1800),
+    ("allrajit", None, ["allrajit_wasm.py"], 1800),
 ]
 
 
 def run(name, target, args, timeout):
-    env = {**os.environ, "RA_JIT_TARGET": target, "RUST_BACKTRACE": "0"}
+    env = {**os.environ, "RUST_BACKTRACE": "0"}
+    if target:
+        env["RA_JIT_TARGET"] = target
     start = time.monotonic()
     try:
         ran = subprocess.run([sys.executable, *args], cwd=HERE, env=env, stdin=subprocess.DEVNULL,
@@ -43,7 +49,7 @@ def run(name, target, args, timeout):
         status, said = None, f"{e.stdout or ''}{e.stderr or ''}\nstill running after {timeout} s"
     took = time.monotonic() - start
     verdict = "ok" if status == 0 else "FAIL"
-    print(f"{verdict:4}  {name} ({target}, {took:.0f} s)")
+    print(f"{verdict:4}  {name} ({target or 'its own targets'}, {took:.0f} s)")
     if status != 0:
         print(said[-6000:])
     else:
