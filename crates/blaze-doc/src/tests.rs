@@ -716,3 +716,19 @@ fn one_crate_of_a_name_is_documented_as_cargo_picks_it() {
     // one built for the target.
     assert_eq!(kept, [4, 3, 7, 9]);
 }
+
+#[test]
+fn a_crate_only_a_crate_left_out_depends_on_is_left_out() {
+    // 0 is asked for; 1 is the older of two crates of a name, left out, and 3 only it uses.
+    let deps = |it: u32| match it {
+        0 => vec![1, 2],
+        1 => vec![3, 4],
+        2 => vec![4, 5],
+        5 => vec![2],
+        _ => vec![],
+    };
+    let kept = [2, 3, 4, 5].into_iter().collect();
+    let mut linked: Vec<u32> = crate::still_reached(&[0], &kept, deps).into_iter().collect();
+    linked.sort();
+    assert_eq!(linked, [2, 4, 5]);
+}

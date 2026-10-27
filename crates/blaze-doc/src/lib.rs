@@ -42,7 +42,8 @@ pub struct Asked {
 
 /// The crates `cargo doc` documents for `asked`: those, and unless `no_deps` every library
 /// they depend on, directly or not, but none of the sysroot's and none only tests use. Two
-/// crates of one name keep the one asked for, else as `one_per_name` says.
+/// crates of one name keep the one asked for, else as `one_per_name` says, and a crate only
+/// one left out depends on is left out too.
 pub fn crates_to_document(
     db: &RootDatabase,
     asked: &[Asked],
@@ -95,7 +96,18 @@ pub fn crates_to_document(
         })
         .filter(|it| !names.contains(&it.name))
         .collect();
-    out.extend(one_per_name(reached).into_iter().map(|it| Documented {
+    let kept = one_per_name(reached);
+    let keep: FxHashSet<Crate> = kept.iter().map(|it| it.krate).collect();
+    let roots: Vec<Crate> = asked.iter().map(|it| it.krate).collect();
+    let linked = still_reached(&roots, &keep, |krate| {
+        krate
+            .dependencies(db)
+            .into_iter()
+            .map(|dep| dep.krate)
+            .filter(|dep| !test_only.contains(&(krate, *dep)))
+            .collect()
+    });
+    out.extend(kept.into_iter().filter(|it| linked.contains(&it.krate)).map(|it| Documented {
         warn: it.krate.origin(db).is_local(),
         krate: it.krate,
         name: it.name,
@@ -138,6 +150,26 @@ fn one_per_name<K>(reached: Vec<Reached<K>>) -> Vec<Reached<K>> {
             same.into_iter().max_by(|a, b| version_key(&a.version).cmp(&version_key(&b.version)))
         })
         .collect()
+}
+
+/// Of `kept`, those `roots` still reach through `kept` alone. cargo takes the units it leaves
+/// out of the graph with their edges, and with them what only they led to
+/// (`remove_duplicate_doc` in `src/cargo/ops/cargo_compile/mod.rs`, cargo 749d85d9fc).
+fn still_reached<K: Copy + Eq + std::hash::Hash>(
+    roots: &[K],
+    kept: &FxHashSet<K>,
+    deps: impl Fn(K) -> Vec<K>,
+) -> FxHashSet<K> {
+    let mut out = FxHashSet::default();
+    let mut stack = roots.to_vec();
+    while let Some(it) = stack.pop() {
+        for dep in deps(it) {
+            if kept.contains(&dep) && out.insert(dep) {
+                stack.push(dep);
+            }
+        }
+    }
+    out
 }
 
 /// A crate's version as semver orders it, near enough: the numbers, then a release above
