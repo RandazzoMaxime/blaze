@@ -280,7 +280,10 @@ fn doc_tests(
     let asked_in = asked.flags.manifest_path.as_ref().map_or(cwd.to_owned(), |it| cwd.join(it));
     let build = Selection { asked_in: Some(asked_in), ..asked.selection() };
     let build = serde_json::to_string(&build)?;
-    let test_args = shlex::try_join(asked.trailing.iter().map(String::as_str))?;
+    // Cargo's `-q` is the harness's too: it shows the results tersely.
+    let quiet = asked.flags.quiet.then_some("--quiet");
+    let test_args =
+        shlex::try_join(quiet.into_iter().chain(asked.trailing.iter().map(String::as_str)))?;
     for library in libraries {
         let package = &library.package;
         let target = package.targets.iter().find(|it| it.src_path.as_std_path() == library.root);
