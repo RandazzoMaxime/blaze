@@ -606,30 +606,55 @@ fn asked_where<'a>(manifest: &'a Path, selection: &'a Selection) -> (&'a Path, O
     }
 }
 
-/// The unit graphs this process was told, by what they were asked with: a load asks for its
+/// The unit graphs one load was told, by what they were asked with: a load asks for its
 /// graph once for the plan and once for its build scripts (`cargo/compile_time.rs`).
-type Told = std::sync::Mutex<FxHashMap<String, std::sync::Arc<UnitGraph>>>;
+type Told = FxHashMap<String, std::sync::Arc<UnitGraph>>;
+
+std::thread_local! {
+    static TOLD: std::cell::RefCell<Option<Told>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The load of a workspace on this thread, while it lives: the unit graphs asked for in it
+/// are made once. A load after it makes them again, as the manifests may have changed since.
+pub(crate) struct Load {
+    outer: Option<Told>,
+}
+
+impl Load {
+    pub(crate) fn start() -> Load {
+        Load { outer: TOLD.with(|it| it.replace(Some(Told::default()))) }
+    }
+}
+
+impl Drop for Load {
+    fn drop(&mut self) {
+        TOLD.with(|it| *it.borrow_mut() = self.outer.take());
+    }
+}
 
 impl UnitGraph {
     /// The units of the build `selection` names of the package of `manifest`, for what
-    /// `asked` says: what this process was told already when it asked the same.
+    /// `asked` says: what the load under way was told already when it asked the same.
     pub(crate) fn asked(
         manifest: &Path,
         selection: &Selection,
         asked: &Asked<'_>,
     ) -> anyhow::Result<std::sync::Arc<UnitGraph>> {
-        static TOLD: std::sync::OnceLock<Told> = std::sync::OnceLock::new();
         let (dir, manifest) = asked_where(manifest, selection);
         let mut vars: Vec<_> = asked.env.iter().collect();
         vars.sort();
         let cfg = format!("{:?}", asked.cfg);
         let key = serde_json::to_string(&(dir, manifest, selection, vars, asked.triple, cfg))?;
-        let told = TOLD.get_or_init(Default::default);
-        if let Some(graph) = told.lock().unwrap_or_else(|it| it.into_inner()).get(&key) {
-            return Ok(graph.clone());
+        let told = TOLD.with(|it| it.borrow().as_ref().and_then(|it| it.get(&key).cloned()));
+        if let Some(graph) = told {
+            return Ok(graph);
         }
         let graph = std::sync::Arc::new(UnitGraph::of(dir, manifest, selection, asked)?);
-        told.lock().unwrap_or_else(|it| it.into_inner()).insert(key, graph.clone());
+        TOLD.with(|it| {
+            if let Some(told) = it.borrow_mut().as_mut() {
+                told.insert(key, graph.clone());
+            }
+        });
         Ok(graph)
     }
 
