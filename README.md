@@ -37,10 +37,10 @@ blaze test    # like cargo test
 blaze build   # like cargo build
 ```
 
-The first build runs cargo, then waits a few seconds for blaze to load your project. Then change
-a function and build again: it's back in milliseconds, and the `Finished` line says `[blaze]`.
-Every other cargo command passes straight through to cargo. Where cargo is
-installed, `cargo blaze run` is the same as `blaze run`.
+The first build loads your project and compiles every crate of it, with no cargo build and no
+rustc. Then change a function and build again: it's back in milliseconds, and the `Finished` line
+says `[blaze]`. The other cargo commands (`fmt`, `clippy`, `doc`, `tree` and the rest) are blaze's
+own too, and run no cargo. Where cargo is installed, `cargo blaze run` is the same as `blaze run`.
 
 ## How fast
 
