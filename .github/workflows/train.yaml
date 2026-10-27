@@ -8,10 +8,10 @@
 #       small projects (Linux x86-64, macOS) and the larger ones (AArch64); the ripgrep bench
 #       (not blocking); and nix-live.yaml: the flake's builds, the demo and live edits on macOS
 #       (not blocking, until they have been green a while)
-#   green: when main has changes since the last release, a commit `release: vX.Y.Z` (the patch
-#       version up, a CHANGELOG.md section of what was merged) and the pgo workflow, whose pin
-#       job tags vX.Y.Z when the profiles are trained, which runs release.yaml
-#       (.github/scripts/train_release.py)
+#   green: when main has changes since the last release, a commit `release: v0.YYYYMMDD.N`
+#       (the version of today's next release, N from 0, and a CHANGELOG.md section of what was
+#       merged) and the pgo workflow, whose pin job tags v0.YYYYMMDD.N when the profiles are
+#       trained, which runs release.yaml (.github/scripts/train_release.py)
 #   red: one issue, "Release train is red", opened or added to with the jobs that failed and the
 #       commits since the last green train; the next green train closes it
 #

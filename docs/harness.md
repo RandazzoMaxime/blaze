@@ -402,13 +402,18 @@ with the `llvm` feature, hands the binary to its other jobs, and runs:
 - `nix-live.yaml`: the unit graphs, the flake's builds, the demo and live edits on macOS (not
   blocking: `soft`, until they have been green a while).
 
+Versions are dated and chosen by nobody: `0.YYYYMMDD.N`, N counting the releases of that day
+(UTC) from 0 (0.20261026.0, then 0.20261026.1), which is semver, as cargo and crates.io need.
+`blaze --version` says the commit too, `blaze 0.20261026.0 (fb82b09)`: crates/ra-jit's build.rs
+takes it from `RA_JIT_GIT_SHA` (release.yaml and the flake set it) or the checkout's HEAD.
+
 The job `train` is the train's verdict: every job but the bench and nix. When it is green and
 main has changes since the last release, the job `release` (`.github/scripts/train_release.py
-prepare`) makes one commit on main, `release: vX.Y.Z [skip ci]`: the workspace version a patch
-up, a CHANGELOG.md section with what `[Unreleased]` had and the title of each change merged
+prepare`) makes one commit on main, `release: v0.YYYYMMDD.N [skip ci]`: the workspace version
+of today's next release, a CHANGELOG.md section with what `[Unreleased]` had and the title of each change merged
 since, and Cargo.lock and `nix/units` for the new version. A release is built against PGO
 profiles of its own crates (`build_release.py --strict`), and the version is in every crate's
-hash, so the job then runs `pgo.yaml`, whose pin job tags `vX.Y.Z` on the commit that pins the
+hash, so the job then runs `pgo.yaml`, whose pin job tags `v0.YYYYMMDD.N` on the commit that pins the
 new profiles (`train_release.py tag`) and runs `release.yaml` on the tag. While a release waits
 for its profiles, the trains after it release nothing; if the pgo run fails, the next train's
 `release` job fails and says so. The last release is the newest tag `v*`, or before the first,

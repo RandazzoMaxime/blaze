@@ -4,16 +4,21 @@
     train_release.py prepare [--push]   (train.yaml, after a green train)
     train_release.py tag [--push]       (pgo.yaml, after it pinned the profiles)
 
-`prepare`: when main has commits since the last release, the workspace version one patch up, a
-CHANGELOG.md section for it (what [Unreleased] had, and the title of each change merged since
+Versions are dated, and still semver, as cargo and crates.io need: `0.YYYYMMDD.N`, N counting
+the releases of that day (UTC) from 0, so 0.20261026.0, then 0.20261026.1; the tag is
+`v0.20261026.0`, and `blaze --version` says `blaze 0.20261026.0 (fb82b09)` (crates/ra-jit's
+build.rs adds the commit).
+
+`prepare`: when main has commits since the last release, the workspace version of today's next
+release, a CHANGELOG.md section for it (what [Unreleased] had, and the title of each change merged since
 the last release), Cargo.lock and nix/units for the new version, all in one commit `release:
-vX.Y.Z [skip ci]` on main; then the pgo workflow, by dispatch. A release is built against
+v0.YYYYMMDD.N [skip ci]` on main; then the pgo workflow, by dispatch. A release is built against
 profiles trained on its own crates (`build_release.py --strict`), and the version is part of
 every crate's hash, so the tag waits for the profiles. Nothing to release when the commits
 since are the trains' and the bots' own (`fmt`, `pgo: ...`, `release: ...`).
 
 `tag`: when the workspace version is a release `prepare` made and has no tag yet, the tag
-`vX.Y.Z` on HEAD (the commit that pins its profiles), and release.yaml on that tag, by
+`v0.YYYYMMDD.N` on HEAD (the commit that pins its profiles), and release.yaml on that tag, by
 dispatch: a tag made with the workflow's own token starts no workflow.
 
 While a release waits for its profiles, `prepare` does nothing new: it says so, and fails when
@@ -61,6 +66,13 @@ def workspace_version():
 
 def key(version):
     return tuple(int(n) for n in version.split("."))
+
+
+def next_version(tags, today):
+    """`0.YYYYMMDD.N` for the next release of `today` (a date), given the tags there are."""
+    day = today.strftime("%Y%m%d")
+    taken = [int(m[1]) for t in tags if (m := re.fullmatch(rf"v0\.{day}\.(\d+)", t))]
+    return f"0.{day}.{max(taken) + 1 if taken else 0}"
 
 
 async def state():
@@ -167,9 +179,10 @@ async def prepare(args):
     if not titles:
         print(f"nothing to release: no change since {base} but the bots' own", flush=True)
         return [f"nothing to release since {base}"]
-    major, minor, patch = key(version)
-    new = f"{major}.{minor}.{patch + 1}"
-    today = datetime.datetime.now(datetime.UTC).date().isoformat()
+    now = datetime.datetime.now(datetime.UTC).date()
+    tags = (await run("git", "tag", "-l", "v*", step="the release tags")).split()
+    new = next_version(tags, now)
+    today = now.isoformat()
 
     manifest = ROOT / "Cargo.toml"
     text = manifest.read_text()

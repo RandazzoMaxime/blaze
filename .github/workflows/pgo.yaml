@@ -97,7 +97,7 @@ jobs:
             sleep 15
           done
           exit 1
-      # A release the train made (`release: vX.Y.Z` on main) waits for profiles of its own crates:
+      # A release the train made (`release: v0.YYYYMMDD.N` on main) waits for profiles of its own crates:
       # these are they, so it is tagged here, on the commit that pins them, and release.yaml runs
       # on the tag (.github/scripts/train_release.py).
       - name: Tag a release that waits for these profiles
