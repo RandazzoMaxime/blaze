@@ -530,6 +530,7 @@ impl Worker {
                 let output =
                     private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
                 command.envs(&config.env).env(ENDS_WITH_INPUT, "1");
+                exact_env(&mut command, &config.env);
                 command.current_dir(&checkout.root);
                 command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
                 own_group(&mut command);
@@ -801,6 +802,16 @@ struct Spare {
     log: PathBuf,
 }
 
+/// Takes away from a worker's `command` each variable [`super::cli::WORKER_ENV_EXACT`] names
+/// that its build, `env`, does not set, which it would otherwise have from the daemon.
+fn exact_env(command: &mut Command, env: &BTreeMap<String, String>) {
+    for name in super::cli::WORKER_ENV_EXACT {
+        if !env.contains_key(*name) {
+            command.env_remove(name);
+        }
+    }
+}
+
 impl Spare {
     /// Starts one with its files in `dir`.
     fn start(dir: &Path) -> anyhow::Result<Spare> {
@@ -897,6 +908,7 @@ impl Checker {
         let output =
             private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
         command.envs(&ahead.config.env).env(ENDS_WITH_INPUT, "1");
+        exact_env(&mut command, &ahead.config.env);
         command.current_dir(&ahead.root);
         command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
         own_group(&mut command);

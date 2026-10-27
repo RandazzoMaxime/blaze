@@ -6,7 +6,7 @@ pub(crate) mod wrapper;
 
 mod affected;
 mod ancestor;
-mod cli;
+pub(crate) mod cli;
 mod client;
 pub(crate) mod layout;
 mod messages;

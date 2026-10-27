@@ -83,6 +83,7 @@ const BUILD_ENV: &[&str] = &[
     "RA_JIT_BUILT_IN",
     "RA_JIT_LLVM_INLINE_THRESHOLD",
     "RA_JIT_OTHER_TOOLCHAIN",
+    super::own_macro::SERVER,
 ];
 
 /// The variables a worker is started with: the ones that pick its toolchain and its backend,
@@ -105,7 +106,14 @@ const WORKER_ENV: &[&str] = &[
     "RA_JIT_BUILT_IN",
     "RA_JIT_LLVM_INLINE_THRESHOLD",
     "RA_JIT_RUSTC_BASE",
+    super::own_macro::SERVER,
 ];
+
+/// The variables of [`WORKER_ENV`] a worker has only as its build has them: unset there, they
+/// are unset for the worker too, and not the daemon's. Which proc-macro server a load uses
+/// ([`super::own_macro::SERVER`]) is the build's, read when it asks, never the one the daemon
+/// was started with (#460).
+pub(crate) const WORKER_ENV_EXACT: &[&str] = &[super::own_macro::SERVER];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Subcommand {
