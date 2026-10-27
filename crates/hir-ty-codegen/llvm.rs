@@ -910,11 +910,6 @@ impl Optimization {
     }
 }
 
-/// The target as LLVM knows it, one per thread and level: making one costs more than a
-/// small function does. The context the modules are made in is kept with them, as a
-/// machine holds on to things of the last context it compiled a module of: the instruction
-/// selector of AArch64 keeps the source location of the last instruction it saw, and lets
-/// go of it at the next function, by when a context of that one module would be gone.
 thread_local! {
     /// The errors LLVM diagnosed in the context of this thread's [`Machine`] since it was
     /// last asked to work.
@@ -956,6 +951,11 @@ fn diagnosed() -> Context {
     context
 }
 
+/// The target as LLVM knows it, one per thread and level: making one costs more than a
+/// small function does. The context the modules are made in is kept with them, as a
+/// machine holds on to things of the last context it compiled a module of: the instruction
+/// selector of AArch64 keeps the source location of the last instruction it saw, and lets
+/// go of it at the next function, by when a context of that one module would be gone.
 #[derive(Default)]
 struct Machine {
     // Before the context, which has to outlive them.
