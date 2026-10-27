@@ -330,11 +330,9 @@ pub(super) fn region_liveness<'db>(
     dropped.sort_by_key(|&local| {
         (drop_live[local].iter().map(|point| rank[point]).min().unwrap_or(usize::MAX), local)
     });
-    let mut cache = FxHashMap::default();
+    let mut components = DropComponents::new(ctx, regions);
     for local in dropped {
-        let mut rvs = Vec::new();
-        drop_components(ctx, regions, regions.local_tys[local], &mut rvs, &mut cache, 0);
-        for &rv in rvs.iter() {
+        for &rv in components.of(regions.local_tys[local]) {
             if rv < count {
                 values[rv].union(&drop_live[local]);
             }
@@ -468,42 +466,105 @@ impl InitAtExit {
     }
 }
 
-/// The regions dropping a value of type `ty` may use: rustc's dropck outlives constraints.
-fn drop_components<'db>(
-    ctx: &Ctx<'_, 'db>,
-    regions: &Regions<'db>,
-    ty: Ty<'db>,
-    out: &mut Vec<Rv>,
-    cache: &mut FxHashMap<Ty<'db>, Vec<Rv>>,
-    depth: usize,
-) {
-    if depth > 12 {
-        return;
+/// The regions dropping a value of a type may use: rustc's dropck outlives constraints, found
+/// over the graph of the types dropping it drops. A recursive type and the types it holds
+/// that hold it again are one strongly connected component of that graph with one answer, so
+/// each type is expanded once, as rustc's dropck keeps a set of the types it has seen; walking
+/// the tree of drops instead is exponential in a type like `Value(Vec<Value>, Box<Value>)`.
+struct DropComponents<'c, 'a, 'db> {
+    ctx: &'c Ctx<'a, 'db>,
+    regions: &'c Regions<'db>,
+    done: FxHashMap<Ty<'db>, Vec<Rv>>,
+    /// Tarjan's: each type on the stack, its number in the walk, and its place on the stack.
+    open: FxHashMap<Ty<'db>, (usize, usize)>,
+    stack: Vec<(Ty<'db>, Vec<Rv>)>,
+    next: usize,
+}
+
+/// How deep in the walk a type stops being expanded, which bounds types that grow as they
+/// recurse, `struct S<T>(Option<Box<S<(T, T)>>>)`.
+const DROP_DEPTH: usize = 12;
+
+impl<'c, 'a, 'db> DropComponents<'c, 'a, 'db> {
+    fn new(ctx: &'c Ctx<'a, 'db>, regions: &'c Regions<'db>) -> Self {
+        DropComponents {
+            ctx,
+            regions,
+            done: FxHashMap::default(),
+            open: FxHashMap::default(),
+            stack: Vec::new(),
+            next: 0,
+        }
     }
-    if let Some(it) = cache.get(&ty) {
-        out.extend_from_slice(it);
-        return;
+
+    fn of(&mut self, ty: Ty<'db>) -> &[Rv] {
+        self.visit(ty, 0);
+        self.done.get(&ty).map_or(&[], |it| it.as_slice())
     }
-    let mut found = Vec::new();
-    match ty.kind() {
-        // Dropping a `ManuallyDrop` drops nothing.
-        TyKind::Adt(def, _) if def.is_manually_drop() => (),
-        TyKind::Adt(def, args) => {
-            let adt = def.def_id();
-            if def.is_box() || def.is_phantom_data() {
-                if let Some(GenericArgKind::Type(inner)) = args.iter().next().map(|it| it.kind()) {
-                    drop_components(ctx, regions, inner, &mut found, cache, depth + 1);
+
+    /// Walks `ty`: `Some(low)`, the lowest number it reaches, while its component is open.
+    fn visit(&mut self, ty: Ty<'db>, depth: usize) -> Option<usize> {
+        if depth > DROP_DEPTH || self.done.contains_key(&ty) {
+            return None;
+        }
+        if let Some(&(number, _)) = self.open.get(&ty) {
+            return Some(number);
+        }
+        let number = self.next;
+        self.next += 1;
+        let at = self.stack.len();
+        self.open.insert(ty, (number, at));
+        self.stack.push((ty, Vec::new()));
+        let mut found = Vec::new();
+        let mut children = Vec::new();
+        self.expand(ty, &mut found, &mut children);
+        let mut low = number;
+        for child in children {
+            match self.visit(child, depth + 1) {
+                Some(it) => low = low.min(it),
+                None => found.extend(self.done.get(&child).into_iter().flatten()),
+            }
+        }
+        if low < number {
+            self.stack[at].1 = found;
+            return Some(low);
+        }
+        let members: Vec<_> = self.stack.drain(at..).collect();
+        for (_, theirs) in &members {
+            found.extend_from_slice(theirs);
+        }
+        found.sort_unstable();
+        found.dedup();
+        for (member, _) in members {
+            self.open.remove(&member);
+            self.done.insert(member, found.clone());
+        }
+        None
+    }
+
+    /// The regions dropping a `ty` uses itself, and the types it drops.
+    fn expand(&self, ty: Ty<'db>, found: &mut Vec<Rv>, children: &mut Vec<Ty<'db>>) {
+        let ctx = self.ctx;
+        match ty.kind() {
+            // Dropping a `ManuallyDrop` drops nothing.
+            TyKind::Adt(def, _) if def.is_manually_drop() => (),
+            TyKind::Adt(def, args) => {
+                let adt = def.def_id();
+                if def.is_box() || def.is_phantom_data() {
+                    if let Some(GenericArgKind::Type(inner)) =
+                        args.iter().next().map(|it| it.kind())
+                    {
+                        children.push(inner);
+                    }
+                    return;
                 }
-            } else {
                 if let Some(drop_impl) = hir_ty::drop::destructor(ctx.db, adt) {
                     let dangling = may_dangle(ctx, *drop_impl, args.len());
                     for (index, arg) in args.iter().enumerate() {
                         let dangles = dangling.get(index).copied().unwrap_or(false);
                         match arg.kind() {
-                            GenericArgKind::Type(arg) if dangles => {
-                                drop_components(ctx, regions, arg, &mut found, cache, depth + 1)
-                            }
-                            GenericArgKind::Type(arg) => regions_of(arg, &mut found),
+                            GenericArgKind::Type(arg) if dangles => children.push(arg),
+                            GenericArgKind::Type(arg) => regions_of(arg, found),
                             GenericArgKind::Lifetime(region) if !dangles => {
                                 found.extend(super::regions::rv_of(region))
                             }
@@ -523,67 +584,39 @@ fn drop_components<'db>(
                 };
                 for variant in variants {
                     for (_, field) in ctx.db.field_types(variant).iter() {
-                        let field =
-                            field.ty().instantiate(ctx.infcx.interner, args).skip_norm_wip();
-                        drop_components(ctx, regions, field, &mut found, cache, depth + 1);
+                        children
+                            .push(field.ty().instantiate(ctx.infcx.interner, args).skip_norm_wip());
                     }
                 }
             }
-        }
-        TyKind::Array(inner, _) | TyKind::Slice(inner) => {
-            drop_components(ctx, regions, inner, &mut found, cache, depth + 1)
-        }
-        TyKind::Tuple(tys) => {
-            for it in tys.iter() {
-                drop_components(ctx, regions, it, &mut found, cache, depth + 1);
+            TyKind::Array(inner, _) | TyKind::Slice(inner) => children.push(inner),
+            TyKind::Tuple(tys) => children.extend(tys.iter()),
+            TyKind::Closure(_, args) => children.push(args.as_closure().tupled_upvars_ty()),
+            // rustc's dropck drops what a coroutine captures too, all of it where what it keeps
+            // across an `await` needs dropping, which is not known here.
+            TyKind::CoroutineClosure(_, args) => {
+                children.push(args.as_coroutine_closure().tupled_upvars_ty())
             }
-        }
-        TyKind::Closure(_, args) => drop_components(
-            ctx,
-            regions,
-            args.as_closure().tupled_upvars_ty(),
-            &mut found,
-            cache,
-            depth + 1,
-        ),
-        // rustc's dropck drops what a coroutine captures too, all of it where what it keeps
-        // across an `await` needs dropping, which is not known here.
-        TyKind::CoroutineClosure(_, args) => drop_components(
-            ctx,
-            regions,
-            args.as_coroutine_closure().tupled_upvars_ty(),
-            &mut found,
-            cache,
-            depth + 1,
-        ),
-        TyKind::Coroutine(_, args) => drop_components(
-            ctx,
-            regions,
-            args.as_coroutine().tupled_upvars_ty(),
-            &mut found,
-            cache,
-            depth + 1,
-        ),
-        TyKind::Dynamic(..) => regions_of(ty, &mut found),
-        // A projection is what it normalizes to, `NoisyDrop<T>` of `<T as Associator>::As`;
-        // another alias holds what its bounds and captures let it, as for liveness.
-        TyKind::Alias(alias) => {
-            let normalized = match alias.kind {
-                rustc_type_ir::AliasTyKind::Projection { .. } => super::regions::normalize(ctx, ty)
-                    .filter(|it| !matches!(it.kind(), TyKind::Alias(_) | TyKind::Infer(_))),
-                _ => None,
-            };
-            match normalized {
-                Some(it) => drop_components(ctx, regions, it, &mut found, cache, depth + 1),
-                None => live_regions_of(ctx, regions, ty, &mut found),
+            TyKind::Coroutine(_, args) => children.push(args.as_coroutine().tupled_upvars_ty()),
+            TyKind::Dynamic(..) => regions_of(ty, found),
+            // A projection is what it normalizes to, `NoisyDrop<T>` of `<T as Associator>::As`;
+            // another alias holds what its bounds and captures let it, as for liveness.
+            TyKind::Alias(alias) => {
+                let normalized = match alias.kind {
+                    rustc_type_ir::AliasTyKind::Projection { .. } => {
+                        super::regions::normalize(ctx, ty)
+                            .filter(|it| !matches!(it.kind(), TyKind::Alias(_) | TyKind::Infer(_)))
+                    }
+                    _ => None,
+                };
+                match normalized {
+                    Some(it) => children.push(it),
+                    None => live_regions_of(ctx, self.regions, ty, found),
+                }
             }
+            _ => (),
         }
-        _ => (),
     }
-    found.sort_unstable();
-    found.dedup();
-    out.extend_from_slice(&found);
-    cache.insert(ty, found);
 }
 
 /// Per generic argument of the type a `Drop` impl is for, whether the impl says
