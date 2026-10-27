@@ -40,6 +40,90 @@ struct Target {
     file_names: BTreeMap<String, Option<String>>,
     /// By the host rustc runs on, whose build decides some of it.
     target_spec_json: BTreeMap<String, String>,
+    /// The `target_feature`s each feature rustc has turns on beside the target's own, with
+    /// itself: `-C target-feature=+<name>` on the nightly. One rustc warns of is not here.
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
+    /// The same of the features only LLVM names, which `target-cpu=native` turns on.
+    #[serde(default)]
+    llvm_features: BTreeMap<String, Vec<String>>,
+    /// Of each feature the target has, the features turning it off turns off: itself and
+    /// those that need it.
+    #[serde(default)]
+    features_off: BTreeMap<String, Vec<String>>,
+    /// Each CPU of `-C target-cpu`, by the index of its `target_feature`s in `cpu_features`.
+    #[serde(default)]
+    cpus: BTreeMap<String, usize>,
+    #[serde(default)]
+    cpu_features: Vec<Vec<String>>,
+    /// The cfgs besides `target_feature` a feature has: wasm's `atomics`, `target_has_threads`.
+    #[serde(default)]
+    feature_cfgs: BTreeMap<String, Vec<String>>,
+}
+
+impl Target {
+    /// The `target_feature`s of `cpu` with `features` turned on (`true`) and off in order,
+    /// starting from `have`, the target's own; `None` for a CPU or feature rustc warns of or
+    /// does not have.
+    fn tuned(
+        &self,
+        have: Vec<String>,
+        cpu: Option<(&str, Option<&str>)>,
+        features: &[(bool, &str)],
+    ) -> Option<Vec<String>> {
+        let own: Vec<String> = have.clone();
+        let mut have: std::collections::BTreeSet<String> = match cpu {
+            Some((name, _)) => {
+                self.cpu_features.get(*self.cpus.get(name)?)?.iter().cloned().collect()
+            }
+            None => have.into_iter().collect(),
+        };
+        // `target-cpu=native`: LLVM's features of the host, which name what rustc does not too.
+        let host: Vec<(bool, String)> = cpu
+            .and_then(|(_, host)| host)
+            .map(|it| {
+                it.split(',')
+                    .filter_map(|it| Some((it.starts_with('+'), it.get(1..)?.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let on = |name: &str| self.features.get(name).or_else(|| self.llvm_features.get(name));
+        let mut apply = |enable: bool, name: &str, host: bool| -> Option<()> {
+            match (enable, on(name)) {
+                (true, Some(turned)) => {
+                    have.extend(turned.iter().cloned());
+                    // The target's own features it needs, should they be off.
+                    have.extend(
+                        self.features_off
+                            .iter()
+                            .filter(|(_, off)| off.iter().any(|it| it == name))
+                            .map(|(it, _)| it.clone()),
+                    );
+                }
+                (false, _) if self.features_off.contains_key(name) => {
+                    self.features_off[name].iter().for_each(|it| _ = have.remove(it));
+                }
+                (false, Some(turned)) if !own.iter().any(|it| it == name) => {
+                    // Off with it go the features that turn it on.
+                    let needs = |other: &Vec<String>| turned.iter().all(|it| other.contains(it));
+                    if !turned.is_empty() {
+                        have.retain(|it| !self.features.get(it).is_some_and(needs));
+                    }
+                }
+                // A feature only LLVM has, of no `target_feature`, changes none of them.
+                _ if host => {}
+                _ => return None,
+            }
+            Some(())
+        };
+        for (enable, name) in &host {
+            apply(*enable, name, true)?;
+        }
+        for &(enable, name) in features {
+            apply(enable, name, false)?;
+        }
+        Some(have.into_iter().collect())
+    }
 }
 
 fn releases() -> &'static [Release] {
@@ -107,8 +191,9 @@ struct Given<'a> {
     debug_assertions: Option<bool>,
     overflow_checks: Option<bool>,
     panic: Option<&'a str>,
-    /// `-C target-feature=±crt-static`, the one target feature that implies no other.
-    crt_static: Option<bool>,
+    /// The features of `-C target-feature`, on (`true`) or off, in order.
+    features: Vec<(bool, &'a str)>,
+    target_cpu: Option<&'a str>,
     cfgs: Vec<&'a str>,
     crate_name: Option<&'a str>,
     crate_types: Vec<&'a str>,
@@ -218,14 +303,16 @@ impl<'a> Given<'a> {
                         "panic" => given.panic = Some(value?),
                         "extra-filename" => given.extra_filename = true,
                         "target-feature" => {
-                            for feature in value?.split(',') {
-                                given.crt_static = Some(match feature {
-                                    "+crt-static" => true,
-                                    "-crt-static" => false,
+                            for feature in value?.split(',').filter(|it| !it.is_empty()) {
+                                let enable = match feature.as_bytes()[0] {
+                                    b'+' => true,
+                                    b'-' => false,
                                     _ => return None,
-                                });
+                                };
+                                given.features.push((enable, &feature[1..]));
                             }
                         }
+                        "target-cpu" => given.target_cpu = Some(value?),
                         name if IGNORED_CODEGEN.contains(&name) => {}
                         _ => return None,
                     }
@@ -250,6 +337,11 @@ impl<'a> Given<'a> {
     fn debug_assertions(&self) -> bool {
         self.debug_assertions.unwrap_or(matches!(self.opt_level, None | Some("0")))
     }
+}
+
+/// The architecture of a target's tuple: what is before its first `-`.
+fn arch(tuple: &str) -> &str {
+    tuple.split('-').next().unwrap_or(tuple)
 }
 
 /// The variables rustc reads for any question, which ra-jit answers only when they are unset.
@@ -392,8 +484,40 @@ pub(super) fn answer(
                 // Whether a target respects `crt-static` is its spec's, so only asking for
                 // what it has already is answered.
                 let static_default = cfgs.iter().any(|it| it == "target_feature=\"crt-static\"");
-                if given.crt_static.is_some_and(|it| it != static_default) {
-                    return None;
+                // Only a target's own `crt-static`, asked for again, changes nothing.
+                let as_it_is = given
+                    .features
+                    .iter()
+                    .all(|&(enable, name)| name == "crt-static" && enable == static_default);
+                if given.target_cpu.is_some() || !as_it_is {
+                    // The features rustc has without unstable ones allowed are not recorded.
+                    if !nightly {
+                        return None;
+                    }
+                    let cpu = match given.target_cpu {
+                        // LLVM's host CPU, for any target of the host's architecture.
+                        Some("native") if arch(tuple) == arch(&toolchain.host) => {
+                            let (name, features) = hir_ty_codegen::host_cpu()?;
+                            Some((name, Some(features)))
+                        }
+                        Some("native") => return None,
+                        Some(name) => Some((name.to_owned(), None)),
+                        None => None,
+                    };
+                    let feature = |it: &String| {
+                        let name = it.strip_prefix("target_feature=\"")?.strip_suffix('"')?;
+                        Some(name.to_owned())
+                    };
+                    let own = cfgs.iter().filter_map(feature).collect();
+                    let cpu = cpu.as_ref().map(|(name, host)| (name.as_str(), host.as_deref()));
+                    let tuned = target.tuned(own, cpu, &given.features)?;
+                    cfgs.retain(|it| feature(it).is_none());
+                    for feature in &tuned {
+                        cfgs.extend(
+                            target.feature_cfgs.get(feature).into_iter().flatten().cloned(),
+                        );
+                    }
+                    cfgs.extend(tuned.iter().map(|it| format!("target_feature=\"{it}\"")));
                 }
                 let debug_assertions = given.debug_assertions();
                 if debug_assertions {
@@ -464,13 +588,13 @@ mod tests {
         assert!(!given.debug_assertions());
         assert!(Given::of(&["-O"]).is_some_and(|it| !it.debug_assertions()));
         assert!(Given::of(&["-C", "opt-level=0"]).is_some_and(|it| it.debug_assertions()));
-        // What may change the target's features is rustc's to answer.
-        assert!(Given::of(&["-C", "target-cpu=native", "--print", "cfg"]).is_none());
-        assert!(Given::of(&["-Ctarget-feature=+avx2", "--print", "cfg"]).is_none());
-        assert!(Given::of(&["-Ctarget-feature=-crt-static,+avx2", "--print", "cfg"]).is_none());
-        // helix's `-C target-feature=-crt-static`.
-        let given = Given::of(&["-C", "target-feature=-crt-static", "--print", "cfg"]).unwrap();
-        assert_eq!(given.crt_static, Some(false));
+        // The features and the CPU, in order, which `Target::tuned` answers from rustc's.
+        let given =
+            Given::of(&["-C", "target-cpu=x86-64-v3", "-Ctarget-feature=-crt-static,+avx2"]);
+        let given = given.unwrap();
+        assert_eq!(given.target_cpu, Some("x86-64-v3"));
+        assert_eq!(given.features, [(false, "crt-static"), (true, "avx2")]);
+        assert!(Given::of(&["-Ctarget-feature=avx2", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Z", "ub-checks", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Zthreads=8", "--print", "cfg"]).is_some());
         // cargo's `-Clinker-features=-lld` is how rustc links (rust-analyzer's `cargo rustc

@@ -114,6 +114,27 @@ pub use home::body_file;
 mod imports;
 #[cfg(feature = "llvm")]
 mod llvm;
+
+/// The CPU of this host and its features as LLVM names them (`+avx2,-avx512f,...`), what
+/// rustc's `-C target-cpu=native` is; `None` without LLVM.
+pub fn host_cpu() -> Option<(String, String)> {
+    #[cfg(feature = "llvm")]
+    {
+        use inkwell::llvm_sys::{core::LLVMDisposeMessage, target_machine as tm};
+        let taken = |message: *mut std::ffi::c_char| {
+            // SAFETY: LLVM returns a C string the caller owns and disposes of.
+            let text = unsafe { std::ffi::CStr::from_ptr(message) }.to_string_lossy().into_owned();
+            unsafe { LLVMDisposeMessage(message) };
+            text
+        };
+        // SAFETY: neither reads anything but the host's CPU.
+        let (name, features) =
+            unsafe { (taken(tm::LLVMGetHostCPUName()), taken(tm::LLVMGetHostCPUFeatures())) };
+        Some((name, features))
+    }
+    #[cfg(not(feature = "llvm"))]
+    None
+}
 mod neon;
 mod overlap;
 mod patch;
