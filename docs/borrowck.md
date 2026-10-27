@@ -126,7 +126,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   signature with no `for<'a>` has it, so its parameters' types are the `Fn` bound's arguments
   (`|z: &[i32]|` passed as `F: FnOnce(S)` takes the `S` it is called with). A variable with a
   written type is related to it as rustc's user type annotation, so an error through it is
-  blamed on the annotation. A parameter that elides one lifetime has
+  blamed on the annotation. The lifetime a return type elides is the one lifetime the
+  parameters' types write or elide, as rustc's name resolution finds them in the written
+  signature: a `'static` in a type alias's expansion (`id: Id` of `type Id = IdLt<'static>`)
+  is not counted, nor the lifetime `&dyn Trait` leaves out of its object, only what its
+  bounds write (`dyn Trait<'_> + 'a`). A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`); one that
   writes `Self` gives elision none of the impl's lifetimes (`self` of `impl Id<'_>`), and
   `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
