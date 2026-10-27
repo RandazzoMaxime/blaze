@@ -49,8 +49,8 @@ this host: each line there has the harness's measured seconds on CI (the slowest
 generated code or the build model against rustc runs on Linux x86-64 alone in the fast tier and
 everywhere in the full tier. `ci.py` packs them into parts of about 240 seconds (`PART_SECS`,
 longest first), so adding a harness adds a part rather than lengthening one; a fast harness
-with no `FAST` line is an error. Each harness runs with an `RA_JIT_HOME` of its own under
-`/tmp/rj-ci-*` (not `RA_JIT_CACHE`, which would turn the store on), and its daemon is stopped
+with no `FAST` line is an error, and so is a `FAST` or `CORE` line that names no harness. Each
+harness runs with an `RA_JIT_HOME` of its own under `/tmp/rj-ci-*` (not `RA_JIT_CACHE`, which would turn the store on), and its daemon is stopped
 afterwards, so no two harnesses of a job share a daemon or a socket (on a runner `XDG_RUNTIME_DIR` would otherwise give every
 harness `/run/user/1001/ra-jit`). `live_e2e.py` and `live_types.py` take a
 home of their own when run by hand too.
