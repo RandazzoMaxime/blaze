@@ -216,6 +216,9 @@ impl Backend {
         }
         let _span = tracing::info_span!(target: "ra_jit", "cranelift").entered();
         let start = Instant::now();
+        if let Some(frame) = recorder.frame_locals.take() {
+            super::overlap::share(&mut context.func, &frame, &mut recorder.named);
+        }
         let pairs = super::float_pair::lower(recorder, &mut context.func);
         let mut code = super::emit(context)?;
         if let Some(frame) = context.compiled_code().and_then(|it| it.buffer.frame_layout()) {
