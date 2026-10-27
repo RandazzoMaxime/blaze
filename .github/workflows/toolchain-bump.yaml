@@ -14,8 +14,9 @@
 #       merging main into the bump): the same issue, with what failed
 #
 # Fixes for what a nightly breaks are pushed to toolchain/bump by hand; the next day's run merges
-# main into the branch and moves it on from there, so they are kept. The pushes and the pull
-# request use RA_JIT_BOT_TOKEN: a pull request GITHUB_TOKEN opens starts no workflow.
+# main into the branch and moves it on from there, so they are kept. git pushes with
+# RA_JIT_BOT_TOKEN, since a push with GITHUB_TOKEN starts no workflow; gh is GITHUB_TOKEN, which
+# may open pull requests and issues where the bot's token may not.
 name: toolchain bump
 on:
   schedule:
@@ -58,7 +59,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v23
       - id: prepare
         env:
-          GH_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           DATE: ${{ inputs.date }}
         run: |
           git config user.name "github-actions[bot]"
@@ -103,6 +104,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      pull-requests: write
       actions: write
     steps:
       - uses: actions/checkout@v7
@@ -116,8 +118,7 @@ jobs:
           path: ${{ runner.temp }}/answers
           merge-multiple: true
       - env:
-          GH_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
-          TRAIN_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -134,16 +135,16 @@ jobs:
   # newest build on a push), each with its own nightly's rust-src.
   std:
     name: std refusals
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'toolchain/bump'
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'toolchain/bump' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
+      contents: read
       actions: read
+    # main's scripts and toolchain; of the bump, only its build (the train's artifact) and its pin.
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-      # The build runs with the flake's C library, as the train's borrowck job runs it.
+      # The builds run with the flake's C library, as the train's borrowck job runs them.
       - uses: ./.github/actions/toolchain
         with:
           llvm: run
@@ -156,11 +157,14 @@ jobs:
       - id: base
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ra-jit.yaml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id')
           sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .head_sha)
+          pin() { gh api "repos/$GITHUB_REPOSITORY/contents/harness/toolchain?ref=$1" --jq .content | base64 -d | tr -d '\n'; }
           echo "run=$id" >> "$GITHUB_OUTPUT"
-          echo "toolchain=$(gh api "repos/$GITHUB_REPOSITORY/contents/harness/toolchain?ref=$sha" --jq .content | base64 -d | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(pin "$sha")" >> "$GITHUB_OUTPUT"
+          echo "bump=$(pin "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8
         with:
           name: ra-jit-linux-x64
@@ -169,10 +173,11 @@ jobs:
           github-token: ${{ github.token }}
       - env:
           BASE_TOOLCHAIN: ${{ steps.base.outputs.toolchain }}
+          BUMP_TOOLCHAIN: ${{ steps.base.outputs.bump }}
         run: |
           for side in new base; do tar -xf "$RUNNER_TEMP/$side/ra-jit.tar" -C "$RUNNER_TEMP/$side"; done
-          rustup toolchain install "$BASE_TOOLCHAIN" --profile minimal -c rust-src
-          python3 harness/stdcount.py --bin "$RUNNER_TEMP/new/ra-jit" --toolchain "$(cat harness/toolchain)" \
+          for tc in "$BUMP_TOOLCHAIN" "$BASE_TOOLCHAIN"; do rustup toolchain install "$tc" --profile minimal -c rust-src; done
+          python3 harness/stdcount.py --bin "$RUNNER_TEMP/new/ra-jit" --toolchain "$BUMP_TOOLCHAIN" \
             --base "$RUNNER_TEMP/base/ra-jit" --base-toolchain "$BASE_TOOLCHAIN" --json "$RUNNER_TEMP/std.json" || true
       - uses: actions/upload-artifact@v7
         with:
@@ -183,7 +188,7 @@ jobs:
   verdict:
     name: verdict
     needs: std
-    if: always() && github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'toolchain/bump'
+    if: always() && github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'toolchain/bump' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -191,17 +196,15 @@ jobs:
       pull-requests: write
       issues: write
       actions: read
+    # main's script; the bump is read through the API.
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 0
       - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: std-refusals
           path: ${{ runner.temp }}/std
       - env:
-          GH_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.event.workflow_run.id }}
         run: python3 .github/scripts/toolchain_bump_ci.py verdict "$RUN" "$RUNNER_TEMP/std/std.json"

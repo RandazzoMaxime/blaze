@@ -15,8 +15,11 @@ the merge gate and the release train, and the train's verdict queues it or says 
                             and open or update the issue
     blocked FILE [--date D] open or update the issue with what FILE says failed
 
-GH_TOKEN pushes and opens the pull request: it has to be RA_JIT_BOT_TOKEN, since a pull request
-GITHUB_TOKEN opens starts no workflow. Python 3.11+, stdlib, git and the gh CLI.
+git pushes with the checkout's token, RA_JIT_BOT_TOKEN, since a push with GITHUB_TOKEN starts no
+workflow; gh (GH_TOKEN) is GITHUB_TOKEN, which may open and comment on pull requests and issues
+where the bot's token may not. A pull request GITHUB_TOKEN opens starts no workflow either, so it
+is opened before the bot pushes the answers, whose push runs the gate on it. Python 3.11+,
+stdlib, git and the gh CLI.
 """
 import argparse, datetime, json, os, re, subprocess, sys
 
@@ -154,7 +157,8 @@ def prepare(date):
             "harness/toolchain_bump.py, run by .github/workflows/toolchain-bump.yaml.")
     changed = run("git", "rev-parse", "HEAD").strip() != run("git", "rev-parse", base).strip()
     if changed:
-        run("git", "push", "-q", "origin", f"HEAD:refs/heads/{BRANCH}")
+        # With no bump open the branch is the workflow's alone, left by a run that stopped.
+        run("git", "push", "-q", *([] if pr else ["--force"]), "origin", f"HEAD:refs/heads/{BRANCH}")
     output(changed=str(changed).lower(), pin=now, was=was)
 
 
@@ -196,7 +200,9 @@ def pr():
     run("git", "add", ANSWERS)
     if run("git", "status", "--porcelain", ANSWERS).strip():
         run("git", "commit", "-q", "-m", f"toolchain: answers of {name} (answers.py --write on each CI host)")
-    run("git", "push", "-q", "origin", f"HEAD:refs/heads/{BRANCH}")
+    existing = open_pr()
+    if not existing and run("git", "rev-parse", "HEAD").strip() == run("git", "rev-parse", f"origin/{BRANCH}").strip():
+        run("git", "commit", "-q", "--allow-empty", "-m", f"toolchain: run the merge gate on {name}")
     main_pin = run("git", "show", "origin/main:harness/toolchain").strip()
     main_commit = re.search(r"(?m)^commit (\w+)", run("git", "show", f"origin/main:{os.path.relpath(PINS, ROOT)}")).group(1)
     title = f"toolchain: pin {name}"
@@ -214,17 +220,16 @@ def pr():
         "<date> is blocked\". Fixes for what the new nightly breaks go on this branch; the next daily run "
         "merges main into it and moves it to the newest nightly, keeping them (docs/toolchain.md).",
     ])
-    existing = open_pr()
     if existing:
         gh("pr", "edit", str(existing["number"]), "-R", REPO, "--title", title, "--body", body)
         number = existing["number"]
     else:
         url = gh("pr", "create", "-R", REPO, "--base", "main", "--head", BRANCH, "--title", title, "--body", body).strip()
         number = int(url.rsplit("/", 1)[1])
+    # The bot's push, after the pull request is open, is what runs the merge gate on it.
+    run("git", "push", "-q", "origin", f"HEAD:refs/heads/{BRANCH}")
     output(number=number)
-    train_token = os.environ.get("TRAIN_TOKEN")
-    env = dict(os.environ, GH_TOKEN=train_token) if train_token else None
-    run("gh", "workflow", "run", "train.yaml", "-R", REPO, "--ref", BRANCH, env=env)
+    gh("workflow", "run", "train.yaml", "-R", REPO, "--ref", BRANCH)
     print(f"#{number}: {title}; the train is started on {BRANCH}")
 
 
@@ -269,7 +274,9 @@ def main_train(workflow_id):
 
 def verdict(run_id, std_path):
     train = json.loads(gh("api", f"repos/{REPO}/actions/runs/{run_id}"))
-    name = pin()
+    # The verdict runs main's checkout: the bump's pin is read at the train's commit.
+    name = gh("api", f"repos/{REPO}/contents/harness/toolchain?ref={train['head_sha']}",
+              "-H", "Accept: application/vnd.github.raw").strip()
     date = name.removeprefix("nightly-")
     pr = open_pr()
     if not pr:
