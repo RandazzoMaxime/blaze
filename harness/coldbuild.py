@@ -70,26 +70,29 @@ pub fn counted(words: &str) -> BTreeMap<&str, usize> {
 }
 """,
 }
-# What blaze cannot compile yet: `f128` (docs/no-rustc.md, step G). `kbad`'s own `main` has
-# one; `kuses` reaches a library's function that has one, whose stand-in would be left in the
-# executable.
-HALVED = """#![feature(f128)]
+# What blaze cannot compile on any target: `do yeet` (`yeet_expr`), which rust-analyzer's MIR
+# lowering refuses. Not a class of no-rustc step E, whose lanes make the others compile (`f128`
+# was this until it compiled on AArch64 and x86-64). `kbad`'s own `main` reaches one; `kuses`
+# reaches a library's function that has one, whose stand-in would be left in the executable.
+HALVED = """#![feature(yeet_expr)]
 
 #[inline(never)]
-pub fn halved(x: f64) -> f64 {
-    let x: f128 = std::hint::black_box(x as f128);
-    (x / 2.0) as f64
+pub fn halved(x: f64) -> Option<f64> {
+    if std::hint::black_box(x) < 0.0 {
+        do yeet;
+    }
+    Some(x / 2.0)
 }
 """
 UNSUPPORTED = {
     "Cargo.toml": '[workspace]\nmembers = ["bad", "uses", "half"]\nresolver = "2"\n',
     "bad/Cargo.toml": '[package]\nname = "kbad"\nversion = "0.1.0"\nedition = "2021"\n',
-    "bad/src/main.rs": HALVED + 'fn main() {\n    println!("{}", halved(3.0));\n}\n',
+    "bad/src/main.rs": HALVED + 'fn main() {\n    println!("{:?}", halved(3.0));\n}\n',
     "half/Cargo.toml": '[package]\nname = "khalf"\nversion = "0.1.0"\nedition = "2021"\n',
     "half/src/lib.rs": HALVED,
     "uses/Cargo.toml": '[package]\nname = "kuses"\nversion = "0.1.0"\nedition = "2021"\n\n'
                        '[dependencies]\nkhalf = { path = "../half" }\n',
-    "uses/src/main.rs": 'fn main() {\n    println!("{}", khalf::halved(3.0));\n}\n',
+    "uses/src/main.rs": 'fn main() {\n    println!("{:?}", khalf::halved(3.0));\n}\n',
 }
 # Writable statics of the program's own crates, reached from `main`: anim's `HOME`, a `OnceLock`
 # set in the `detect` that `main` calls, which a build refused as "writable static `HOME`
@@ -302,7 +305,7 @@ def whole(root, env, check):
         ran, _ = blaze(bad, env, "build", "-p", package)
         said = ran.stdout + ran.stderr
         check(f"a program with {whose} function blaze cannot compile fails", ran.returncode == 101, said)
-        check("  ... and says which and why", "could not compile" in said and "halved" in said and "f128" in said, said)
+        check("  ... and says which and why", "could not compile" in said and "halved" in said and "yeet" in said, said)
         check("  ... with no executable and no build of cargo's",
               not os.path.exists(os.path.join(bad, "target", "debug", package)) and not cargo_built(os.path.join(bad, "target")))
 
