@@ -53,17 +53,20 @@ the standard library is part of a compiler.
 - Keep `cargo build`/`cargo test` with the project's toolchain in CI. blaze is for the edit
   loop; the project's toolchain decides.
 
-## Where it goes
+## Where it goes: no rustc
 
-1. **blaze's own build of the nightly** ([#402](https://github.com/indexable-inc/blaze/issues/402)): a snapshot of rust-lang/rust under
-   indexable-inc at the pinned commit, built by blaze's release workflow (rustc, std,
-   rust-src), so `rustc -V` names blaze's toolchain and blaze can carry the patches it needs
-   (its own proc-macro server, its symbol and layout hooks) instead of matching upstream from
-   outside.
-2. **Hosting** ([#403](https://github.com/indexable-inc/blaze/issues/403)): the builds published with blaze's releases and pinned by hash
-   as today's upstream bytes are, so the installer fetches blaze's toolchain and not
-   static.rust-lang.org's.
-3. **The bump process** ([#404](https://github.com/indexable-inc/blaze/issues/404)): a scheduled, gated move to a newer upstream nightly:
-   rebase the patches, rebuild, run the corpus and edit harnesses, then publish.
-4. Then the pieces go away as no-rustc lands: cargo, rustc with rust-lld and the proc-macro
-   server, then `rust-std`; `rust-src` stays as part of blaze's release.
+blaze is moving off rustc ([no-rustc.md](no-rustc.md)); the rule is in [AGENTS.md](../AGENTS.md).
+blaze's nightly is the definition of the language and the standard library blaze matches while
+rustc is still in the tree: its layouts, ABI, `TypeId`s and answers are what blaze agrees with.
+It is not a rustc blaze maintains. As the no-rustc steps land its pieces go: cargo, then rustc
+with rust-lld and the proc-macro server, then `rust-std`; what is left is `rust-src`, shipped as
+part of blaze, and the toolchain is blaze alone.
+
+- [#402](https://github.com/indexable-inc/blaze/issues/402): ship the standard library's
+  source (`rust-src` of the pinned nightly) with blaze's release, so blaze's toolchain needs no
+  upstream download once rustc is gone.
+- [#403](https://github.com/indexable-inc/blaze/issues/403): shrink the download as each
+  no-rustc step removes a piece (`cargo`, `rustc`, `rust-std`), down to blaze alone.
+- [#404](https://github.com/indexable-inc/blaze/issues/404): the bump, on blaze's schedule:
+  `harness/toolchain_bump.py` with the corpus difftest and edit harnesses as the gate, the
+  `blaze-<date>` name moving with it.
