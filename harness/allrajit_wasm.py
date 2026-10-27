@@ -256,7 +256,7 @@ def ra_jit(root, crate, out, exe, target, store, *extra):
 
 def linked(ran, what):
     """How long ra-jit's link took, failing when it left something it could not compile."""
-    said = re.search(r"^linked .* in (\S+), (\d+) functions in it ra-jit could not compile$",
+    said = re.search(r"^linked .* in (\S+), (\d+) functions in it blaze could not compile$",
                      ran.stderr, re.M)
     if not said:
         raise SystemExit(f"FAIL: {what}: ra-jit did not say it linked:\n{ran.stderr}")
