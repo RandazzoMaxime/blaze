@@ -56,6 +56,19 @@ pub(super) fn crc32(instruction: &str) -> String {
     format!(".arch_extension crc\n.globl {SYMBOL}\n{SYMBOL}:\n{instruction} w0, w0, {data}\nret\n")
 }
 
+/// x86's CRC-32C (SSE4.2's `crc32`) of its second argument, `bits` wide, into the checksum of
+/// its first: LLVM's `x86.sse42.crc32.32.{8,16,32}` and `x86.sse42.crc32.64.64`.
+pub(super) fn x86_crc32(bits: u32) -> String {
+    let [crc, data, _] = Convention::of_target().arguments;
+    let (into, crc, data) = match bits {
+        64 => ("rax", GPR[crc][0], GPR[data][0]),
+        32 => ("eax", GPR[crc][1], GPR[data][1]),
+        16 => ("eax", GPR[crc][1], GPR[data][2]),
+        _ => ("eax", GPR[crc][1], GPR[data][3]),
+    };
+    format!(".globl {SYMBOL}\n{SYMBOL}:\nmov {into}, {crc}\ncrc32 {into}, {data}\nret\n")
+}
+
 /// The directives that have the assembler take the instructions of `features`, those a
 /// function's `#[target_feature]` enables, for assembly of its `asm!`: rustc gives LLVM the
 /// features with the function the `asm!` is in, and this assembly is assembled apart from

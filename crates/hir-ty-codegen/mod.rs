@@ -15011,7 +15011,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let size = self.layout(dst_ty)?.size;
                 self.copy(dst, ptr, size);
             }
-            ("x86.ssse3.pshuf.b.128" | "x86.avx2.pshuf.b", [table, indices]) => {
+            (
+                "x86.ssse3.pshuf.b.128" | "x86.avx2.pshuf.b" | "x86.avx512.pshuf.b.512",
+                [table, indices],
+            ) => {
                 let (table, ty) = self.operand(table)?;
                 let (indices, _) = self.operand(indices)?;
                 let size = self.layout(ty)?.size.bytes();
@@ -15203,6 +15206,53 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let call = self.builder.ins().call(callee, &[crc, data]);
                 let value = self.builder.inst_results(call)[0];
                 self.builder.ins().store(MEM, value, dst, 0);
+            }
+            (
+                "x86.sse42.crc32.32.8" | "x86.sse42.crc32.32.16" | "x86.sse42.crc32.32.32"
+                | "x86.sse42.crc32.64.64",
+                [crc, data],
+            ) => {
+                let (crc, sum) = self.load_scalar(crc)?;
+                let (data, scalar) = self.load_scalar(data)?;
+                let mut sig = self.cg.make_signature();
+                sig.params.extend([AbiParam::new(sum.ty), AbiParam::new(scalar.ty)]);
+                sig.returns.push(AbiParam::new(sum.ty));
+                let callee = self.cg.assembly(asm::x86_crc32(scalar.ty.bits()), &sig);
+                let callee = self.cg.declare_func_in_func(callee, self.builder.func);
+                let call = self.builder.ins().call(callee, &[crc, data]);
+                let value = self.builder.inst_results(call)[0];
+                self.builder.ins().store(MEM, value, dst, 0);
+            }
+            (_, [a, b, c, table]) if name.starts_with("x86.avx512.pternlog.") => {
+                let (a, ty) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let (c, _) = self.operand(c)?;
+                let (table, scalar) = self.load_scalar(table)?;
+                let table = match scalar.ty {
+                    types::I64 => table,
+                    _ => self.builder.ins().uextend(types::I64, table),
+                };
+                // Each bit of the result is the bit of `table` that the bits of `a`, `b` and
+                // `c` at its place number, `a`'s the highest: an or of the eight minterms
+                // `table` has set. Lanes do not matter to bitwise logic, so 64 bits at a time.
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(8) {
+                    let bits = [a, b, c].map(|it| self.builder.ins().load(types::I64, MEM, it, at));
+                    let mut out = self.builder.ins().iconst(types::I64, 0);
+                    for minterm in 0..8i64 {
+                        let mut term = self.builder.ins().iconst(types::I64, -1);
+                        for (place, &value) in bits.iter().enumerate() {
+                            let set = minterm >> (2 - place) & 1 == 1;
+                            let value = if set { value } else { self.builder.ins().bnot(value) };
+                            term = self.builder.ins().band(term, value);
+                        }
+                        let chosen = self.builder.ins().ushr_imm(table, minterm);
+                        let chosen = self.builder.ins().band_imm(chosen, 1);
+                        let mask = self.builder.ins().ineg(chosen);
+                        let term = self.builder.ins().band(term, mask);
+                        out = self.builder.ins().bor(out, term);
+                    }
+                    self.builder.ins().store(MEM, out, dst, at);
+                }
             }
             ("x86.sse2.pause", []) | ("aarch64.isb", [_]) => {
                 let text = if name == "aarch64.isb" { asm::isb() } else { asm::pause() };
