@@ -62,8 +62,9 @@ pub(crate) fn build(db: &RootDatabase, places: &Places) -> Model {
 /// Which members an impl's docs list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Members {
-    /// The associated types the impl writes, with no docs: an implementor on a trait's page.
-    AssocTypes,
+    /// The associated types and constants the impl writes, with no docs: an implementor on a
+    /// trait's page.
+    TypesAndConsts,
     /// The items the impl writes.
     Written,
     /// Those and the trait's provided items it leaves as they are.
@@ -581,10 +582,9 @@ impl Builder<'_> {
         let db = self.db;
         let mut notes = Notes::default();
         let node: Option<InFile<ast::AnyHasAttrs>> = match def {
-            ModuleDef::Module(it) => match it.declaration_source(db) {
-                Some(src) => Some(src.map(ast::AnyHasAttrs::new)),
-                None => None,
-            },
+            ModuleDef::Module(it) => {
+                it.declaration_source(db).map(|src| src.map(ast::AnyHasAttrs::new))
+            }
             ModuleDef::Function(it) => it.source(db).map(|s| s.map(ast::AnyHasAttrs::new)),
             ModuleDef::Adt(hir::Adt::Struct(it)) => {
                 it.source(db).map(|s| s.map(ast::AnyHasAttrs::new))
@@ -971,8 +971,8 @@ impl Builder<'_> {
                     {
                         continue;
                     }
-                    if members == Members::AssocTypes {
-                        if let AssocItem::TypeAlias(_) = assoc
+                    if members == Members::TypesAndConsts {
+                        if let AssocItem::TypeAlias(_) | AssocItem::Const(_) = assoc
                             && let Some(mut member) =
                                 self.assoc_member(assoc, FnContext::Trait, None, false)
                         {
@@ -1321,11 +1321,11 @@ impl Builder<'_> {
                 continue;
             }
             if imp.self_ty(db).as_type_param(db).is_some() {
-                out.blanket_implementors.push(self.impl_doc(imp, Members::AssocTypes));
+                out.blanket_implementors.push(self.impl_doc(imp, Members::TypesAndConsts));
             } else if self.on_foreign_type(imp, trait_) {
                 out.foreign.push(self.impl_doc(imp, Members::Written));
             } else {
-                out.implementors.push(self.impl_doc(imp, Members::AssocTypes));
+                out.implementors.push(self.impl_doc(imp, Members::TypesAndConsts));
             }
         }
         out.implementors.sort_by_key(|it| it.header.plain());

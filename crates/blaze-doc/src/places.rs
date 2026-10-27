@@ -174,10 +174,8 @@ impl<'a> Linking<'a> {
                 let ty = it.self_ty(db);
                 let parent = if let Some(adt) = ty.as_adt() {
                     self.item_ref(db, ModuleDef::Adt(adt))?
-                } else if let Some(builtin) = ty.as_builtin() {
-                    primitive(builtin.name().as_str())
                 } else {
-                    return None;
+                    primitive(ty.as_builtin()?.name().as_str())
                 };
                 (parent, false)
             }

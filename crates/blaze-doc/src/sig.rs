@@ -802,11 +802,11 @@ pub(crate) fn function(
         params.push(param);
     }
     let mut ret = Code::default();
-    if let Some(ret_ty) = return_type(&data) {
-        if !matches!(&data.store[ret_ty], TypeRef::Tuple(it) if it.is_empty()) {
-            ret.text(" -> ");
-            sig.ty(&mut ret, ret_ty);
-        }
+    if let Some(ret_ty) = return_type(data)
+        && !matches!(&data.store[ret_ty], TypeRef::Tuple(it) if it.is_empty())
+    {
+        ret.text(" -> ");
+        sig.ty(&mut ret, ret_ty);
     }
     let one_line: usize = out.plain().len()
         + params.iter().map(|it| it.plain().len() + 2).sum::<usize>()
@@ -891,7 +891,7 @@ fn param_names(db: &RootDatabase, func: hir::Function) -> Vec<Option<String>> {
     for param in list.params() {
         let name = param.pat().map(|pat| match &pat {
             ast::Pat::IdentPat(ident) if ident.pat().is_none() => {
-                ident.name().map_or_else(|| "_".to_owned(), |it| it.text().to_string())
+                ident.name().map_or_else(|| "_".to_owned(), |it| it.text().to_owned())
             }
             other => squash(&other.syntax().text().to_string()),
         });

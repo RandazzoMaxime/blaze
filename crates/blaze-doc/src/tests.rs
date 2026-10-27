@@ -450,6 +450,9 @@ fn members_and_impls() {
     let implementors: Vec<String> =
         shape.impls.implementors.iter().map(|it| it.header.plain()).collect();
     assert_eq!(implementors, ["impl Shape for Kind"]);
+    let written: Vec<&str> =
+        shape.impls.implementors[0].items.iter().map(|it| it.name.as_str()).collect();
+    assert_eq!(written, ["Out", "SIDES"], "an implementor shows its types and constants");
     let members: Vec<&str> = shape.trait_items.iter().map(|it| it.name.as_str()).collect();
     assert_eq!(members, ["Out", "SIDES", "area", "name"]);
 

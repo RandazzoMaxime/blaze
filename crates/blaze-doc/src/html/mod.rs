@@ -552,8 +552,7 @@ impl<'a> Writer<'a> {
         let mut parts =
             vec![(krate.name.clone(), format!("{}{}/index.html", self.root, krate.name))];
         let mut path = format!("{}{}", self.root, krate.name);
-        let modules = if item.kind == Kind::Module { &item.modules[..] } else { &item.modules[..] };
-        for module in modules {
+        for module in &item.modules {
             path.push('/');
             path.push_str(module);
             parts.push((module.clone(), format!("{path}/index.html")));
@@ -862,11 +861,6 @@ impl<'a> Writer<'a> {
             }
             out.push_str("</dl>");
         }
-        let base = if module.name.is_empty() && module.modules.is_empty() {
-            String::new()
-        } else {
-            String::new()
-        };
         for kind in Kind::MODULE_ORDER {
             let mut children: Vec<&Item> = module
                 .children
@@ -883,9 +877,9 @@ impl<'a> Writer<'a> {
             out.push_str("<dl class=\"item-table\">");
             for child in children {
                 let href = if kind == Kind::Module {
-                    format!("{base}{}/index.html", child.name)
+                    format!("{}/index.html", child.name)
                 } else {
-                    format!("{base}{}.{}.html", kind.short(), child.name)
+                    format!("{}.{}.html", kind.short(), child.name)
                 };
                 let full = format!("{}::{}", krate.name, child.full_path());
                 let deprecated = if child.notes.deprecated.is_some() { " deprecated" } else { "" };
@@ -1160,17 +1154,15 @@ impl<'a> Writer<'a> {
 
     fn all_items(&self) -> String {
         let krate = self.krate();
-        let mut out = self.head(&format!("List of all items in this crate"), "", "blaze all", None);
+        let mut out = self.head("List of all items in this crate", "", "blaze all", None);
         out.push_str(&self.sidebar("All items", &[], None));
         out.push_str("<main><div class=\"width-limiter\">");
         out.push_str(&self.topbar());
         out.push_str("<section id=\"main-content\" class=\"content\"><div class=\"main-heading\"><h1>List of all items</h1></div>");
         let mut by_kind: FxHashMap<Kind, Vec<(String, String)>> = FxHashMap::default();
         for item in &krate.items {
-            if item.kind == Kind::Module {
-                if item.name.is_empty() {
-                    continue;
-                }
+            if item.kind == Kind::Module && item.name.is_empty() {
+                continue;
             }
             let href = page_path(krate, item);
             let href = href.strip_prefix(&format!("{}/", krate.name)).unwrap_or(&href).to_owned();
