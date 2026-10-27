@@ -208,7 +208,9 @@ pub(crate) fn fetch(
                         }
                         Err(e) => {
                             let e = e.context(format!("fetching {}", resolved.path.path));
-                            _ = failed.lock().map(|mut it| it.get_or_insert(e));
+                            if let Ok(mut failed) = failed.lock() {
+                                failed.get_or_insert(e);
+                            }
                             return;
                         }
                     }
@@ -251,18 +253,10 @@ async fn resolve(
         return Ok(had);
     }
     let info = source.narinfo(path).await?;
-    let mut refused = None;
-    for key in keys {
-        match info.check(key) {
-            Ok(()) => {
-                refused = None;
-                break;
-            }
-            Err(e) => _ = refused.get_or_insert(e),
-        }
-    }
-    if let Some(e) = refused {
-        return Err(e);
+    let checked: Vec<anyhow::Result<()>> = keys.iter().map(|key| info.check(key)).collect();
+    if !checked.iter().any(Result::is_ok) {
+        let refused = checked.into_iter().find_map(Result::err);
+        return Err(refused.unwrap_or_else(|| anyhow::anyhow!("no key to check {path} by")));
     }
     if info.store_path != path {
         bail!("{}'s narinfo of {path} is of {}", source.name(), info.store_path);

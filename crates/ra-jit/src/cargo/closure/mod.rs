@@ -139,7 +139,7 @@ const USAGE: &str = "usage: ra-jit closure fetch|materialize [--host <host>] [<r
 
 /// `ra-jit closure fetch|materialize [--host <host>] [<root>...]`.
 pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
-    let mut args = args.peekable();
+    let mut args = args;
     let verb = args.next().context(USAGE)?;
     let mut host = None;
     let mut named = Vec::new();
@@ -164,7 +164,7 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     }
     let mut chosen = Vec::new();
     for name in &named {
-        let root = pinned.iter().find(|it| it.attribute == name || it.path.path == *name);
+        let root = pinned.iter().find(|it| it.attribute == name.as_str() || it.path.path == *name);
         let root = root.with_context(|| {
             let names: Vec<&str> = pinned.iter().map(|it| it.attribute).collect();
             format!("pins.txt names no root `{name}` for {host}: it has {}", names.join(", "))
@@ -223,8 +223,14 @@ fn materialize_command(roots: &[StorePath]) -> anyhow::Result<()> {
                         return;
                     }
                     match materialize(path) {
-                        Ok(dir) => laid_out.lock().unwrap_or_else(|it| it.into_inner()).push((path, dir)),
-                        Err(e) => _ = failed.lock().map(|mut it| it.get_or_insert(e)),
+                        Ok(dir) => {
+                            laid_out.lock().unwrap_or_else(|it| it.into_inner()).push((path, dir))
+                        }
+                        Err(e) => {
+                            if let Ok(mut failed) = failed.lock() {
+                                failed.get_or_insert(e);
+                            }
+                        }
                     }
                 }
             });
@@ -376,14 +382,14 @@ mod tests {
         let filled = store_at(&work.path().join("filled"));
         let roots = [app.path.clone()];
         let other = SigningKey::from_bytes(&[8; 32]);
-        let said = fetch::fetch(&filled, &roots, &source, &[&public(&other)]).unwrap_err();
+        let said = fetch::fetch(&filled, &roots, &source, &[public(&other).as_str()]).unwrap_err();
         assert!(format!("{said:#}").contains("no signature by test-1"), "{said:#}");
-        let fetched = fetch::fetch(&filled, &roots, &source, &[&public(&key)]).unwrap();
+        let fetched = fetch::fetch(&filled, &roots, &source, &[public(&key).as_str()]).unwrap();
         assert_eq!((fetched.paths, fetched.had), (2, 0));
         assert_eq!(fetched.nar_bytes, app.path.nar_size + lib.path.nar_size);
         // What the store has is not downloaded again: the cache can be gone.
         std::fs::remove_dir_all(&cache).unwrap();
-        let again = fetch::fetch(&filled, &roots, &source, &[&public(&key)]).unwrap();
+        let again = fetch::fetch(&filled, &roots, &source, &[public(&key).as_str()]).unwrap();
         assert_eq!((again.paths, again.had, again.file_bytes), (2, 2, 0));
 
         let (remote, _remote_dir) = crate::remote::tests::unsigned("closure", 1 << 30);
