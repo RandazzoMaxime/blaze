@@ -4673,11 +4673,30 @@ fn link_executable(
     }
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
-    // A shared library exports what the crate asked for names with `#[no_mangle]` or
-    // `#[export_name]`.
+    // A shared library exports what the crates it links ask for names with `#[no_mangle]`
+    // or `#[export_name]`, as rustc's `cdylib` does; a proc macro's only what its own crate
+    // names. The standard library's crates name none a program may call.
     let exports = args.shared.then(|| -> anyhow::Result<Vec<String>> {
         let mut exports = Vec::new();
+        let mut crates = FxHashSet::default();
         for krate in crates_named(db, &args.krate, args)? {
+            crates.insert(krate);
+            let data = ide_db::base_db::Crate::from(krate).data(db);
+            if data.target_kind.is_proc_macro() {
+                continue;
+            }
+            crates.extend(
+                ide_db::base_db::Crate::from(krate)
+                    .transitive_deps(db)
+                    .into_iter()
+                    .filter(|it| {
+                        let data = it.data(db);
+                        !data.origin.is_lang() && !data.target_kind.is_proc_macro()
+                    })
+                    .map(Crate::from),
+            );
+        }
+        for krate in crates {
             let of = listed.of(db, krate);
             let functions = of.functions.iter().filter_map(|&it| exported_symbol(db, it));
             let statics = of.statics.iter().filter_map(|&it| exported_static(db, it));
