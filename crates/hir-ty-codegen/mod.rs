@@ -16229,7 +16229,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             return Ok(());
         }
-        if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
+        if name.starts_with("aarch64.sve.")
+            || name.starts_with("vector.reverse.nxv")
+            || name.starts_with("vector.insert.nxv")
+        {
             return self.sve_intrinsic(name, args, dst, dst_ty);
         }
         if self.wasm_llvm_intrinsic(name, args, dst)? {
