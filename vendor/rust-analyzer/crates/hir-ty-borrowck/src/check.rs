@@ -132,7 +132,7 @@ pub(super) fn check<'db>(
         }
         for loan in &loans.loans {
             let points: Vec<usize> =
-                values.values[loan.region].iter().filter(|&it| it < cfg.points).collect();
+                values.points_of(loan.region).iter().filter(|&it| it < cfg.points).collect();
             eprintln!(
                 "loan {:?} {:?} at {:?} region {} points {points:?}",
                 loan.local, loan.projection, loan.location, loan.region

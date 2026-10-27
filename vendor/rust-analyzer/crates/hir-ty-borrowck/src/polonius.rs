@@ -17,6 +17,7 @@ use super::{
     Ctx,
     bitset::BitSet,
     cfg::{Cfg, Location, index},
+    intervals::IntervalSet,
     loans::Loans,
     regions::{Regions, Rv, rv_of},
 };
@@ -35,7 +36,7 @@ pub(super) fn live_loans<'db>(
     cfg: &Cfg,
     regions: &Regions<'db>,
     count: usize,
-    liveness: &[BitSet],
+    liveness: &[IntervalSet],
     loans: &Loans,
 ) -> Vec<BitSet> {
     let mut directions: Vec<Option<Direction>> = vec![None; count];
