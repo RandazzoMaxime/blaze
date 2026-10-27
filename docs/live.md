@@ -80,9 +80,11 @@ reads as never set in ours, and a counter the allocator bumps reads zero. So:
   the new value, which rustc's code does not share until cargo builds again (`harness/stress.py`
   steps 58 and 84, `harness/splices.py` "a thread-local's initial value"). A static whose
   value rustc's copy can't be told for (one an edit reached before the daemon first asked) is
-  ours, as before. Not yet handled: one ours can't replace (`#[no_mangle]`, `#[export_name]`,
-  or one a function left to rustc refers to) stays rustc's after an edit to its first value,
-  in the full build too, with the old value, as any such static of rustc's does;
+  ours, as before. One ours can't replace (`#[no_mangle]`, `#[export_name]`, or one a
+  function left to rustc refers to) would stay rustc's after an edit to its first value, with
+  the old value: the build stops with an error naming it (``static `X` of crate `c` with
+  state, whose first value is not the one rustc built it with ...``, `CodegenError::Refused`,
+  [#392](https://github.com/indexable-inc/blaze/issues/392));
 - a static rustc keeps to the one codegen unit whose code uses it (rustc internalises it) has
   no symbol of the name rustc gave it, and at opt-level 1 and up LLVM renames it as it
   optimizes: its global optimizer splits a static of one field into that field (`SERVING` in
