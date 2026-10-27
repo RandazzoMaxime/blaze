@@ -44,10 +44,10 @@ libraries.
 
 What the closures come to, as NARs (unpacked bytes) and store paths, from pins.txt:
 
-| host | all roots | clang | lld | git | cmake | glibc.dev | openssl.dev |
-|---|---|---|---|---|---|---|---|
-| x86_64-linux | 2,537.7 MB, 200 paths | 2,120.9 MB, 48 | 672.1 MB, 11 | 404.3 MB, 87 | 158.4 MB, 27 | 51.3 MB, 7 | 51.0 MB, 7 |
-| aarch64-linux | 2,556.7 MB, 200 paths | 2,132.4 MB, 48 | 663.2 MB, 11 | 424.1 MB, 87 | 162.1 MB, 27 | 62.7 MB, 7 | 62.2 MB, 7 |
+| host | all roots | clang | lld | bintools | git | cmake | glibc.dev | openssl.dev |
+|---|---|---|---|---|---|---|---|---|
+| x86_64-linux | 2,672.9 MB, 204 paths | 2,120.9 MB, 48 | 672.1 MB, 11 | 825.1 MB, 24 | 404.3 MB, 87 | 158.4 MB, 27 | 51.3 MB, 7 | 51.0 MB, 7 |
+| aarch64-linux | 2,679.7 MB, 203 paths | 2,132.4 MB, 48 | 663.2 MB, 11 | 806.1 MB, 23 | 424.1 MB, 87 | 162.1 MB, 27 | 62.7 MB, 7 | 62.2 MB, 7 |
 
 Closures overlap (every one has glibc), so a column is not a share of the total. clang's is
 most of it: the wrapper refers to clang, LLVM's libraries, compiler-rt and GCC's (for
@@ -133,7 +133,8 @@ for what it lacks: a process that is to take the closure from a remote opens it 
 
 ## Measured
 
-The `aarch64-linux` closure, every root, on an arm64 ix VM (16 CPUs, 16 GiB), with a release
+The `aarch64-linux` closure, every root before `llvmPackages.bintools` was pinned (200 paths;
+it adds 3, 123 MB of NARs), on an arm64 ix VM (16 CPUs, 16 GiB), with a release
 build of blaze; the remote is a directory on the same disk, so the pull measures blaze, not a
 network:
 

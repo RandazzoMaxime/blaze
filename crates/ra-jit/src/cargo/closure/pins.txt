@@ -6,6 +6,7 @@
 nixpkgs 3ec636362e1816bc2f0888fa0fa2c69f1bc9e504
 x86_64-linux clang /nix/store/i52d7j6ma8bh4ggg4r2hl4af7bychdpa-clang-wrapper-21.1.8 sha256:1j4gkqdg1jpd3004fscr18d384jl4pb8x0ckv9w4myz561w7fnzr 75544 2120913848 48
 x86_64-linux lld /nix/store/3naz0qnnfax2pdvwlgmjd3j57axrass4-lld-21.1.8 sha256:1jk3yflk44vk2ak3l056dhkflzg5yxhwkp17364zlbzscf28k163 43995944 672098288 11
+x86_64-linux llvmPackages.bintools /nix/store/0xmk54jzfcdxijdn36dl130kk33l09hb-llvm-binutils-wrapper-21.1.8 sha256:0jpkbzkiqpsy1c5l3p9nisbkgxq1v0wqcpn0md32zk6fnz3ibqnf 45288 825074104 24
 x86_64-linux glibc.out /nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57 sha256:1z60yvla06nbvnmxpnmcnpimjmrd5yf5yn637jgvxplsr34dxfdx 35578240 38235928 4
 x86_64-linux glibc.dev /nix/store/3zlgjcfm8j3nscrldjv8izxciybg0nh3-glibc-2.44-57-dev sha256:1j558qingizp5m7pkbf271yyb0ac6minxcsnv91m0yxs4q8v5l34 2487896 51343488 7
 x86_64-linux linuxHeaders /nix/store/wf7d501qlfynh45147y25g9kww9z0a09-linux-headers-7.2 sha256:0i89y00j1c565vwbls7qndnqzvcak0wkxzg0mna0w1s49i6lr6a7 7546056 7546056 1
@@ -55,9 +56,10 @@ x86_64-linux libx11.dev /nix/store/69z94i0332zi2n18vqjx19i2cwn99q3a-libx11-1.8.1
 x86_64-linux dbus.lib /nix/store/xj28m1zm1qn3a0zjlvwcz0v4jlg0csi8-dbus-1.16.2-lib sha256:0h89hylz7a0k1mfcskvr27zl114chxzqxzfkvd2q4905slkx21zl 485152 83357360 25
 x86_64-linux dbus.dev /nix/store/n03diw9l5lrcv91hh6vdqzp79dlgcddg-dbus-1.16.2-dev sha256:1fm830gwx81iz9bcgc1qv57qc2zvbzyxpw7vzr0jk04fld5v6gw5 134784 85669856 31
 x86_64-linux protobuf.out /nix/store/hjz0cvp9c6vi3mpsnhrnh2qjyhwb1db0-protobuf-36.2 sha256:19d9nl74lh2lray7jfrzxbsl498lly7pjdd9x6idv8k1509ynw1i 1542432 69541176 12
-total x86_64-linux 2537702464 200
+total x86_64-linux 2672900984 204
 aarch64-linux clang /nix/store/q1ynmwhg3phf5jgi0kzw5ykp1aadffhw-clang-wrapper-21.1.8 sha256:0vz73smfkzscgb4pm0hpzqlr2b0sal1hrvlfvcmngw5qvkcdgf84 75656 2132415112 48
 aarch64-linux lld /nix/store/p8w0pws75qknj8aczf6cba67dppb32cd-lld-21.1.8 sha256:00fjm8qfsll3i3h6nn24amsiidsiyrzfi5iimqqhcz1r824c8xbj 41621984 663150304 11
+aarch64-linux llvmPackages.bintools /nix/store/2lv66lbhxlz168nfa6xj3qfwh95mil86-llvm-binutils-wrapper-21.1.8 sha256:156hrxy9660mysmx80z86sb89kqx3nnnhq467r4szs2n9hzx3w6j 45328 806106408 23
 aarch64-linux glibc.out /nix/store/nhphqkv18x8fpf3flz0bsm1h554pawn7-glibc-2.44-57 sha256:15klwx7m7d19x32c2v5p6sdaj1xy3a0mrs9bhkwi7ihg4i465hsv 46943424 49600464 4
 aarch64-linux glibc.dev /nix/store/2gh2kjj22acjw1354if79dgr6l73y3sl-glibc-2.44-57-dev sha256:10ryga26k7a9kmfjp02r6byarj6p1g4fmdwfklaq94aq4l5bkgln 2453464 62686720 7
 aarch64-linux linuxHeaders /nix/store/wi0x2v7n0qlbm2vpnh5zrvbpbw9gcqwc-linux-headers-7.2 sha256:09dnfzfm8zd6kcs0jg5y0n912nfbci8vd7szf7x3d6kqnnzjv5ix 7419680 7419680 1
@@ -107,4 +109,4 @@ aarch64-linux libx11.dev /nix/store/rvpwpjj4j479073rxwi6c45njirdy2vz-libx11-1.8.
 aarch64-linux dbus.lib /nix/store/57a353ppmcwm9l6r3r3z5kjbdwrmhhlj-dbus-1.16.2-lib sha256:0sp0q9wn1myq982c5mypwacy3dfabaknqfgdb3iqhxnzgwkwkrpz 549256 101382792 25
 aarch64-linux dbus.dev /nix/store/j3ga9iybsx0zgvll821l0hkw2k64nij8-dbus-1.16.2-dev sha256:14795nrlk23znci23ba95n8dvdzr7xk99x9251ngir6vkqc651kq 134784 104445136 31
 aarch64-linux protobuf.out /nix/store/wq8r8l8dqynvgy22q9fs7pni029v7hf7-protobuf-36.2 sha256:0fbbbyy9g8925ayh4v342yc1hl4pw6wfczm2iz57gc9yb3fs16zk 1718952 83307192 12
-total aarch64-linux 2556660384 200
+total aarch64-linux 2679697440 203
