@@ -4547,6 +4547,38 @@ pub fn stand_in_section(format: object::BinaryFormat) -> (&'static str, &'static
     }
 }
 
+/// The bytes of the object `product` makes, read once `product` is gone: they are written to
+/// a file first, which the kernel can keep on disk, so that a large program's object of
+/// gigabytes is not in memory twice. Where no such file can be made they are made in memory.
+fn write_object(product: cranelift_object::ObjectProduct) -> Result<Vec<u8>> {
+    use std::io::{Read as _, Seek as _, Write as _};
+    let failed = |e: &dyn fmt::Display| CodegenError::Backend(format!("writing the object: {e}"));
+    let Some(mut file) = unnamed_file() else {
+        return product.emit().map_err(|e| failed(&e));
+    };
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, &file);
+    product.object.write_stream(&mut out).map_err(|e| failed(&e))?;
+    out.flush().map_err(|e| failed(&e))?;
+    drop((out, product));
+    let len = file.seek(std::io::SeekFrom::End(0)).map_err(|e| failed(&e))?;
+    file.rewind().map_err(|e| failed(&e))?;
+    let mut object = Vec::with_capacity(len as usize);
+    file.read_to_end(&mut object).map_err(|e| failed(&e))?;
+    Ok(object)
+}
+
+/// A file of the temporary directory that is removed once it is closed, if one can be made.
+fn unnamed_file() -> Option<std::fs::File> {
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("ra-jit-object-{}-{made}", std::process::id());
+    let path = std::env::temp_dir().join(name);
+    let file = std::fs::File::options().read(true).write(true).create_new(true).open(&path).ok()?;
+    // Windows removes a file that is open once it is closed.
+    _ = std::fs::remove_file(&path);
+    Some(file)
+}
+
 /// Gives the messages of the stand-ins of `product` their bytes, in [`stand_in_section`].
 fn place_stand_ins(
     product: &mut cranelift_object::ObjectProduct,
@@ -5370,7 +5402,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             std::thread::spawn(move || drop(freed));
         }
         let macho = product.object.format() == cranelift_object::object::BinaryFormat::MachO;
-        let mut object = product.emit().map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let mut object = write_object(product)?;
         if macho {
             debuginfo::settle_macho(&mut object).map_err(CodegenError::Backend)?;
         }
