@@ -167,7 +167,8 @@ fn program(closure: &Closure, name: &str) -> Option<String> {
 /// Cargo book names for build scripts, ra-jit's (its `RUSTC` is ra-jit) and the jobserver's.
 /// None names a program or a directory of the machine's, which the run does not see.
 fn kept_in_view(name: &str) -> bool {
-    const NAMES: [&str; 16] = [
+    const NAMES: [&str; 17] = [
+        "CARGO",
         "OUT_DIR",
         "TARGET",
         "HOST",
@@ -459,10 +460,35 @@ pub(crate) fn failed_note(name: &str, closure: &Closure, stderr: &[u8], root: Op
         false => format!(", and looked for what is not there: {}", looked.join("; ")),
     };
     let root = root.map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
+    let failed = format!("the build script of `{name}` failed in its closure, which has {given}");
+    if text.contains("Read-only file system") {
+        return format!(
+            "{failed}, and wrote outside OUT_DIR, which is the one place a run may write; a \
+             script that writes its package's sources runs outside with `unsandboxed-build-scripts \
+             = [\"{name}\"]` under [workspace.metadata.blaze.sandbox] in {root}, kept on this \
+             machine alone"
+        );
+    }
+    let unset: Vec<&str> = text
+        .lines()
+        .filter(|it| {
+            it.contains("environment variable")
+                && (it.contains("missing") || it.contains("not set") || it.contains("NotPresent"))
+        })
+        .map(str::trim)
+        .take(2)
+        .collect();
+    if looked.is_empty() && !unset.is_empty() {
+        return format!(
+            "{failed}, and cargo's variables alone: it read one it is not given ({}); a variable \
+             the workspace sets for build scripts is given by naming it in `build-script-env` under \
+             [workspace.metadata.blaze.sandbox] in {root}",
+            unset.join("; ")
+        );
+    }
     format!(
-        "the build script of `{name}` failed in its closure, which has {given}{looked}; a \
-         library it needs is given by `{name} = [\"<attr>.out\", \"<attr>.dev\"]` under \
-         {SYSTEM_DEPS} in {root}, or by a line for `{name}` in blaze's \
+        "{failed}{looked}; a library it needs is given by `{name} = [\"<attr>.out\", \
+         \"<attr>.dev\"]` under {SYSTEM_DEPS} in {root}, or by a line for `{name}` in blaze's \
          crates/ra-jit/src/cargo/hermetic/libs.toml"
     )
 }
@@ -644,12 +670,25 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_run_is_told_what_it_lacked() {
+        let closure = Closure { roots: Vec::new(), libs: Vec::new(), paths: Vec::new() };
+        let note = |stderr: &str| failed_note("x-sys", &closure, stderr.as_bytes(), None);
+        let lib = note("The system library `libudev` required by crate `x-sys` was not found in the pkg-config search path.");
+        assert!(lib.contains("[workspace.metadata.blaze.system-deps]") && lib.contains("libudev"), "{lib}");
+        let wrote = note("Error: Os { code: 30, kind: ReadOnlyFilesystem, message: \"Read-only file system\" }");
+        assert!(wrote.contains("unsandboxed-build-scripts = [\"x-sys\"]"), "{wrote}");
+        let unset = note("panicked at src/input.rs:1:1:\ncargo environment variable `FOO` is missing");
+        assert!(unset.contains("build-script-env") && unset.contains("`FOO`"), "{unset}");
+    }
+
+    #[test]
     fn a_run_in_its_closure_has_cargo_s_variables_and_the_closure_s_tools_alone() {
         let root = std::env::temp_dir().join(format!("ra-jit-hermetic-env-{}", std::process::id()));
         _ = std::fs::remove_dir_all(&root);
         let closure = closure_at(&root);
         let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
         let env = [
+            pair("CARGO", "/home/me/.cargo/bin/cargo"),
             pair("CARGO_PKG_NAME", "openssl-sys"),
             pair("CARGO_HOME", "/home/me/.cargo"),
             pair("DEP_Z_INCLUDE", "/t/debug/build/z-1/out/include"),
@@ -664,6 +703,7 @@ mod tests {
         let also = std::collections::BTreeSet::from(["OPENSSL_DIR".to_owned()]);
         let out = env_in(&env, &also, &closure);
         let var = |name: &str| out.iter().find(|it| it.0 == name).map(|it| it.1.as_str());
+        assert_eq!(var("CARGO"), Some("/home/me/.cargo/bin/cargo"));
         assert_eq!(var("CARGO_PKG_NAME"), Some("openssl-sys"));
         assert_eq!(var("DEP_Z_INCLUDE"), Some("/t/debug/build/z-1/out/include"));
         assert_eq!(var("OPENSSL_DIR"), Some("/opt/openssl"));
