@@ -2185,6 +2185,8 @@ struct ObjectCodegen<'a, 'db> {
     unstitched: FxHashSet<FuncId>,
     /// Functions `finish` hides from other objects: see [`ObjectCodegen::define_refused`].
     hidden: Vec<FuncId>,
+    /// The messages of the stand-ins, which `finish` puts in [`stand_in_section`].
+    stand_ins: Vec<(DataId, Box<[u8]>)>,
     statics: FxHashMap<StaticId, DataId>,
     /// Statics nothing exports and nothing can write to, which we give a copy of the value.
     frozen_statics: FxHashMap<StaticId, DataId>,
@@ -4346,6 +4348,49 @@ pub fn linked_symbol(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
 /// ([`ObjectCodegen::define_refused`]): what is left of them once linked is what is reachable.
 pub const STAND_IN_SAYS: &str = "ra-jit could not compile ";
 
+/// The section of an object, and of what it is linked into, that holds the messages of its
+/// stand-ins and nothing else, each a line that starts with [`STAND_IN_SAYS`]: what a link
+/// keeps of it is what the program can reach. It is read by name, so a program that merely
+/// has the words in its data (blaze itself) is not taken for one with stand-ins. On ELF each
+/// message is a section of its own, for the link to take out those nothing reaches; Apple's
+/// linker takes them out symbol by symbol from the one section, as it has room for few.
+pub fn stand_in_section(format: object::BinaryFormat) -> (&'static str, &'static str) {
+    match format {
+        object::BinaryFormat::MachO => ("__TEXT", "__ra_jit_stand"),
+        // An image's section name has room for 8 bytes.
+        object::BinaryFormat::Coff | object::BinaryFormat::Pe => ("", ".rjstand"),
+        _ => ("", ".ra_jit.stand_in"),
+    }
+}
+
+/// Gives the messages of the stand-ins of `product` their bytes, in [`stand_in_section`].
+fn place_stand_ins(
+    product: &mut cranelift_object::ObjectProduct,
+    stand_ins: Vec<(DataId, Box<[u8]>)>,
+) {
+    use cranelift_object::object::{BinaryFormat, SectionKind};
+    let format = product.object.format();
+    let (segment, name) = stand_in_section(match format {
+        BinaryFormat::MachO => object::BinaryFormat::MachO,
+        BinaryFormat::Coff => object::BinaryFormat::Coff,
+        BinaryFormat::Wasm => object::BinaryFormat::Wasm,
+        _ => object::BinaryFormat::Elf,
+    });
+    let mut shared = None;
+    for (id, message) in stand_ins {
+        let mut add = || {
+            let (segment, name) = (segment.as_bytes().to_vec(), name.as_bytes().to_vec());
+            product.object.add_section(segment, name, SectionKind::ReadOnlyData)
+        };
+        let section = match format {
+            BinaryFormat::Elf => add(),
+            _ => *shared.get_or_insert_with(add),
+        };
+        let symbol = product.data_symbol(id);
+        product.object.add_symbol_data(symbol, section, &message, 1);
+    }
+}
+
 /// Whether a crate declares the `#[global_allocator]`: whether it has the function the
 /// attribute's expansion exports for `__rust_alloc` (the attribute itself is gone from the
 /// static once expanded). The expansion names the function as it exports it, so each module
@@ -5069,6 +5114,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             weak_imports: Vec::new(),
             unstitched: FxHashSet::default(),
             hidden: Vec::new(),
+            stand_ins: Vec::new(),
             tiers: None,
             found_instances: FxHashMap::default(),
             stored_roots: FxHashMap::default(),
@@ -5084,6 +5130,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         }
         self.unwind.name_personality(&mut self.module).map_err(CodegenError::Backend)?;
         let mut product = self.module.finish();
+        place_stand_ins(&mut product, std::mem::take(&mut self.stand_ins));
         for reloc in &self.elf_relocs {
             reloc.add(&mut product).map_err(CodegenError::Backend)?;
         }
@@ -5132,7 +5179,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 wasm::WasmSignature::of(&declared.signature).map_err(CodegenError::Backend)?;
             signatures.insert(name.clone(), signature);
         }
-        let elf = self.module.finish().emit().map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let mut product = self.module.finish();
+        place_stand_ins(&mut product, self.stand_ins);
+        let elf = product.emit().map_err(|e| CodegenError::Backend(e.to_string()))?;
         wasm_object::from_elf(&elf, &signatures).map_err(CodegenError::Backend)
     }
 
@@ -5458,12 +5507,16 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             }
             _ => return Ok(()),
         };
+        // One line, for the reader of the section to tell one message from the next.
+        let reason = reason.replace('\n', " ");
         let message = format!("{STAND_IN_SAYS}`{symbol}`: {reason}\n").into_bytes();
         let len = message.len() as i64;
+        // Defined empty here and given its bytes by `finish`, in the section of stand-ins.
         let text = self.declare_local_data(false)?;
         let mut data = DataDescription::new();
-        data.define(message.into_boxed_slice());
+        data.define(Box::new([]));
         self.module.define_data(text, &data).map_err(backend)?;
+        self.stand_ins.push((text, message.into_boxed_slice()));
         let mut write = self.module.make_signature();
         write.params.extend([types::I32, ptr(), ptr()].map(AbiParam::new));
         write.returns.push(AbiParam::new(ptr()));
@@ -10557,7 +10610,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     }
                 }
                 AsmOperand::Const(value) => {
-                    let value = self.assigned_constant(value).unwrap_or(value);
+                    // A literal, or the anonymous constant MIR makes of what else it is.
                     let ty = self.operand_ty(value)?;
                     let bits = match &value.kind {
                         OperandKind::Allocation { allocation }
@@ -10654,26 +10707,6 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         }
         Ok(())
-    }
-
-    /// The constant a temporary holds, when `operand` reads one that was given a constant
-    /// and nothing else: a named constant is lowered to that.
-    fn assigned_constant(&self, operand: &Operand) -> Option<&'db Operand> {
-        let OperandKind::Copy(place) = &operand.kind else { return None };
-        let mut assigned = self.body?.basic_blocks.iter().flat_map(|(_, block)| {
-            block.statements.iter().filter_map(|it| match &it.kind {
-                StatementKind::Assign(to, rvalue) if to.local == place.local => Some((to, rvalue)),
-                _ => None,
-            })
-        });
-        match (assigned.next(), assigned.next()) {
-            (Some((to, Rvalue::Use(constant))), None)
-                if to == place && matches!(constant.kind, OperandKind::Constant { .. }) =>
-            {
-                Some(constant)
-            }
-            _ => None,
-        }
     }
 
     /// The value of an integer operand that an intrinsic takes as an immediate, which rustc
@@ -15347,6 +15380,36 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                         out = self.builder.ins().bor(out, term);
                     }
                     self.builder.ins().store(MEM, out, dst, at);
+                }
+            }
+            (_, [a, b, c])
+                if name.starts_with("x86.avx512.vpmadd52l.uq.")
+                    || name.starts_with("x86.avx512.vpmadd52h.uq.") =>
+            {
+                // IFMA, `a` the sum as core::arch passes it: each 64-bit lane is `a`'s plus
+                // the low (`l`) or high (`h`) 52 bits of the 104-bit product of the low 52 bits
+                // of `b`'s and `c`'s, wrapping.
+                let (a, ty) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let (c, _) = self.operand(c)?;
+                let high = name.starts_with("x86.avx512.vpmadd52h.");
+                const LOW_52: i64 = (1 << 52) - 1;
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(8) {
+                    let [sum, x, y] =
+                        [a, b, c].map(|it| self.builder.ins().load(types::I64, MEM, it, at));
+                    let x = self.builder.ins().band_imm(x, LOW_52);
+                    let y = self.builder.ins().band_imm(y, LOW_52);
+                    let low = self.builder.ins().imul(x, y);
+                    let part = if high {
+                        let upper = self.builder.ins().umulhi(x, y);
+                        let upper = self.builder.ins().ishl_imm(upper, 12);
+                        let lower = self.builder.ins().ushr_imm(low, 52);
+                        self.builder.ins().bor(upper, lower)
+                    } else {
+                        self.builder.ins().band_imm(low, LOW_52)
+                    };
+                    let value = self.builder.ins().iadd(sum, part);
+                    self.builder.ins().store(MEM, value, dst, at);
                 }
             }
             ("x86.sse2.pause", []) | ("aarch64.isb", [_]) => {

@@ -26,6 +26,8 @@ cases![
     macro_item_location,
     clmul,
     crc_ternlog,
+    ifma,
+    asm_const,
     cast_then_shift,
     xgetbv,
     prefetch,
