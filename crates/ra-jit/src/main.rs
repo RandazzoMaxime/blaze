@@ -568,11 +568,18 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
 /// The standard library's crates `krate` links, as rustc puts them in: `std`, or `core` and
 /// `compiler_builtins` under `#![no_std]`, none under `#![no_core]`, and those it names with
 /// `extern crate`. A `#![no_std]` crate with a `#[panic_handler]` of its own does not get
-/// std's.
+/// std's. One of the library's own that a program links, as `proc_macro`, links what it
+/// depends on.
 fn library_linked_by(
     db: &RootDatabase,
     krate: ide_db::base_db::Crate,
 ) -> Vec<ide_db::base_db::Crate> {
+    if krate.data(db).origin.is_lang() {
+        return (krate.data(db).dependencies.iter())
+            .map(|dep| dep.crate_id)
+            .filter(|it| it.data(db).origin.is_lang())
+            .collect();
+    }
     let def_map = hir_def::nameres::crate_def_map(db, krate);
     let injected: &[&str] = if def_map.is_no_core() {
         &[]
