@@ -25,6 +25,13 @@
 //! `build-script = false` under [`sandboxed::TABLE`] of a package inside the workspace, and
 //! `RA_JIT_SANDBOX=off`.
 //!
+//! A sandboxed run is given only the part of cargo's environment that is the build's
+//! ([`given`]): cargo's own variables for scripts, the toolchain's and ra-jit's, the C
+//! compiler's and pkg-config's, what tests are given, and what the workspace's root manifest
+//! names in `build-script-env`. What it is given is all of what the store keeps its run
+//! under (`script.rs`). A script that says it reads a variable cargo had that it was not
+//! given (`rerun-if-env-changed`) fails, naming it ([`not_given`]).
+//!
 //! What a sandboxed run read is recorded ([`Spec::record_reads`]), and kept beside `OUT_DIR`
 //! ([`READS`]) and with the run in the store (`script.rs`'s `Kept`). The rule that uses it,
 //! conservative on purpose: cargo runs a script again when a file it named in
@@ -197,8 +204,10 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         );
     }
     let root = workspace_of(script)?;
+    let mut also = std::collections::BTreeSet::new();
     if let Some(root) = &root {
         let out = sandboxed::workspace_opt_out(root)?;
+        also = out.build_script_env;
         if out.build_scripts.contains(package) {
             let why = format!("`{package}` is in `unsandboxed-build-scripts`");
             return Ok(Plan::Outside(format!("{why} in {}", out.manifest.display()), env));
@@ -241,6 +250,7 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     readable.retain(|it| !all.iter().any(|other| other != it && it.starts_with(other)));
     let mut not_inputs = vec![script.real.to_owned()];
     not_inputs.extend(std::fs::canonicalize(script.real).ok());
+    let env = env.into_iter().filter(|(name, _)| given(name) || also.contains(name)).collect();
     let spec = Spec {
         cwd: script.cwd.to_owned(),
         env,
@@ -252,6 +262,135 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         not_inputs,
     };
     Ok(Plan::Sandboxed { spec, root_manifest: root.map(|it| it.join("Cargo.toml")) })
+}
+
+/// Whether the variable `name` of cargo's environment is given to a build script in the
+/// sandbox: cargo's own for scripts (`CARGO_*`, `DEP_*`, `OUT_DIR`, `TARGET`, the profile's),
+/// the toolchain's and ra-jit's (ra-jit is the `RUSTC` a script runs), the C compiler's, its
+/// tools' and their flags, by any target (`CC`, `CC_<target>`, `TARGET_CC`), pkg-config's and
+/// CMake's, the SDKs' of Apple's platforms, Nix's compiler wrappers', the jobserver, and what
+/// a test is given ([`sandboxed::KEPT`]).
+pub(crate) fn given(name: &str) -> bool {
+    const PREFIXES: [&str; 11] = [
+        "CARGO_",
+        "DEP_",
+        "RA_JIT_",
+        "BLAZE_",
+        "NIX_",
+        "PKG_CONFIG",
+        "CMAKE",
+        "HOST_",
+        "TARGET_",
+        "CXXSTDLIB",
+        "LC_",
+    ];
+    const NAMES: [&str; 29] = [
+        "OUT_DIR",
+        "TARGET",
+        "HOST",
+        "NUM_JOBS",
+        "OPT_LEVEL",
+        "DEBUG",
+        "PROFILE",
+        "RUSTC",
+        "RUSTDOC",
+        "RUSTC_LINKER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "MAKEFLAGS",
+        "MFLAGS",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "CRATE_CC_NO_DEFAULTS",
+        "RUSTC_BOOTSTRAP",
+        "SOURCE_DATE_EPOCH",
+        "SYSROOT",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH",
+        "OBJCPLUS_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "COMPILER_PATH",
+        "GCC_EXEC_PREFIX",
+    ];
+    const TOOLS: [&str; 20] = [
+        "CC",
+        "CXX",
+        "CPP",
+        "AR",
+        "AS",
+        "LD",
+        "RANLIB",
+        "NM",
+        "OBJCOPY",
+        "OBJDUMP",
+        "STRIP",
+        "READELF",
+        "WINDRES",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "ARFLAGS",
+        "ASFLAGS",
+        "RANLIBFLAGS",
+    ];
+    let tool = |it: &&str| {
+        name.strip_prefix(*it).is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+    };
+    // Where cargo and Nix's shell keep what is theirs for this one run: no script's input.
+    const APART: [&str; 3] = ["CARGO_RESOLVER_LOCKFILE_PATH", "NIX_BUILD_TOP", "NIX_BUILD_CORES"];
+    if APART.contains(&name) {
+        return false;
+    }
+    sandboxed::KEPT.contains(&name)
+        || NAMES.contains(&name)
+        || PREFIXES.iter().any(|it| name.starts_with(it))
+        || TOOLS.iter().any(tool)
+        || name.ends_with("_DEPLOYMENT_TARGET")
+        || name == crate::as_rustc::TOOLCHAIN
+}
+
+/// The variables a run that printed `stdout` said it reads (`rerun-if-env-changed`) which
+/// cargo had in `env` but the run in the sandbox was not given (`plan`): it saw them unset.
+pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) -> Vec<String> {
+    let Plan::Sandboxed { spec, .. } = plan else { return Vec::new() };
+    let had = |name: &str, env: &[(String, String)]| env.iter().any(|it| it.0 == name);
+    let mut names: Vec<String> = String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("cargo:")?;
+            let line = line.strip_prefix(':').unwrap_or(line);
+            line.strip_prefix("rerun-if-env-changed=").map(str::to_owned)
+        })
+        .filter(|name| had(name, env) && !had(name, &spec.env))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// What a script that said it reads `names` and was not given them is told, `root_manifest`
+/// being where to give them.
+pub(crate) fn not_given_error(
+    package: &str,
+    names: &[String],
+    root_manifest: Option<&Path>,
+) -> String {
+    let listed: Vec<String> = names.iter().map(|it| format!("{it:?}")).collect();
+    let root = root_manifest
+        .map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
+    format!(
+        "the build script of `{package}` reads {}, set where cargo ran, which a build script in \
+         the sandbox is not given: what it prints and writes would be of {} unset; give it with \
+         `build-script-env = [{}]` under `{}` in {root}, and its value keys the kept run",
+        names.iter().map(|it| format!("`{it}`")).collect::<Vec<_>>().join(", "),
+        if names.len() == 1 { "it" } else { "them" },
+        listed.join(", "),
+        sandboxed::WORKSPACE_TABLE,
+    )
 }
 
 /// Whether `dir` is below a directory a sandbox starts empty: what is there is not seen unless
@@ -523,6 +662,32 @@ mod tests {
             ..Spec::default()
         };
         assert_eq!(inputs(&lines, &script, &spec), ["/dev/shm/ws/pkg/VERSION", "/usr/lib/libc.so"]);
+    }
+
+    #[test]
+    fn a_sandboxed_script_is_given_what_cargo_and_a_c_compiler_read() {
+        for name in ["OUT_DIR", "CARGO_CFG_UNIX", "DEP_Z_INCLUDE", "CC", "CFLAGS_aarch64_linux"] {
+            assert!(given(name), "{name}");
+        }
+        for name in ["PATH", "PKG_CONFIG_PATH", "SOURCE_DATE_EPOCH", "MACOSX_DEPLOYMENT_TARGET"] {
+            assert!(given(name), "{name}");
+        }
+        for name in ["OPENSSL_DIR", "CCACHE", "RUSTC_WRAPPER", "NIX_BUILD_TOP", "SSH_AUTH_SOCK"] {
+            assert!(!given(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_script_that_says_it_reads_what_it_was_not_given_is_named() {
+        let pair = |name: &str| (name.to_owned(), "x".to_owned());
+        let spec = Spec { env: vec![pair("CC")], ..Spec::default() };
+        let plan = Plan::Sandboxed { spec, root_manifest: None };
+        let outside = [pair("CC"), pair("OPENSSL_DIR")];
+        let stdout = b"cargo:rerun-if-env-changed=CC\ncargo::rerun-if-env-changed=OPENSSL_DIR\n\
+            cargo:rerun-if-env-changed=OPENSSL_DIR\ncargo:rerun-if-env-changed=UNSET\n";
+        assert_eq!(not_given(stdout, &outside, &plan), ["OPENSSL_DIR"]);
+        let error = not_given_error("openssl-sys", &["OPENSSL_DIR".into()], None);
+        assert!(error.contains("`openssl-sys`") && error.contains("[\"OPENSSL_DIR\"]"), "{error}");
     }
 
     #[test]
