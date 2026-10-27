@@ -469,6 +469,9 @@ For those, rust-analyzer's type checking follows rustc's in what it reports:
 - No "type annotations needed" (E0282) in a body that already has an error, as rustc's
   `InferCtxt::tainted_by_errors` suppresses it at writeback and where a type must be known
   (`hir-ty/src/infer.rs`, `InferenceDiagnostic::taints_body`).
+- A binary operator applied to types with no impl of its trait is an error (E0369, E0368
+  for `op=`) that taints the body, as rustc's `check_overloaded_binop` reports it
+  (`hir-ty/src/infer/op.rs`).
 
 With no borrow checker, the 246 units rustc accepts would pass. Now:
 

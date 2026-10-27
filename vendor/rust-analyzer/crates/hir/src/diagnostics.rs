@@ -136,6 +136,7 @@ diagnostics![AnyDiagnostic<'db> ->
     BreakOutsideOfLoop,
     CannotBeDereferenced<'db>,
     UnaryOperatorCannotBeApplied<'db>,
+    BinaryOperatorCannotBeApplied<'db>,
     CannotImplicitlyDerefTraitObject<'db>,
     CannotIndexInto<'db>,
     CastToUnsized<'db>,
@@ -375,6 +376,14 @@ pub struct UnaryOperatorCannotBeApplied<'db> {
     pub expr: InFile<ExprOrPatPtr>,
     pub op: ast::UnaryOp,
     pub found: Type<'db>,
+}
+
+#[derive(Debug)]
+pub struct BinaryOperatorCannotBeApplied<'db> {
+    pub expr: InFile<ExprOrPatPtr>,
+    pub op: ast::BinaryOp,
+    pub lhs: Type<'db>,
+    pub rhs: Type<'db>,
 }
 
 #[derive(Debug)]
@@ -2036,6 +2045,11 @@ impl<'db> AnyDiagnostic<'db> {
             InferenceDiagnostic::UnaryOperatorCannotBeApplied { expr, op, found } => {
                 let expr = expr_syntax(*expr)?;
                 UnaryOperatorCannotBeApplied { expr, op: *op, found: new_ty(found.as_ref()) }.into()
+            }
+            InferenceDiagnostic::BinaryOperatorCannotBeApplied { expr, op, lhs, rhs } => {
+                let expr = expr_syntax(*expr)?;
+                let (lhs, rhs) = (new_ty(lhs.as_ref()), new_ty(rhs.as_ref()));
+                BinaryOperatorCannotBeApplied { expr, op: *op, lhs, rhs }.into()
             }
             InferenceDiagnostic::MutRefInImmRefPat { pat } => {
                 let pat = pat_syntax(*pat)?.map(Into::into);

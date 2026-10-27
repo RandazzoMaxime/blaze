@@ -32,6 +32,7 @@ mod handlers {
     pub(crate) mod array_pattern_without_fixed_length;
     pub(crate) mod await_outside_of_async;
     pub(crate) mod bad_rtn;
+    pub(crate) mod binary_operator_cannot_be_applied;
     pub(crate) mod borrowck;
     pub(crate) mod break_outside_of_loop;
     pub(crate) mod cannot_be_dereferenced;
@@ -486,6 +487,7 @@ fn semantic_diagnostics_asked(
             AnyDiagnostic::AwaitOutsideOfAsync(d) => handlers::await_outside_of_async::await_outside_of_async(&ctx, &d),
             AnyDiagnostic::CannotBeDereferenced(d) => handlers::cannot_be_dereferenced::cannot_be_dereferenced(&ctx, &d),
             AnyDiagnostic::UnaryOperatorCannotBeApplied(d) => handlers::unary_operator_cannot_be_applied::unary_operator_cannot_be_applied(&ctx, &d),
+            AnyDiagnostic::BinaryOperatorCannotBeApplied(d) => handlers::binary_operator_cannot_be_applied::binary_operator_cannot_be_applied(&ctx, &d),
             AnyDiagnostic::CannotImplicitlyDerefTraitObject(d) => handlers::cannot_implicitly_deref_trait_object::cannot_implicitly_deref_trait_object(&ctx, &d),
             AnyDiagnostic::CannotIndexInto(d) => handlers::cannot_index_into::cannot_index_into(&ctx, &d),
             AnyDiagnostic::CastToUnsized(d) => handlers::invalid_cast::cast_to_unsized(&ctx, &d),

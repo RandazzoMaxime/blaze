@@ -48,7 +48,9 @@ use hir_def::{
     VariantId,
     attrs::AttrFlags,
     expr_store::{Body, ExpressionStore, HygieneId, body::Param, path::Path},
-    hir::{BindingId, Expr, ExprId, ExprOrPatId, ExprOrPatIdPacked, LabelId, PatId, UnaryOp},
+    hir::{
+        BinaryOp, BindingId, Expr, ExprId, ExprOrPatId, ExprOrPatIdPacked, LabelId, PatId, UnaryOp,
+    },
     lang_item::LangItems,
     layout::Integer,
     resolver::{HasResolver, ResolveValueResult, Resolver, TypeNs, ValueNs},
@@ -429,6 +431,14 @@ pub enum InferenceDiagnostic {
         #[type_visitable(ignore)]
         op: UnaryOp,
         found: StoredTy,
+    },
+    BinaryOperatorCannotBeApplied {
+        #[type_visitable(ignore)]
+        expr: ExprId,
+        #[type_visitable(ignore)]
+        op: BinaryOp,
+        lhs: StoredTy,
+        rhs: StoredTy,
     },
     MutRefInImmRefPat {
         #[type_visitable(ignore)]
