@@ -815,7 +815,8 @@ mod tests {
         };
         let plan = plan(&script).unwrap();
         assert!(!plan.env().iter().any(|it| it.0 == "RUSTC_WRAPPER"));
-        let stdout = b"cargo::rerun-if-env-changed=RUSTC_WRAPPER\ncargo::rerun-if-env-changed=RUSTC\n";
+        let stdout =
+            b"cargo::rerun-if-env-changed=RUSTC_WRAPPER\ncargo::rerun-if-env-changed=RUSTC\n";
         assert!(not_given(stdout, &env, &plan).is_empty());
         _ = std::fs::remove_dir_all(&dir);
     }
