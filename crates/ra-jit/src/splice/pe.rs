@@ -851,6 +851,9 @@ impl<'a> Patch<'a> {
             redirected: writes.len() as u64,
             statics: 0,
             writes,
+            // ponytail: a static new in a patch is the patch's own here, as before lasting
+            // statics; it starts again from its first value with each patch.
+            lasting: Vec::new(),
         };
         Ok((code, moved))
     }
