@@ -1,6 +1,6 @@
 # ra-jit site
 
-https://ra-jit.ix.dev. Every page is a [Flecs](https://github.com/SanderMertens/flecs) script. A Rust renderer
+https://ix.dev/blaze/ (where it is served and how: [Hosting](#hosting-ixdevblaze)). Every page is a [Flecs](https://github.com/SanderMertens/flecs) script. A Rust renderer
 (`renderer/`, compiled to wasm) turns them into HTML, at build time for the static pages and per request in a
 Cloudflare Worker for the pages with comments; TS is the host around it: the build, the worker's routing, auth, D1 and
 headers, and the browser scripts.
@@ -61,6 +61,36 @@ bun run dev      # wrangler dev: rebuilds on change; apply the D1 migrations wit
 bun run deploy   # build + wrangler deploy
 ```
 
+## Hosting (ix.dev/blaze)
+
+The site is the Cloudflare Worker `ra-jit` (account Indexable). `.github/workflows/site.yaml` deploys it on a push
+to main once the repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set (the token needs Workers
+Scripts, Workers Routes and D1 edit on the account and the ix.dev zone); until then it only builds, and the site is
+deployed by hand from an up-to-date main, logged in with `wrangler login`:
+
+```
+cd site && uv run --script renderer/fetch.py && SITE_AUDIO_REMOTE=1 bunx wrangler deploy
+```
+
+(`wrangler deploy` runs the build itself, so `SITE_AUDIO_REMOTE=1` has to be in its environment, or the pages lose
+their narration players.) The move to ix.dev/blaze was deployed that way on 2026-10-27 (version
+2f7138f1-5ae3-42cf-b417-8538770f446e); nothing was changed in the Cloudflare dashboard or API by hand.
+
+It is reached three ways, all declared in `wrangler.jsonc` `routes`, so `wrangler deploy` creates them:
+
+- `ix.dev/blaze*`: a zone route on ix.dev. The rest of ix.dev (its `ix.dev/*` route to the `ix-web` worker, DNS,
+  the other routes) is terraform in indexable-inc/ix (`nix/terraform/cloudflare`); Cloudflare picks the most specific
+  route, so this one wins over `ix.dev/*` without touching that config. It ends in `*` because a pattern without one
+  does not match a URL with a query.
+- `ra-jit.ix.dev` (the old home) and `blaze.ix.dev`: Workers custom domains (Cloudflare makes their DNS records and
+  certificates). The worker answers every request on them with a 301 (308 for a non-GET, which keeps a form post) to
+  the same path and query under https://ix.dev/blaze.
+
+`/blaze` itself is a 301 to `/blaze/`. The origin and base are `Served` on `site` in `content/site.flecs`: the
+renderer prefixes every link, asset and form action with the base and writes the canonical and `og:` tags from the
+origin; the build writes `.gen/site.json` (for the worker) and `dist/sitemap.xml`, and copies the repo's `install.sh`
+to `dist/install.sh` (https://ix.dev/blaze/install.sh). To move the site again, change `Served` and the routes.
+
 ## RFCs and comments
 
 An RFC is a file in `content/rfcs/`: an instance of the `Rfc` prefab under `site.rfcs`. Every block in a `Doc` (the
@@ -87,10 +117,15 @@ To look at the page with other data, point `BENCH_HISTORY` at a directory of `.j
 
 ## Worker (`worker/`)
 
-`worker/index.ts` is the Worker entry (plain `export default { fetch }`). Workers static assets serve `dist/` (built by
-`bun gen/build.ts`); the paths in `wrangler.jsonc` `assets.run_worker_first` (`/api/*`, `/auth/*`, `/updates`,
-`/charter`, `/rfcs/*`) reach the worker first, and anything else it is handed goes to `env.ASSETS`. A missing page gets
-`dist/404.html`. The build fails when a discussable page has no pattern there.
+`worker/index.ts` is the Worker entry (plain `export default { fetch }`). `assets.run_worker_first` is `true`, so
+every request reaches the worker: `base.ts` `enter` redirects other hosts, strips the base (`/blaze`) from the path and
+the worker routes the site path (`/api/*`, `/auth/*`, `/updates`, `/audio/*`, discussable pages); anything else goes
+to `env.ASSETS`, which serves `dist/` (built by `bun gen/build.ts`, laid out without the base). A missing page gets
+`dist/404.html`. Since every response comes from the worker, a `_headers` file would not apply: `http.ts`
+`assetHeaders` sets the CSP, nosniff and referrer policy on assets.
+
+- `base.ts`: where the site is served (`Served` on `site` in `content/site.flecs`, written by the build to
+  `.gen/site.json`), `outer` (a site path as the browser sees it) and the redirects from the old hosts.
 
 - `auth.ts`: GitHub sign-in and the session cookie.
 - `pages.ts`: discussable pages, rendered with their comments (below).
@@ -114,10 +149,9 @@ bunx tsc --noEmit -p tsconfig.json                         # type-checks worker/
 Secrets (`wrangler secret put`, or `.dev.vars` locally; `.dev.vars*` is gitignored): `GITHUB_CLIENT_SECRET`,
 `TURNSTILE_SECRET_KEY`.
 
-The cookies are `__Host-` cookies, so they are `Secure`. `wrangler dev` serves plain http://localhost by default:
-Firefox keeps `__Host-` cookies there, but Safari drops every `Secure` cookie on http://localhost and Chrome has
-dropped `__Host-` ones (crbug 40202941), so sign-in loses its cookie. For local sign-in run
-`bunx wrangler dev --local-protocol https` (and register `https://localhost:8787/auth/github/callback` on the dev
+The cookies are `__Secure-` cookies, so they are `Secure`. `wrangler dev` serves plain http://localhost by default:
+Safari drops every `Secure` cookie on http://localhost, so sign-in can lose its cookie there. For local sign-in run
+`bunx wrangler dev --local-protocol https` (and register `https://localhost:8787/blaze/auth/github/callback` on the dev
 OAuth App). Anything without sign-in works over http.
 
 ## Comments (`/api/comments`, `/auth/*`)
@@ -147,11 +181,13 @@ Pages tagged `Discussable` take comments, per block or on the page as a whole (b
 docs and blocks listed there, and stores the first 140 chars of the block's text as the comment's `quote` (none for
 `_page`). Tables `users`, `sessions`, `comments` (`migrations/0002_comments.sql`).
 
-Sign-in is a GitHub OAuth App with no scopes: `GET /auth/github?next=/path` (the state is in the `__Host-gh_oauth`
+Sign-in is a GitHub OAuth App with no scopes: `GET /auth/github?next=/path` (the state is in the `__Secure-blaze_gh_oauth`
 cookie, 10 minutes), callback `/auth/github/callback`, `POST /auth/logout` (form field `next`). The access token is
 used once to read `/user`, then revoked (`DELETE /applications/{client_id}/token`, in the background). The
-`__Host-session` cookie (30 days) holds a random token; D1 keeps only its SHA-256. Both cookies are HttpOnly, Secure,
-SameSite=Lax, Path=/, no Domain (the `__Host-` prefix makes browsers enforce that, so a subdomain cannot plant one).
+`__Secure-blaze_session` cookie (30 days) holds a random token; D1 keeps only its SHA-256. Both cookies are HttpOnly,
+Secure, SameSite=Lax, Path=/blaze, no Domain, so they go only to ix.dev/blaze/ and never to the rest of ix.dev. (A
+`__Host-` cookie must have Path=/, which would send the session to every ix.dev service.) `next` and the redirects
+are site paths; the worker adds the base (`outer`).
 `next` is parsed as a URL against a placeholder origin: a different origin (`//host`, `/\host`, ...), a control
 character, or more than 1024 chars gives `/`; otherwise the parsed path, query and fragment (percent-encoded ASCII).
 
@@ -171,7 +207,7 @@ character, or more than 1024 chars gives `/`; otherwise the parsed path, query a
   rendered before the delete can stay in edge caches under their old keys for up to 24 h; they are served again only
   if `doc_versions` goes backwards (a D1 Time Travel restore, say), so deploy after a restore, which moves every key.
 
-Setup: create a GitHub OAuth App with the callback `https://ra-jit.ix.dev/auth/github/callback`, put its client id in
+Setup: create a GitHub OAuth App with the callback `https://ix.dev/blaze/auth/github/callback`, put its client id in
 `GITHUB_CLIENT_ID` (`wrangler.jsonc` `vars`; empty turns sign-in off) and its secret with
 `wrangler secret put GITHUB_CLIENT_SECRET`. `COMMENT_ADMINS` is a comma-separated list of numeric GitHub user ids
 (`curl https://api.github.com/users/<login>` shows `id`), compared with the signed-in user's id; logins are not used,

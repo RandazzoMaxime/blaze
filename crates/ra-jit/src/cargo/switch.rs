@@ -1,7 +1,10 @@
 //! `ra-jit enable` and `ra-jit disable`: whether plain cargo builds the crates of the user's
 //! workspaces through ra-jit. Cargo is told in its own configuration, the file in its home
 //! directory, as `build.rustc-workspace-wrapper`. What the file was before is kept next to
-//! it, and `disable` puts it back.
+//! it, and `disable` puts it back. `cargo fmt` and `cargo clippy`, which cargo does not build
+//! in, are linked to blaze's ([`links`]).
+
+mod links;
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +35,9 @@ pub(crate) struct Enabled {
     pub(crate) chained: Option<String>,
     /// The wrapper cargo is told now.
     pub(crate) wrapper: PathBuf,
+    /// The commands linked to blaze's.
+    #[serde(default)]
+    links: Vec<links::Link>,
 }
 
 /// Cargo's home directory, as cargo finds it.
@@ -94,10 +100,19 @@ pub(crate) fn enable() -> anyhow::Result<i32> {
         "{} is not installed next to ra-jit; plain cargo is not changed",
         wrapper.display()
     );
-    if let Some(enabled) = Enabled::read() {
+    let home = cargo_home().context("no CARGO_HOME or HOME")?;
+    if let Some(mut enabled) = Enabled::read() {
         if enabled.wrapper == wrapper && wrapper_in(&enabled.config).as_deref() == wrapper.to_str()
         {
-            println!("ra-jit is enabled already in {}", enabled.config.display());
+            let mut made = Vec::new();
+            let lines = links::make(&home, &enabled.links, &mut made);
+            if made.is_empty() && lines.as_ref().is_ok_and(Vec::is_empty) {
+                println!("ra-jit is enabled already in {}", enabled.config.display());
+            }
+            enabled.links.retain(|it| !made.iter().any(|made| made.path == it.path));
+            enabled.links.extend(made);
+            enabled.write()?;
+            lines?.iter().for_each(|it| println!("{it}"));
             return Ok(0);
         }
         // Another ra-jit, or a configuration that was changed since: start over from what
@@ -123,7 +138,8 @@ pub(crate) fn enable() -> anyhow::Result<i32> {
             config.display()
         )
     })?;
-    let enabled = Enabled { config: config.clone(), before, written, chained, wrapper };
+    let mut enabled =
+        Enabled { config: config.clone(), before, written, chained, wrapper, links: Vec::new() };
     enabled.write()?;
     if let Some(dir) = config.parent() {
         std::fs::create_dir_all(dir)?;
@@ -134,6 +150,11 @@ pub(crate) fn enable() -> anyhow::Result<i32> {
     if let Some(chained) = &enabled.chained {
         println!("rustc runs through `{chained}` as before, under ra-jit");
     }
+    let mut made = Vec::new();
+    let lines = links::make(&home, &[], &mut made);
+    enabled.links = made;
+    enabled.write()?;
+    lines?.iter().for_each(|it| println!("{it}"));
     let cwd = std::env::current_dir()?;
     for line in around(&cwd).into_iter().chain(overrides(&cwd)) {
         println!("{line}");
@@ -149,6 +170,7 @@ pub(crate) fn disable() -> anyhow::Result<i32> {
         println!("ra-jit is not enabled");
         return Ok(0);
     };
+    links::undo(&enabled.links)?.iter().for_each(|it| println!("{it}"));
     let config = &enabled.config;
     let now = std::fs::read_to_string(config).ok();
     match (&now, &enabled.before) {
@@ -187,6 +209,9 @@ pub(crate) fn status(cwd: &Path) -> Vec<String> {
     }
     if wrapper_in(&enabled.config).as_deref() != enabled.wrapper.to_str() {
         lines.push(format!("  but {} no longer names ra-jit", enabled.config.display()));
+    }
+    if let Some(home) = cargo_home() {
+        lines.extend(links::status(&home, &enabled.links).into_iter().map(|it| format!("  {it}")));
     }
     lines.extend(around(cwd).into_iter().chain(overrides(cwd)).map(|it| format!("  {it}")));
     lines

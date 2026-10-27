@@ -36,6 +36,8 @@ CASES = [
     ("pkgid serde@1", False),
     ("pkgid no-such-package", False),
     ("pkgid https://github.com/rust-lang/crates.io-index#serde", False),
+    ("read-manifest", True),
+    ("read-manifest --manifest-path Cargo.toml", True),
     ("fetch", False),
     ("fetch --target x86_64-pc-windows-msvc", False),
 ]
