@@ -1472,23 +1472,33 @@ def cost(tally):
         tally.say(name, "not run", "it counts DWARF's variables")
     else:
         def variables(settings, store):
+            """Builds at each of `settings` from one store, and the variables of the object and
+            what ra-jit's units of the binary tell of after each."""
             before = os.environ.pop("RA_JIT_CACHE", None)
             if store:
                 os.environ["RA_JIT_CACHE"] = tempfile.mkdtemp(prefix="debuginfo-store-")
+            told = []
             try:
                 for setting in settings:
                     os.environ["CARGO_PROFILE_DEV_DEBUG"] = setting
                     fx.ra_jit_build()
+                    dump = subprocess.run([DWARFDUMP, "--debug-info", fx.objects[0]], capture_output=True, text=True).stdout
+                    told.append((dump.count("DW_TAG_variable"), described(fx.binary)))
             finally:
                 if store:
                     shutil.rmtree(os.environ.pop("RA_JIT_CACHE"), ignore_errors=True)
                 if before is not None:
                     os.environ["RA_JIT_CACHE"] = before
-            dump = subprocess.run([DWARFDUMP, "--debug-info", fx.objects[0]], capture_output=True, text=True).stdout
-            return dump.count("DW_TAG_variable")
+            return told
         # Against a build at `true` from a store a build at `true` filled.
-        same, after = variables(["true", "true"], True), variables(["line-tables-only", "true"], True)
+        (_, first), (same, again) = variables(["true", "true"], True)
+        after = variables(["line-tables-only", "true"], True)[-1][0]
         tally.say(name, "described" if after == same else "VARIABLES LOST", f"{after} variables, {same} after one at true")
+        # What a build takes from the store is what it would have compiled: Cranelift's cache
+        # of code kept a frame without its last slots, and a root refused when compiled was
+        # taken from the store (#242).
+        tally.say("cost: debug = true from the store a build at true filled", "described" if again == first else "NOT THE SAME",
+                  f"{again[0]} functions and {again[1]} variables, {first[0]} and {first[1]} from an empty store")
     os.environ["CARGO_PROFILE_DEV_DEBUG"] = "true"
 
 
