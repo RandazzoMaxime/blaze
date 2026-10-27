@@ -149,6 +149,11 @@ struct Args {
     /// Where to write, after `exe` is linked, the dep-info rustc would have of the crate asked
     /// for: the files of its modules, as cargo reads them to know when to build it again.
     dep_info: Option<PathBuf>,
+    /// Where to write, after `exe` is linked, every file the build read for a crate that is
+    /// not the toolchain's, one a line, and each variable of this process `env!` read, as
+    /// [`cargo::keyed::var`] names it: what a build script's or a proc macro's build is kept
+    /// in the store by (`cargo/own_script.rs`).
+    inputs: Option<PathBuf>,
     /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
     /// library's, not another of that name the program has too.
     library: bool,
@@ -247,6 +252,7 @@ impl Args {
         let mut exe = None;
         let mut shared = false;
         let mut dep_info = None;
+        let mut inputs = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
@@ -291,6 +297,7 @@ impl Args {
                 "--exe" => exe = Some(PathBuf::from(value()?)),
                 "--shared" => shared = true,
                 "--dep-info" => dep_info = Some(PathBuf::from(value()?)),
+                "--inputs" => inputs = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
                 "--cfg-test" => cfg_test = true,
@@ -341,6 +348,7 @@ impl Args {
             exe,
             shared,
             dep_info,
+            inputs,
             library: false,
             cfg_test,
             own_target,
@@ -4680,9 +4688,17 @@ fn link_executable(
         Ok(exports)
     });
     let exports = exports.transpose()?;
-    let took =
-        link::executable(db, &program, &objects, sysroot, exe, exports.as_deref(), &args.link_args)
-            .map_err(|it| refused_linked(it, args))?;
+    let took = link::executable(
+        db,
+        &program,
+        &objects,
+        sysroot,
+        exe,
+        exports.as_deref(),
+        &args.link_args,
+        args.debug.level,
+    )
+    .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
         "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
@@ -4715,7 +4731,8 @@ fn own_link_line(db: &RootDatabase, args: &Args) -> anyhow::Result<Option<(Strin
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-    let cmd = link::command(db, &program, &objects, sysroot, exe, &args.link_args)?;
+    let cmd =
+        link::command(db, &program, &objects, sysroot, exe, &args.link_args, args.debug.level)?;
     Ok(Some((cmd, exe.clone())))
 }
 
@@ -4780,6 +4797,36 @@ fn write_dep_info(
         }
     }
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes to `path` what [`Args::inputs`] says: the files of the modules of every crate that
+/// is not the toolchain's, what `include!` and its kin read for them, and the variables of
+/// this process `env!` and `option_env!` read where the crate's description had none.
+fn write_inputs(db: &RootDatabase, vfs: &vfs::Vfs, path: &Path) -> anyhow::Result<()> {
+    let krates: Vec<Crate> =
+        Crate::all(db).into_iter().filter(|it| !it.origin(db).is_lang()).collect();
+    let mut files = Vec::new();
+    for &krate in &krates {
+        let modules = krate.modules(db).into_iter().map(|it| it.definition_source_file_id(db));
+        files.extend(modules.map(|it| it.original_file(db).file_id(db)));
+        let included = hir_def::include_macro_invoc(db, krate.into()).iter();
+        files.extend(included.map(|(_, file)| file.file_id(db)));
+    }
+    let mut lines: Vec<String> =
+        files.iter().filter_map(|id| Some(vfs.file_path(*id).as_path()?.to_string())).collect();
+    lines.extend(
+        krates.iter().flat_map(|it| db.included_by((*it).into())).map(|it| it.0.to_string()),
+    );
+    for (krate, key) in db.env_read() {
+        let ours = krates.iter().any(|it| ide_db::base_db::Crate::from(*it) == krate);
+        if ours && krate.env(db).get(&key).is_none() {
+            lines.push(cargo::keyed::var(&key));
+        }
+    }
+    lines.sort();
+    lines.dedup();
+    anyhow::ensure!(!lines.is_empty(), "no file was loaded");
+    std::fs::write(path, lines.join("\n")).with_context(|| format!("writing {}", path.display()))
 }
 
 /// [`build`] of a build that is never held.
@@ -6545,6 +6592,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             exe: args.exe.clone(),
             shared: args.shared,
             dep_info: None,
+            inputs: None,
             library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
@@ -8847,6 +8895,9 @@ fn run_holding(
                 }
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
+                }
+                if let Some(path) = &args.inputs {
+                    write_inputs(&db, tree.vfs(), path)?;
                 }
             }
             if let (Some(key), false) = (&manifest_key, served) {

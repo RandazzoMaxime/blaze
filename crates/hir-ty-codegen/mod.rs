@@ -196,8 +196,9 @@ macro_rules! unsupported {
     };
 }
 
-// After `unsupported!`, which it uses.
+// After `unsupported!`, which they use.
 mod sve;
+mod wasm_simd;
 
 /// Stops the build with an error ([`CodegenError::Refused`]).
 macro_rules! refused {
@@ -4394,6 +4395,16 @@ pub fn link_name(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
     Some(as_declared(name.as_str(), global_prefix()))
 }
 
+/// The module of a wasm module's imports an item of an `extern` block is one of, on a target
+/// whose objects are wasm's.
+fn wasm_import_module(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
+    let ItemContainerId::ExternBlockId(block) = func.lookup(db).container else { return None };
+    if !Target::current().writes_wasm_objects() {
+        return None;
+    }
+    AttrFlags::wasm_import_module(db, block).map(|it| it.as_str().to_owned())
+}
+
 /// The prefix the object writer puts in front of every name declared to it for the target:
 /// `_` on Mach-O and on 32-bit Windows, nothing elsewhere.
 fn global_prefix() -> Option<char> {
@@ -5557,7 +5568,8 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
     /// Puts the `main` the C runtime calls in the object.
     fn define_start(&mut self, main: FunctionId) -> Result<()> {
         let compiled = compiled_start(self.db, main).as_ref().map_err(Clone::clone)?;
-        let id = self.module.declare_function("main", Linkage::Export, &compiled.code.signature)?;
+        let (symbol, _) = Target::current().entry();
+        let id = self.module.declare_function(symbol, Linkage::Export, &compiled.code.signature)?;
         self.stitch(id, compiled)?;
         Ok(())
     }
@@ -5706,11 +5718,18 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         data.define(Box::new([]));
         self.module.define_data(text, &data).map_err(backend)?;
         self.stand_ins.push((text, message.into_boxed_slice()));
-        let mut write = self.module.make_signature();
-        write.params.extend([types::I32, ptr(), ptr()].map(AbiParam::new));
-        write.returns.push(AbiParam::new(ptr()));
-        let write = self.import("write", &write)?;
-        let abort = self.import("abort", &self.module.make_signature())?;
+        // With no C library the stand-in only traps: the link still has its message.
+        let said = if Target::current().has_libc() {
+            let mut write = self.module.make_signature();
+            write.params.extend([types::I32, ptr(), ptr()].map(AbiParam::new));
+            write.returns.push(AbiParam::new(ptr()));
+            Some((
+                self.import("write", &write)?,
+                self.import("abort", &self.module.make_signature())?,
+            ))
+        } else {
+            None
+        };
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
         let mut builder_ctx = std::mem::take(&mut self.builder_ctx);
@@ -5720,12 +5739,14 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         builder.switch_to_block(block);
         let text = self.module.declare_data_in_func(text, builder.func);
         let text = builder.ins().symbol_value(ptr(), text);
-        let stderr = builder.ins().iconst(types::I32, 2);
-        let len = builder.ins().iconst(ptr(), len);
-        let write = self.module.declare_func_in_func(write, builder.func);
-        builder.ins().call(write, &[stderr, text, len]);
-        let abort = self.module.declare_func_in_func(abort, builder.func);
-        builder.ins().call(abort, &[]);
+        if let Some((write, abort)) = said {
+            let stderr = builder.ins().iconst(types::I32, 2);
+            let len = builder.ins().iconst(ptr(), len);
+            let write = self.module.declare_func_in_func(write, builder.func);
+            builder.ins().call(write, &[stderr, text, len]);
+            let abort = self.module.declare_func_in_func(abort, builder.func);
+            builder.ins().call(abort, &[]);
+        }
         builder.ins().trap(TrapCode::user(1).expect("non-zero trap code"));
         builder.seal_all_blocks();
         builder.finalize(self.module.isa().frontend_config());
@@ -7167,6 +7188,9 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 && let Some(symbol) = link_name(self.db, func)
                 && !symbol.starts_with("llvm.")
             {
+                if let Some(module) = wasm_import_module(self.db, func) {
+                    return self.import(&wasm_object::import_symbol(&module, &symbol), sig);
+                }
                 return self.import(&symbol, sig);
             }
             if let InstanceDef::Fn(func) = def
@@ -8747,6 +8771,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Ok(match layout.backend_repr {
                 _ if layout.is_zst() => PassMode::Ignore,
                 BackendRepr::Scalar(scalar) => PassMode::Direct(self.scalar(scalar)?),
+                // A vector is no aggregate to the convention: it goes as a `v128`.
+                BackendRepr::SimdVector { .. } if layout.size.bytes() == 16 && self.simd128() => {
+                    PassMode::Cast(types::I64X2)
+                }
+                BackendRepr::SimdVector { .. } => {
+                    unsupported!("a SIMD vector in the wasm C ABI without `simd128`")
+                }
                 // One of 128 bits is two `i64`s as an argument, and returned in memory.
                 _ => match self.lone_scalar(ty)? {
                     Some(scalar) if !is_ret || scalar.size(self.dl()).bits() <= 64 => {
@@ -13510,17 +13541,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let returned = self.normalize(sig_of(main_ty).output());
         let start_args = GenericArgs::new_from_slice(&[returned.into()]);
         let start_sig = sig_of(fn_ty(start, start_args));
+        let (_, with_arguments) = Target::current().entry();
         let mut sig = Signature::new(self.cg.isa.default_call_conv());
-        sig.params = vec![AbiParam::new(types::I32), AbiParam::new(ptr())];
+        if with_arguments {
+            sig.params = vec![AbiParam::new(types::I32), AbiParam::new(ptr())];
+        }
         sig.returns = vec![AbiParam::new(types::I32)];
         self.builder.func.signature = sig;
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
-        let &[argc, argv] = self.builder.block_params(entry) else {
-            unsupported!("`main` is called with a count and the arguments");
+        let (argc, argv) = match *self.builder.block_params(entry) {
+            [argc, argv] => (argc, argv),
+            [] => (self.builder.ins().iconst(types::I32, 0), self.builder.ins().iconst(ptr(), 0)),
+            _ => unsupported!("`main` is called with a count and the arguments"),
         };
-        let argc = self.builder.ins().sextend(types::I64, argc);
+        // `argc` is an `isize` for `lang_start`.
+        let argc = if ptr() == types::I32 { argc } else { self.builder.ins().sextend(ptr(), argc) };
         let callee = self.fn_item(main_ty)?;
         let callee = self.cg.declare_func_address_in_func(callee, self.builder.func);
         let pointer = self.builder.ins().func_addr(ptr(), callee);
@@ -14310,6 +14347,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if self.scalable_intrinsic(name, generic_args, args, dst, dst_ty)? {
             return Ok(Intrinsic::Inline);
         }
+        if self.wasm_simd_intrinsic(name, args, dst, dst_ty)? {
+            return Ok(Intrinsic::Inline);
+        }
         match (name, args) {
             (
                 "wrapping_add" | "unchecked_add" | "wrapping_sub" | "unchecked_sub"
@@ -14820,8 +14860,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     unsupported!("`simd_div` of integers");
                 }
                 // What x86's baseline, SSE2, has an instruction for.
+                let vectors = self.makes_vectors();
                 let chunks = simd_chunks(lane.ty, count).filter(|_| {
-                    out.ty == lane.ty
+                    vectors
+                        && out.ty == lane.ty
                         && match (name, signed) {
                             ("simd_and" | "simd_or" | "simd_xor" | "simd_add" | "simd_sub", _) => {
                                 true
@@ -14951,12 +14993,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 if !lane.ty.is_float() {
                     unsupported!("`{name}` of integers");
                 }
+                // AArch64's LLVM makes a vector of more lanes than one `fmla z, y, x`, the
+                // factors the other way round, which decides which of two NaNs comes out; a
+                // vector of one lane is the scalar's `fmadd`, in order.
+                let swapped = self.cg.target.arch == Arch::Aarch64 && count > 1;
                 let lanes: Vec<Value> = (0..count)
                     .map(|i| {
                         let offset = (i * lane.ty.bytes() as u64) as i32;
                         let [x, y, z] =
                             [a, b, c].map(|v| self.builder.ins().load(lane.ty, MEM, v, offset));
-                        self.builder.ins().fma(x, y, z)
+                        if swapped {
+                            self.builder.ins().fma(y, x, z)
+                        } else {
+                            self.builder.ins().fma(x, y, z)
+                        }
                     })
                     .collect();
                 for (i, value) in lanes.into_iter().enumerate() {
@@ -15053,7 +15103,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 }
                 // Bit `i` of the result is the top bit of lane `i`.
                 let mut bits = self.builder.ins().iconst(types::I64, 0);
-                let chunks = simd_chunks(lane.ty, count).filter(|_| lane.ty.bits() != 16);
+                let vectors = self.makes_vectors();
+                let chunks =
+                    simd_chunks(lane.ty, count).filter(|_| vectors && lane.ty.bits() != 16);
                 for chunk in 0..chunks.map_or(0, |it| it.1) {
                     let vector = chunks.expect("chunks").0;
                     let value = self.builder.ins().load(vector, MEM, src, chunk * 16);
@@ -16096,6 +16148,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         if name.starts_with("aarch64.sve.") || name.starts_with("vector.reverse.nxv") {
             return self.sve_intrinsic(name, args, dst, dst_ty);
+        }
+        if self.wasm_llvm_intrinsic(name, args, dst)? {
+            return Ok(());
         }
         match (name, args) {
             (

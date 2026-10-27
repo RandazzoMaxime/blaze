@@ -1016,6 +1016,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- `cargo blaze test --doc` runs an edited library's examples again: it took an example's
+  program from the run before while the example's own text was unchanged, since blaze's run
+  names no library with `--extern` for the key to stamp, so after an edit that broke them the
+  doc tests passed where cargo's failed. The key now has the cfgs of every crate the library is
+  built from and the files of those of the workspace. `cargo blaze test --doc -q` shows the
+  results tersely, as cargo's `-q` has libtest do (`harness/cargo_ra_jit.py`, flags group).
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
@@ -1038,6 +1044,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   the command that asks, so it takes effect without `blaze stop`; a spare worker no longer
   keeps the daemon's. A load whose proc macro has no `blaze-proc-macro-srv` beside ra-jit
   says where it looked, the command that builds it there, and `RA_JIT_PROC_MACRO_SERVER=0`.
+- A test that runs cargo runs in the sandbox: every cargo takes its locks in its home and
+  records there what it used (`.package-cache`, `.global-cache`), which the read-only machine
+  refused, so trybuild's tests and a cargo plugin's own failed. Cargo's home (`CARGO_HOME`, else
+  `~/.cargo`) is now an overlay, as the workspace and target directory are: the test writes it
+  for itself alone, and nothing of it is kept (docs/cargo.md, "Every test runs in a sandbox").
 
 - The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
   that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
