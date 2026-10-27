@@ -85,12 +85,23 @@ async def fetch(url, bound=60):
 
 
 async def manifest(date):
-    """The nightly of `date`'s channel manifest, or None when there is none."""
-    try:
-        data = await fetch(f"{DIST}/{date}/channel-rust-nightly.toml")
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-        return None
-    return tomllib.loads(data.decode())
+    """The nightly of `date`'s channel manifest, or None when the Rust project published none
+    (404). Any other failure is tried again and then stops the bump: read as "none", a slow
+    answer would quietly pin an older nightly than the newest."""
+    url = f"{DIST}/{date}/channel-rust-nightly.toml"
+    for wait in (0, 5, 30):
+        await asyncio.sleep(wait)
+        try:
+            data = await fetch(url)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            why = f"HTTP {error.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            why = repr(error)
+        else:
+            return tomllib.loads(data.decode())
+    raise Failed(f"pick: {url} could not be read after three tries: {why}")
 
 
 def missing(channel):
@@ -160,19 +171,79 @@ def server_dirs():
     return dirs | {"compiler/rustc_lexer": "compiler/rustc_lexer"}
 
 
+def files_under(root):
+    """Every file and link under `root`, relative to it."""
+    found = set()
+    for dir, subdirs, names in os.walk(root):
+        for name in names + [d for d in subdirs if os.path.islink(os.path.join(dir, d))]:
+            found.add(os.path.relpath(os.path.join(dir, name), root))
+    return found
+
+
+def without_dev_dependencies(root):
+    """Drops the `[dev-dependencies]` table of every manifest under `root`: the server is vendored
+    without its tests, and dropping the table on both sides of the diff keeps it out of the patch,
+    so that upstream editing next to it does not stop the bump."""
+    for path in files_under(root):
+        if os.path.basename(path) != "Cargo.toml":
+            continue
+        full = os.path.join(root, path)
+        text = open(full).read()
+        kept = re.sub(r"(?ms)^\[dev-dependencies\]\n.*?(?=^\[|\Z)", "", text)
+        if kept != text:
+            open(full, "w").write(kept)
+
+
+def prune(new_root, base, ours):
+    """Removes from the server at the new commit what ra-jit leaves out: each file ra-jit deleted
+    from upstream at the old commit, and each file upstream added under a directory ra-jit deleted
+    (new tests in a `test_data` ra-jit does not carry). A file upstream added is kept when the
+    nearest directory above it that upstream had at the old commit is still in ra-jit's copy."""
+    base_dirs = {os.path.dirname(f) for f in base} | {""}
+    base_dirs |= {d for f in base_dirs for d in ancestors(f)}
+    ours_dirs = {os.path.dirname(f) for f in ours} | {""}
+    ours_dirs |= {d for f in ours_dirs for d in ancestors(f)}
+    for path in files_under(new_root):
+        if path in ours:
+            continue
+        if path in base:
+            dropped = True
+        else:
+            nearest = next(d for d in ancestors(path) if d in base_dirs)
+            dropped = nearest not in ours_dirs
+        if dropped:
+            os.remove(os.path.join(new_root, path))
+    for dir, subdirs, names in os.walk(new_root, topdown=False):
+        if dir != new_root and not os.listdir(dir):
+            os.rmdir(dir)
+
+
+def ancestors(path):
+    """`a/b/c` -> `a/b`, `a`, `` (the root last)."""
+    while path:
+        path = os.path.dirname(path)
+        yield path
+
+
 async def vendor(old, new):
     server = os.path.join(ROOT, "vendor/proc-macro-srv")
     dirs = server_dirs()
     paths = [ABI[1], *dirs.values()]
     with tempfile.TemporaryDirectory(prefix="ra-jit-bump-") as work:
-        # ra-jit's changes to the server: upstream at the old commit against vendor/, as a patch.
+        # ra-jit's changes to the server: upstream at the old commit against vendor/, as a patch
+        # of the files both have and those ra-jit added. What ra-jit deleted is carried by `prune`.
         repo = await checkout(old, paths)
         for ours, theirs in dirs.items():
             shutil.copytree(os.path.join(repo, theirs), os.path.join(work, "base", ours), symlinks=True)
             shutil.copytree(os.path.join(server, ours), os.path.join(work, "ours", ours), symlinks=True)
+        without_dev_dependencies(os.path.join(work, "base"))
+        base_files = files_under(os.path.join(work, "base"))
+        ours_files = files_under(os.path.join(work, "ours"))
         diff = await asyncio.create_subprocess_exec(
             "git", "diff", "--no-ext-diff", "--no-index", "--binary", "--no-color", "--no-renames",
-            "base", "ours", cwd=work, env={k: v for k, v in os.environ.items() if k != "GIT_EXTERNAL_DIFF"}, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            "--diff-filter=d", "base", "ours", cwd=work,
+            env={k: v for k, v in os.environ.items() if k != "GIT_EXTERNAL_DIFF"},
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         patch, err = await diff.communicate()
         if diff.returncode not in (0, 1):
             raise Failed(f"vendor: diffing vendor/proc-macro-srv with upstream at {old[:9]} exited "
@@ -181,8 +252,13 @@ async def vendor(old, new):
         patch = re.sub(rb"(?m)(^diff --git | |^--- |^\+\+\+ )([ab])/(?:base|ours)/", rb"\1\2/", patch)
         repo = await checkout(new, paths)
         replace_tree(os.path.join(repo, ABI[1]), os.path.join(ROOT, ABI[0]))
-        for ours, theirs in dirs.items():
-            replace_tree(os.path.join(repo, theirs), os.path.join(server, ours))
+        with tempfile.TemporaryDirectory(prefix="ra-jit-bump-new-") as fresh:
+            for ours, theirs in dirs.items():
+                shutil.copytree(os.path.join(repo, theirs), os.path.join(fresh, ours), symlinks=True)
+            without_dev_dependencies(fresh)
+            prune(fresh, base_files, ours_files)
+            for ours in dirs:
+                replace_tree(os.path.join(fresh, ours), os.path.join(server, ours))
         if not patch.strip():
             return
         patch_file = os.path.join(work, "ra-jit.patch")
