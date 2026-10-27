@@ -209,6 +209,7 @@ diagnostics![AnyDiagnostic<'db> ->
     UnionPatMustHaveExactlyOneField,
     UnionPatHasRest,
     UnimplementedTrait<'db>,
+    ClosureKindMismatch,
     YieldOutsideCoroutine,
     ReturnOutsideFunction,
 ];
@@ -727,6 +728,13 @@ pub struct UnimplementedTrait<'db> {
     pub span: SpanSyntax,
     pub trait_predicate: crate::TraitPredicate<'db>,
     pub parent_trait_predicates: Vec<crate::TraitPredicate<'db>>,
+}
+
+#[derive(Debug)]
+pub struct ClosureKindMismatch {
+    pub span: SpanSyntax,
+    pub expected: crate::FnTrait,
+    pub found: crate::FnTrait,
 }
 
 #[derive(Debug)]
@@ -2264,6 +2272,18 @@ impl<'db> AnyDiagnostic<'db> {
                     })
                     .collect();
                 UnimplementedTrait { span, trait_predicate, parent_trait_predicates }.into()
+            }
+            &SolverDiagnosticKind::ClosureKindMismatch { expected, found, is_async } => {
+                let fn_trait = |kind| match (kind, is_async) {
+                    (rustc_type_ir::ClosureKind::Fn, false) => crate::FnTrait::Fn,
+                    (rustc_type_ir::ClosureKind::FnMut, false) => crate::FnTrait::FnMut,
+                    (rustc_type_ir::ClosureKind::FnOnce, false) => crate::FnTrait::FnOnce,
+                    (rustc_type_ir::ClosureKind::Fn, true) => crate::FnTrait::AsyncFn,
+                    (rustc_type_ir::ClosureKind::FnMut, true) => crate::FnTrait::AsyncFnMut,
+                    (rustc_type_ir::ClosureKind::FnOnce, true) => crate::FnTrait::AsyncFnOnce,
+                };
+                ClosureKindMismatch { span, expected: fn_trait(expected), found: fn_trait(found) }
+                    .into()
             }
         })
     }

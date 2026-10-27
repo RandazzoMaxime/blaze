@@ -472,6 +472,9 @@ For those, rust-analyzer's type checking follows rustc's in what it reports:
 - A binary operator applied to types with no impl of its trait is an error (E0369, E0368
   for `op=`) that taints the body, as rustc's `check_overloaded_binop` reports it
   (`hir-ty/src/infer/op.rs`).
+- A closure required to implement a `Fn*` or `AsyncFn*` trait its closure kind does not
+  allow is E0525, not an unsatisfied bound, as in rustc's
+  `emit_specialized_closure_kind_error` (`hir-ty/src/solver_errors.rs`).
 
 With no borrow checker, the 246 units rustc accepts would pass. Now:
 

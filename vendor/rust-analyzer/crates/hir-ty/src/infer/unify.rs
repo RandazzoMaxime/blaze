@@ -541,6 +541,7 @@ impl<'db> InferenceTable<'db> {
     pub(super) fn has_trait_errors(&self) -> bool {
         self.trait_errors.iter().any(|error| {
             SolverDiagnostic::from_fulfillment_error(
+                &self.infer_ctxt,
                 &error.clone().into_fulfillment_error(&self.infer_ctxt),
             )
             .is_some()
@@ -551,7 +552,7 @@ impl<'db> InferenceTable<'db> {
         diagnostics.extend(std::mem::take(&mut self.trait_errors).into_iter().filter_map(
             |error| {
                 let error = error.into_fulfillment_error(&self.infer_ctxt);
-                SolverDiagnostic::from_fulfillment_error(&error)
+                SolverDiagnostic::from_fulfillment_error(&self.infer_ctxt, &error)
                     .map(InferenceDiagnostic::SolverDiagnostic)
             },
         ));
