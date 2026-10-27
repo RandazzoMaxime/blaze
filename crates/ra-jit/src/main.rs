@@ -10126,7 +10126,9 @@ fn run_holding(
                 }
                 std::thread::spawn(move || {
                     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer)
+                        let answer =
+                            program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer);
+                        program.refused_in_codegen(answer)
                     }));
                     done.store(true, Ordering::SeqCst);
                     // The write that interrupts waits for this.
@@ -10163,7 +10165,9 @@ fn run_holding(
                         let build = scope.spawn(move || {
                             let answer =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    program.sync(&db, listed, paths, edit, wanted, link, defer)
+                                    let answer =
+                                        program.sync(&db, listed, paths, edit, wanted, link, defer);
+                                    program.refused_in_codegen(answer)
                                 }));
                             end_link();
                             answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -10451,6 +10455,28 @@ impl Program {
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
         eprintln!("{why}");
         Err(Refused::Cargos(why))
+    }
+
+    /// Takes a build that code generation refused (`CodegenError::Refused`: what it would
+    /// link would not be the program the source says) as that build's refusal, not the
+    /// worker's error, as [`Program::panicked`] does: the clients are told why and the worker
+    /// stays. Nothing else is built in its place.
+    fn refused_in_codegen(
+        &mut self,
+        answer: anyhow::Result<Result<String, Refused>>,
+    ) -> anyhow::Result<Result<String, Refused>> {
+        let why = match &answer {
+            Err(error) => match error.downcast_ref::<CodegenError>() {
+                Some(CodegenError::Refused(why)) => why.clone(),
+                _ => return answer,
+            },
+            Ok(_) => return answer,
+        };
+        self.known.start_again();
+        self.unbuilt.stale = true;
+        (self.wrote, self.whole) = (None, None);
+        eprintln!("refused: {why}");
+        Ok(Err(Refused::Cargos(why)))
     }
 
     /// Notes the crates rustc did not compile from the files this program is of, when it joins

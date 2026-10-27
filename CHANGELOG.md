@@ -1030,6 +1030,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   `include_bytes!` reads leaves the first values of crates that do not include it known (it
   had made `alloc`'s `STATIC_INNER_SLICE` unknown after a checkout switch,
   `worktrees.py --join --together` on macOS).
+- A build that code generation refuses (a static whose first value is not known to be rustc's,
+  a function rustc's copy of is from before the edit) is that build's refusal, with the reason,
+  not the daemon's end: every checkout's daemon had died with it
+  (`worktrees.py --join --together`, "another edited while it is broken"). Nothing is built in
+  its place, and the next build of that program is a whole one.
 - A whole build of other features or flags no longer leaks into the next: every worker linked
   its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
   loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
