@@ -14,6 +14,7 @@ pub(crate) mod closure;
 pub(crate) mod compile_time;
 mod directives;
 pub(crate) mod fetches;
+mod hermetic;
 pub(crate) mod layout;
 mod messages;
 pub(crate) mod metadata;
