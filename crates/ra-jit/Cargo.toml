@@ -21,6 +21,14 @@ categories = ["development-tools::cargo-plugins", "development-tools::build-util
 name = "ra-jit"
 path = "src/main.rs"
 
+# These make a sandbox with a view, whose seccomp listener the kernel refuses inside the test
+# sandbox's own (one listener to a process): `cargo blaze test` runs them outside.
+[package.metadata.blaze.sandbox]
+unsandboxed-tests = [
+    "sandbox::linux::tests::a_view_shows_its_binds_and_nothing_of_the_machine",
+    "sandbox::linux::tests::a_view_binds_a_store_path_from_anywhere",
+]
+
 # `cargo binstall cargo-blaze`: the archive the release workflow makes for each target, named and
 # laid out as `blaze-v<version>-<target>/` in .github/workflows/release.yaml (and install.sh). A
 # target with no archive is built from source; a third party's build is never used.
