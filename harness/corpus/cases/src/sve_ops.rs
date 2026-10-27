@@ -115,6 +115,37 @@ impl In {
         }
     }
 
+    /// Offsets or indices of lanes of a gather or scatter: from 0 to 63, or from -32 to 31.
+    #[target_feature(enable = "sve")]
+    unsafe fn ou64(&self, k: usize) -> svuint64_t {
+        unsafe { svand_n_u64_x(svptrue_b64(), self.u64(k), 63) }
+    }
+    #[target_feature(enable = "sve")]
+    unsafe fn os64(&self, k: usize) -> svint64_t {
+        unsafe { svsub_n_s64_x(svptrue_b64(), svand_n_s64_x(svptrue_b64(), self.s64(k), 63), 32) }
+    }
+    #[target_feature(enable = "sve")]
+    unsafe fn ou32(&self, k: usize) -> svuint32_t {
+        unsafe { svand_n_u32_x(svptrue_b32(), self.u32(k), 63) }
+    }
+    #[target_feature(enable = "sve")]
+    unsafe fn os32(&self, k: usize) -> svint32_t {
+        unsafe { svsub_n_s32_x(svptrue_b32(), svand_n_s32_x(svptrue_b32(), self.s32(k), 63), 32) }
+    }
+    /// Addresses of lanes from `at` to 511 bytes past it.
+    #[target_feature(enable = "sve")]
+    unsafe fn bu64(&self, k: usize, at: *const u8) -> svuint64_t {
+        unsafe {
+            svadd_n_u64_x(svptrue_b64(), svand_n_u64_x(svptrue_b64(), self.u64(k), 511), at as u64)
+        }
+    }
+    /// Offsets of lanes from a scalar address, up to 255 bytes, as the 32-bit addresses
+    /// of a gather or scatter are.
+    #[target_feature(enable = "sve")]
+    unsafe fn bu32(&self, k: usize) -> svuint32_t {
+        unsafe { svand_n_u32_x(svptrue_b32(), self.u32(k), 255) }
+    }
+
     #[target_feature(enable = "sve")]
     unsafe fn s8(&self, k: usize) -> svint8_t {
         // SAFETY: four vectors of the largest length from there on are in the inputs.
@@ -1037,9 +1068,46 @@ unsafe fn group9(i: &In, o: &mut Out) {
         o.scalar(svlastb_f32(i.p(1), i.f32(1)));
         o.scalar(svlastb_s32(i.p(0), i.s32(0)));
         o.scalar(svlastb_s16(i.p(0), i.s16(0)));
+        o.f64(svld1_gather_s64index_f64(i.p(1), i.at::<f64>(64), i.os64(2)));
+        o.s64(svld1sh_gather_s64index_s64(i.p(1), i.at::<i16>(64), i.os64(2)));
+        o.s64(svld1sw_gather_s64index_s64(i.p(0), i.at::<i32>(64), i.os64(1)));
+        o.s64(svld1_gather_s64index_s64(i.p(0), i.at::<i64>(64), i.os64(1)));
+        o.f64(svld1_gather_s64offset_f64(i.p(0), i.at::<f64>(64), i.os64(1)));
+        o.s64(svld1sh_gather_s64offset_s64(i.p(0), i.at::<i16>(64), i.os64(1)));
+        o.s64(svld1sw_gather_s64offset_s64(i.p(1), i.at::<i32>(64), i.os64(2)));
+        o.s64(svld1_gather_s64offset_s64(i.p(1), i.at::<i64>(64), i.os64(2)));
+        o.s64(svld1sb_gather_s64offset_s64(i.p(0), i.at::<i8>(64), i.os64(1)));
+        o.f64(svld1_gather_u64base_offset_f64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.s64(svld1sh_gather_u64base_offset_s64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.s64(svld1sw_gather_u64base_offset_s64(i.p(1), i.bu64(1, i.at::<u8>(1024)), -8));
+        o.s64(svld1_gather_u64base_offset_s64(i.p(1), i.bu64(1, i.at::<u8>(1024)), -8));
+        o.s64(svld1sb_gather_u64base_offset_s64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.f32(svld1_gather_u32base_offset_f32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.s32(svld1sh_gather_u32base_offset_s32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.s32(svld1_gather_u32base_offset_s32(i.p(1), i.bu32(1), i.at::<u8>(1024) as i64));
+        o.s32(svld1sb_gather_u32base_offset_s32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.f32(svld1_gather_s32index_f32(i.p(1), i.at::<f32>(64), i.os32(2)));
+        o.s32(svld1sh_gather_s32index_s32(i.p(1), i.at::<i16>(64), i.os32(2)));
+        o.s32(svld1_gather_s32index_s32(i.p(0), i.at::<i32>(64), i.os32(1)));
+        o.f32(svld1_gather_s32offset_f32(i.p(0), i.at::<f32>(64), i.os32(1)));
+        o.s32(svld1sh_gather_s32offset_s32(i.p(0), i.at::<i16>(64), i.os32(1)));
+        o.s32(svld1_gather_s32offset_s32(i.p(1), i.at::<i32>(64), i.os32(2)));
+        o.s32(svld1sb_gather_s32offset_s32(i.p(0), i.at::<i8>(64), i.os32(1)));
+        o.f32(svld1_gather_u32index_f32(i.p(1), i.at::<f32>(64), i.ou32(2)));
+        o.s32(svld1sh_gather_u32index_s32(i.p(1), i.at::<i16>(64), i.ou32(2)));
+        o.s32(svld1_gather_u32index_s32(i.p(0), i.at::<i32>(64), i.ou32(1)));
+        o.f32(svld1_gather_u32offset_f32(i.p(0), i.at::<f32>(64), i.ou32(1)));
+        o.s32(svld1sh_gather_u32offset_s32(i.p(0), i.at::<i16>(64), i.ou32(1)));
+        o.s32(svld1_gather_u32offset_s32(i.p(1), i.at::<i32>(64), i.ou32(2)));
+        o.s32(svld1sb_gather_u32offset_s32(i.p(0), i.at::<i8>(64), i.ou32(1)));
         o.s8(svld1_s8(i.p(0), i.at::<i8>(16)));
         o.f64(svld1_f64(i.p(1), i.at::<f64>(40)));
         o.s64(svld1sh_s64(i.p(1), i.at::<i16>(40)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group10(i: &In, o: &mut Out) {
+    unsafe {
         o.s64(svld1sw_s64(i.p(0), i.at::<i32>(16)));
         o.s64(svld1_s64(i.p(0), i.at::<i64>(16)));
         o.s64(svld1sb_s64(i.p(1), i.at::<i8>(40)));
@@ -1072,12 +1140,44 @@ unsafe fn group9(i: &In, o: &mut Out) {
         o.s64x4(svld4_s64(i.p(1), i.at::<i64>(40)));
         o.f32x4(svld4_f32(i.p(1), i.at::<f32>(40)));
         o.s32x4(svld4_s32(i.p(0), i.at::<i32>(16)));
+        o.s16x4(svld4_s16(i.p(0), i.at::<i16>(16)));
+        o.f64(svldff1_gather_s64index_f64(i.p(1), i.at::<f64>(64), i.os64(2)));
+        o.s64(svldff1sh_gather_s64index_s64(i.p(1), i.at::<i16>(64), i.os64(2)));
+        o.s64(svldff1sw_gather_s64index_s64(i.p(0), i.at::<i32>(64), i.os64(1)));
+        o.s64(svldff1_gather_s64index_s64(i.p(0), i.at::<i64>(64), i.os64(1)));
+        o.f64(svldff1_gather_s64offset_f64(i.p(0), i.at::<f64>(64), i.os64(1)));
+        o.s64(svldff1sh_gather_s64offset_s64(i.p(0), i.at::<i16>(64), i.os64(1)));
+        o.s64(svldff1sw_gather_s64offset_s64(i.p(1), i.at::<i32>(64), i.os64(2)));
     }
 }
 #[target_feature(enable = "sve")]
-unsafe fn group10(i: &In, o: &mut Out) {
+unsafe fn group11(i: &In, o: &mut Out) {
     unsafe {
-        o.s16x4(svld4_s16(i.p(0), i.at::<i16>(16)));
+        o.s64(svldff1_gather_s64offset_s64(i.p(1), i.at::<i64>(64), i.os64(2)));
+        o.s64(svldff1sb_gather_s64offset_s64(i.p(0), i.at::<i8>(64), i.os64(1)));
+        o.f64(svldff1_gather_u64base_offset_f64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.s64(svldff1sh_gather_u64base_offset_s64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.s64(svldff1sw_gather_u64base_offset_s64(i.p(1), i.bu64(1, i.at::<u8>(1024)), -8));
+        o.s64(svldff1_gather_u64base_offset_s64(i.p(1), i.bu64(1, i.at::<u8>(1024)), -8));
+        o.s64(svldff1sb_gather_u64base_offset_s64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.f32(svldff1_gather_u32base_offset_f32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.s32(svldff1sh_gather_u32base_offset_s32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.s32(svldff1_gather_u32base_offset_s32(i.p(1), i.bu32(1), i.at::<u8>(1024) as i64));
+        o.s32(svldff1sb_gather_u32base_offset_s32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.f32(svldff1_gather_s32index_f32(i.p(1), i.at::<f32>(64), i.os32(2)));
+        o.s32(svldff1sh_gather_s32index_s32(i.p(1), i.at::<i16>(64), i.os32(2)));
+        o.s32(svldff1_gather_s32index_s32(i.p(0), i.at::<i32>(64), i.os32(1)));
+        o.f32(svldff1_gather_s32offset_f32(i.p(0), i.at::<f32>(64), i.os32(1)));
+        o.s32(svldff1sh_gather_s32offset_s32(i.p(0), i.at::<i16>(64), i.os32(1)));
+        o.s32(svldff1_gather_s32offset_s32(i.p(1), i.at::<i32>(64), i.os32(2)));
+        o.s32(svldff1sb_gather_s32offset_s32(i.p(0), i.at::<i8>(64), i.os32(1)));
+        o.f32(svldff1_gather_u32index_f32(i.p(1), i.at::<f32>(64), i.ou32(2)));
+        o.s32(svldff1sh_gather_u32index_s32(i.p(1), i.at::<i16>(64), i.ou32(2)));
+        o.s32(svldff1_gather_u32index_s32(i.p(0), i.at::<i32>(64), i.ou32(1)));
+        o.f32(svldff1_gather_u32offset_f32(i.p(0), i.at::<f32>(64), i.ou32(1)));
+        o.s32(svldff1sh_gather_u32offset_s32(i.p(0), i.at::<i16>(64), i.ou32(1)));
+        o.s32(svldff1_gather_u32offset_s32(i.p(1), i.at::<i32>(64), i.ou32(2)));
+        o.s32(svldff1sb_gather_u32offset_s32(i.p(0), i.at::<i8>(64), i.ou32(1)));
         o.s8(svldff1_s8(i.p(0), i.at::<i8>(16)));
         o.f64(svldff1_f64(i.p(1), i.at::<f64>(40)));
         o.s64(svldff1sh_s64(i.p(1), i.at::<i16>(40)));
@@ -1093,6 +1193,11 @@ unsafe fn group10(i: &In, o: &mut Out) {
         o.s8(svldnf1_s8(i.p(0), i.at::<i8>(16)));
         o.f64(svldnf1_f64(i.p(1), i.at::<f64>(40)));
         o.s64(svldnf1sh_s64(i.p(1), i.at::<i16>(40)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group12(i: &In, o: &mut Out) {
+    unsafe {
         o.s64(svldnf1sw_s64(i.p(0), i.at::<i32>(16)));
         o.s64(svldnf1_s64(i.p(0), i.at::<i64>(16)));
         o.s64(svldnf1sb_s64(i.p(1), i.at::<i8>(40)));
@@ -1117,11 +1222,6 @@ unsafe fn group10(i: &In, o: &mut Out) {
         o.s16(svlsl_wide_s16_m(i.p(1), i.s16(1), i.u64(2)));
         o.u8(svlsr_u8_m(i.p(0), i.u8(0), i.u8(1)));
         o.u64(svlsr_u64_m(i.p(0), i.u64(0), i.u64(1)));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group11(i: &In, o: &mut Out) {
-    unsafe {
         o.u32(svlsr_u32_m(i.p(1), i.u32(1), i.u32(2)));
         o.u16(svlsr_u16_m(i.p(1), i.u16(1), i.u16(2)));
         o.u8(svlsr_wide_u8_m(i.p(0), i.u8(0), i.u64(1)));
@@ -1138,6 +1238,11 @@ unsafe fn group11(i: &In, o: &mut Out) {
         o.s8(svmls_s8_m(i.p(1), i.s8(1), i.s8(2), i.s8(3)));
         o.s64(svmls_s64_m(i.p(1), i.s64(1), i.s64(2), i.s64(3)));
         o.s32(svmls_s32_m(i.p(0), i.s32(0), i.s32(1), i.s32(2)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group13(i: &In, o: &mut Out) {
+    unsafe {
         o.s16(svmls_s16_m(i.p(0), i.s16(0), i.s16(1), i.s16(2)));
         o.s8(svmsb_s8_m(i.p(1), i.s8(1), i.s8(2), i.s8(3)));
         o.s64(svmsb_s64_m(i.p(1), i.s64(1), i.s64(2), i.s64(3)));
@@ -1162,11 +1267,6 @@ unsafe fn group11(i: &In, o: &mut Out) {
         o.s64(svorr_s64_m(i.p(0), i.s64(0), i.s64(1)));
         o.s32(svorr_s32_m(i.p(1), i.s32(1), i.s32(2)));
         o.s16(svorr_s16_m(i.p(1), i.s16(1), i.s16(2)));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group12(i: &In, o: &mut Out) {
-    unsafe {
         o.p(svorr_b_z(i.p(0), i.p(1), i.p(2)));
         o.scalar(svorv_s8(i.p(0), i.s8(0)));
         o.scalar(svorv_s64(i.p(0), i.s64(0)));
@@ -1177,6 +1277,192 @@ unsafe fn group12(i: &In, o: &mut Out) {
         o.p(svpnext_b64(i.p(1), i.p(2)));
         o.p(svpnext_b32(i.p(0), i.p(1)));
         o.p(svpnext_b16(i.p(0), i.p(1)));
+        svprfb_gather_s64offset::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os64(1));
+        o.written();
+        svprfb_gather_s64offset::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os64(2));
+        o.written();
+        svprfb_gather_u64base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu64(0, i.at::<u8>(1024)));
+        o.written();
+        svprfb_gather_u64base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu64(1, i.at::<u8>(1024)));
+        o.written();
+        svprfb_gather_u64base_offset::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu64(0, i.at::<u8>(1024)),
+            8,
+        );
+        o.written();
+        svprfb_gather_u64base_offset::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu64(1, i.at::<u8>(1024)),
+            -8,
+        );
+        o.written();
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group14(i: &In, o: &mut Out) {
+    unsafe {
+        svprfb_gather_u32base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu32(0));
+        o.written();
+        svprfb_gather_u32base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu32(1));
+        o.written();
+        svprfb_gather_u32base_offset::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu32(0),
+            i.at::<u8>(1024) as i64,
+        );
+        o.written();
+        svprfb_gather_u32base_offset::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu32(1),
+            i.at::<u8>(1024) as i64,
+        );
+        o.written();
+        svprfb_gather_s32offset::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os32(1));
+        o.written();
+        svprfb_gather_s32offset::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os32(2));
+        o.written();
+        svprfb_gather_u32offset::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.ou32(1));
+        o.written();
+        svprfb_gather_u32offset::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.ou32(2));
+        o.written();
+        svprfd_gather_s64index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os64(1));
+        o.written();
+        svprfd_gather_s64index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os64(2));
+        o.written();
+        svprfd_gather_u64base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu64(0, i.at::<u8>(1024)));
+        o.written();
+        svprfd_gather_u64base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu64(1, i.at::<u8>(1024)));
+        o.written();
+        svprfd_gather_u64base_index::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu64(0, i.at::<u8>(1024)),
+            1,
+        );
+        o.written();
+        svprfd_gather_u64base_index::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu64(1, i.at::<u8>(1024)),
+            -1,
+        );
+        o.written();
+        svprfd_gather_u32base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu32(0));
+        o.written();
+        svprfd_gather_u32base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu32(1));
+        o.written();
+        svprfd_gather_u32base_index::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu32(0),
+            i.at::<u8>(1024) as i64 >> 3,
+        );
+        o.written();
+        svprfd_gather_u32base_index::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu32(1),
+            i.at::<u8>(1024) as i64 >> 3,
+        );
+        o.written();
+        svprfd_gather_s32index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os32(1));
+        o.written();
+        svprfd_gather_s32index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os32(2));
+        o.written();
+        svprfd_gather_u32index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.ou32(1));
+        o.written();
+        svprfd_gather_u32index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.ou32(2));
+        o.written();
+        svprfh_gather_s64index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os64(1));
+        o.written();
+        svprfh_gather_s64index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os64(2));
+        o.written();
+        svprfh_gather_u64base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu64(0, i.at::<u8>(1024)));
+        o.written();
+        svprfh_gather_u64base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu64(1, i.at::<u8>(1024)));
+        o.written();
+        svprfh_gather_u64base_index::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu64(0, i.at::<u8>(1024)),
+            1,
+        );
+        o.written();
+        svprfh_gather_u64base_index::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu64(1, i.at::<u8>(1024)),
+            -1,
+        );
+        o.written();
+        svprfh_gather_u32base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu32(0));
+        o.written();
+        svprfh_gather_u32base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu32(1));
+        o.written();
+        svprfh_gather_u32base_index::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu32(0),
+            i.at::<u8>(1024) as i64 >> 1,
+        );
+        o.written();
+        svprfh_gather_u32base_index::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu32(1),
+            i.at::<u8>(1024) as i64 >> 1,
+        );
+        o.written();
+        svprfh_gather_s32index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os32(1));
+        o.written();
+        svprfh_gather_s32index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os32(2));
+        o.written();
+        svprfh_gather_u32index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.ou32(1));
+        o.written();
+        svprfh_gather_u32index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.ou32(2));
+        o.written();
+        svprfw_gather_s64index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os64(1));
+        o.written();
+        svprfw_gather_s64index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os64(2));
+        o.written();
+        svprfw_gather_u64base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu64(0, i.at::<u8>(1024)));
+        o.written();
+        svprfw_gather_u64base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu64(1, i.at::<u8>(1024)));
+        o.written();
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group15(i: &In, o: &mut Out) {
+    unsafe {
+        svprfw_gather_u64base_index::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu64(0, i.at::<u8>(1024)),
+            1,
+        );
+        o.written();
+        svprfw_gather_u64base_index::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu64(1, i.at::<u8>(1024)),
+            -1,
+        );
+        o.written();
+        svprfw_gather_u32base::<{ svprfop::SV_PLDL1KEEP }>(i.p(0), i.bu32(0));
+        o.written();
+        svprfw_gather_u32base::<{ svprfop::SV_PSTL3STRM }>(i.p(1), i.bu32(1));
+        o.written();
+        svprfw_gather_u32base_index::<{ svprfop::SV_PLDL1KEEP }>(
+            i.p(0),
+            i.bu32(0),
+            i.at::<u8>(1024) as i64 >> 2,
+        );
+        o.written();
+        svprfw_gather_u32base_index::<{ svprfop::SV_PSTL3STRM }>(
+            i.p(1),
+            i.bu32(1),
+            i.at::<u8>(1024) as i64 >> 2,
+        );
+        o.written();
+        svprfw_gather_s32index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.os32(1));
+        o.written();
+        svprfw_gather_s32index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.os32(2));
+        o.written();
+        svprfw_gather_u32index::<{ svprfop::SV_PLDL1KEEP }, _>(i.p(0), i.at::<u8>(64), i.ou32(1));
+        o.written();
+        svprfw_gather_u32index::<{ svprfop::SV_PSTL3STRM }, _>(i.p(1), i.at::<u8>(64), i.ou32(2));
+        o.written();
         o.scalar(svptest_any(i.p(0), i.p(1)));
         o.scalar(svptest_first(i.p(0), i.p(1)));
         o.scalar(svptest_last(i.p(0), i.p(1)));
@@ -1210,7 +1496,7 @@ unsafe fn group12(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve")]
-unsafe fn group13(i: &In, o: &mut Out) {
+unsafe fn group16(i: &In, o: &mut Out) {
     unsafe {
         o.scalar(svaddv_s64(i.p(0), i.s64(0)));
         o.scalar(svaddv_s32(i.p(1), i.s32(1)));
@@ -1256,7 +1542,7 @@ unsafe fn group13(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve")]
-unsafe fn group14(i: &In, o: &mut Out) {
+unsafe fn group17(i: &In, o: &mut Out) {
     unsafe {
         o.s64(svsplice_s64(i.p(1), i.s64(1), i.s64(2)));
         o.f32(svsplice_f32(i.p(1), i.f32(1), i.f32(2)));
@@ -1301,7 +1587,7 @@ unsafe fn group14(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve")]
-unsafe fn group15(i: &In, o: &mut Out) {
+unsafe fn group18(i: &In, o: &mut Out) {
     unsafe {
         o.s32(svqdecw_pat_s32::<{ svpattern::SV_MUL3 }, 16>(i.s32(1)));
         o.scalar(svqincb_pat_n_s32::<{ svpattern::SV_VL7 }, 1>(3i32));
@@ -1348,7 +1634,7 @@ unsafe fn group15(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve")]
-unsafe fn group16(i: &In, o: &mut Out) {
+unsafe fn group19(i: &In, o: &mut Out) {
     unsafe {
         svst1h_s64(i.p(1), o.at::<i16>(24), i.s64(1));
         o.written();
@@ -1369,6 +1655,75 @@ unsafe fn group16(i: &In, o: &mut Out) {
         svst1_s16(i.p(0), o.at::<i16>(8), i.s16(0));
         o.written();
         svst1b_s16(i.p(0), o.at::<i8>(8), i.s16(0));
+        o.written();
+        svst1_scatter_s64index_f64(i.p(1), o.at::<f64>(64), i.os64(2), i.f64(1));
+        o.written();
+        svst1h_scatter_s64index_s64(i.p(0), o.at::<i16>(64), i.os64(1), i.s64(0));
+        o.written();
+        svst1w_scatter_s64index_s64(i.p(1), o.at::<i32>(64), i.os64(2), i.s64(1));
+        o.written();
+        svst1_scatter_s64index_s64(i.p(0), o.at::<i64>(64), i.os64(1), i.s64(0));
+        o.written();
+        svst1_scatter_s64offset_f64(i.p(0), o.at::<f64>(64), i.os64(1), i.f64(0));
+        o.written();
+        svst1h_scatter_s64offset_s64(i.p(1), o.at::<i16>(64), i.os64(2), i.s64(1));
+        o.written();
+        svst1w_scatter_s64offset_s64(i.p(0), o.at::<i32>(64), i.os64(1), i.s64(0));
+        o.written();
+        svst1_scatter_s64offset_s64(i.p(1), o.at::<i64>(64), i.os64(2), i.s64(1));
+        o.written();
+        svst1b_scatter_s64offset_s64(i.p(1), o.at::<i8>(64), i.os64(2), i.s64(1));
+        o.written();
+        svst1_scatter_u64base_offset_f64(i.p(0), i.bu64(0, o.at::<u8>(1024)), 8, i.f64(0));
+        o.written();
+        svst1h_scatter_u64base_offset_s64(i.p(1), i.bu64(1, o.at::<u8>(1024)), -8, i.s64(1));
+        o.written();
+        svst1w_scatter_u64base_offset_s64(i.p(0), i.bu64(0, o.at::<u8>(1024)), 8, i.s64(0));
+        o.written();
+        svst1_scatter_u64base_offset_s64(i.p(1), i.bu64(1, o.at::<u8>(1024)), -8, i.s64(1));
+        o.written();
+        svst1b_scatter_u64base_offset_s64(i.p(1), i.bu64(1, o.at::<u8>(1024)), -8, i.s64(1));
+        o.written();
+        svst1_scatter_u32base_offset_f32(i.p(0), i.bu32(0), o.at::<u8>(1024) as i64, i.f32(0));
+        o.written();
+        svst1h_scatter_u32base_offset_s32(i.p(1), i.bu32(1), o.at::<u8>(1024) as i64, i.s32(1));
+        o.written();
+        svst1_scatter_u32base_offset_s32(i.p(1), i.bu32(1), o.at::<u8>(1024) as i64, i.s32(1));
+        o.written();
+        svst1b_scatter_u32base_offset_s32(i.p(1), i.bu32(1), o.at::<u8>(1024) as i64, i.s32(1));
+        o.written();
+        svst1_scatter_s32index_f32(i.p(1), o.at::<f32>(64), i.os32(2), i.f32(1));
+        o.written();
+        svst1h_scatter_s32index_s32(i.p(0), o.at::<i16>(64), i.os32(1), i.s32(0));
+        o.written();
+        svst1_scatter_s32index_s32(i.p(0), o.at::<i32>(64), i.os32(1), i.s32(0));
+        o.written();
+        svst1_scatter_s32offset_f32(i.p(0), o.at::<f32>(64), i.os32(1), i.f32(0));
+        o.written();
+        svst1h_scatter_s32offset_s32(i.p(1), o.at::<i16>(64), i.os32(2), i.s32(1));
+        o.written();
+        svst1_scatter_s32offset_s32(i.p(1), o.at::<i32>(64), i.os32(2), i.s32(1));
+        o.written();
+        svst1b_scatter_s32offset_s32(i.p(1), o.at::<i8>(64), i.os32(2), i.s32(1));
+        o.written();
+        svst1_scatter_u32index_f32(i.p(1), o.at::<f32>(64), i.ou32(2), i.f32(1));
+        o.written();
+        svst1h_scatter_u32index_s32(i.p(0), o.at::<i16>(64), i.ou32(1), i.s32(0));
+        o.written();
+        svst1_scatter_u32index_s32(i.p(0), o.at::<i32>(64), i.ou32(1), i.s32(0));
+        o.written();
+        svst1_scatter_u32offset_f32(i.p(0), o.at::<f32>(64), i.ou32(1), i.f32(0));
+        o.written();
+        svst1h_scatter_u32offset_s32(i.p(1), o.at::<i16>(64), i.ou32(2), i.s32(1));
+        o.written();
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group20(i: &In, o: &mut Out) {
+    unsafe {
+        svst1_scatter_u32offset_s32(i.p(1), o.at::<i32>(64), i.ou32(2), i.s32(1));
+        o.written();
+        svst1b_scatter_u32offset_s32(i.p(1), o.at::<i8>(64), i.ou32(2), i.s32(1));
         o.written();
         svst2_s8(i.p(0), o.at::<i8>(8), i.s8x2(0));
         o.written();
@@ -1424,11 +1779,6 @@ unsafe fn group16(i: &In, o: &mut Out) {
         o.s16(svsub_s16_m(i.p(0), i.s16(0), i.s16(1)));
         o.s8(svsubr_s8_m(i.p(1), i.s8(1), i.s8(2)));
         o.s64(svsubr_s64_m(i.p(1), i.s64(1), i.s64(2)));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group17(i: &In, o: &mut Out) {
-    unsafe {
         o.s32(svsubr_s32_m(i.p(0), i.s32(0), i.s32(1)));
         o.s16(svsubr_s16_m(i.p(0), i.s16(0), i.s16(1)));
         o.s64(svextb_s64_m(i.s64(0), i.p(1), i.s64(1)));
@@ -1437,6 +1787,11 @@ unsafe fn group17(i: &In, o: &mut Out) {
         o.s64(svexth_s64_m(i.s64(0), i.p(1), i.s64(1)));
         o.s32(svexth_s32_m(i.s32(1), i.p(2), i.s32(2)));
         o.s64(svextw_s64_m(i.s64(1), i.p(2), i.s64(2)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group21(i: &In, o: &mut Out) {
+    unsafe {
         o.s8(svtbl_s8(i.s8(1), i.u8(2)));
         o.f64(svtbl_f64(i.f64(0), i.u64(1)));
         o.s64(svtbl_s64(i.s64(1), i.u64(2)));
@@ -1469,11 +1824,6 @@ unsafe fn group17(i: &In, o: &mut Out) {
         o.u16(svabd_u16_m(i.p(1), i.u16(1), i.u16(2)));
         o.scalar(svaddv_u8(i.p(0), i.u8(0)));
         o.scalar(svaddv_u64(i.p(0), i.u64(0)));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group18(i: &In, o: &mut Out) {
-    unsafe {
         o.scalar(svaddv_u32(i.p(1), i.u32(1)));
         o.scalar(svaddv_u16(i.p(1), i.u16(1)));
         o.f32(svcvt_f32_u64_m(i.f32(0), i.p(1), i.u64(1)));
@@ -1482,6 +1832,11 @@ unsafe fn group18(i: &In, o: &mut Out) {
         o.f32(svcvt_f32_u32_m(i.f32(1), i.p(2), i.u32(2)));
         o.u64(svdiv_u64_m(i.p(0), i.u64(0), i.u64(1)));
         o.u32(svdiv_u32_m(i.p(1), i.u32(1), i.u32(2)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group22(i: &In, o: &mut Out) {
+    unsafe {
         o.u64(svdivr_u64_m(i.p(0), i.u64(0), i.u64(1)));
         o.u32(svdivr_u32_m(i.p(1), i.u32(1), i.u32(2)));
         o.u64(svdot_lane_u64::<0>(i.u64(0), i.u16(1), i.u16(2)));
@@ -1514,11 +1869,6 @@ unsafe fn group18(i: &In, o: &mut Out) {
         o.u64(svqadd_u64(i.u64(1), i.u64(2)));
         o.u32(svqadd_u32(i.u32(0), i.u32(1)));
         o.u16(svqadd_u16(i.u16(0), i.u16(1)));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group19(i: &In, o: &mut Out) {
-    unsafe {
         o.scalar(svqdecb_pat_n_u32::<{ svpattern::SV_VL7 }, 1>(5u32));
         o.scalar(svqdecb_pat_n_u32::<{ svpattern::SV_MUL3 }, 16>(u32::MAX));
         o.scalar(svqdecb_pat_n_u64::<{ svpattern::SV_VL7 }, 1>(9u64));
@@ -1527,6 +1877,11 @@ unsafe fn group19(i: &In, o: &mut Out) {
         o.scalar(svqdecd_pat_n_u32::<{ svpattern::SV_MUL3 }, 16>(u32::MAX));
         o.scalar(svqdecd_pat_n_u64::<{ svpattern::SV_VL7 }, 1>(9u64));
         o.scalar(svqdecd_pat_n_u64::<{ svpattern::SV_MUL3 }, 16>(u64::MAX));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group23(i: &In, o: &mut Out) {
+    unsafe {
         o.u64(svqdecd_pat_u64::<{ svpattern::SV_VL7 }, 1>(i.u64(0)));
         o.u64(svqdecd_pat_u64::<{ svpattern::SV_MUL3 }, 16>(i.u64(1)));
         o.scalar(svqdech_pat_n_u32::<{ svpattern::SV_VL7 }, 1>(5u32));
@@ -1559,11 +1914,6 @@ unsafe fn group19(i: &In, o: &mut Out) {
         o.scalar(svqincd_pat_n_u32::<{ svpattern::SV_VL7 }, 1>(5u32));
         o.scalar(svqincd_pat_n_u32::<{ svpattern::SV_MUL3 }, 16>(u32::MAX));
         o.scalar(svqincd_pat_n_u64::<{ svpattern::SV_VL7 }, 1>(9u64));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group20(i: &In, o: &mut Out) {
-    unsafe {
         o.scalar(svqincd_pat_n_u64::<{ svpattern::SV_MUL3 }, 16>(u64::MAX));
         o.u64(svqincd_pat_u64::<{ svpattern::SV_VL7 }, 1>(i.u64(0)));
         o.u64(svqincd_pat_u64::<{ svpattern::SV_MUL3 }, 16>(i.u64(1)));
@@ -1572,6 +1922,11 @@ unsafe fn group20(i: &In, o: &mut Out) {
         o.scalar(svqinch_pat_n_u64::<{ svpattern::SV_VL7 }, 1>(9u64));
         o.scalar(svqinch_pat_n_u64::<{ svpattern::SV_MUL3 }, 16>(u64::MAX));
         o.u16(svqinch_pat_u16::<{ svpattern::SV_VL7 }, 1>(i.u16(0)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group24(i: &In, o: &mut Out) {
+    unsafe {
         o.u16(svqinch_pat_u16::<{ svpattern::SV_MUL3 }, 16>(i.u16(1)));
         o.scalar(svqincp_n_u32_b8(u32::MAX, i.p(2)));
         o.scalar(svqincp_n_u32_b64(u32::MAX, i.p(2)));
@@ -1604,11 +1959,6 @@ unsafe fn group20(i: &In, o: &mut Out) {
         o.p(svuzp1_b32(i.p(1), i.p(2)));
         o.p(svuzp1_b64(i.p(0), i.p(1)));
         o.p(svuzp1_b8(i.p(0), i.p(1)));
-    }
-}
-#[target_feature(enable = "sve")]
-unsafe fn group21(i: &In, o: &mut Out) {
-    unsafe {
         o.s8(svuzp1_s8(i.s8(1), i.s8(2)));
         o.f64(svuzp1_f64(i.f64(0), i.f64(1)));
         o.s64(svuzp1_s64(i.s64(1), i.s64(2)));
@@ -1617,6 +1967,11 @@ unsafe fn group21(i: &In, o: &mut Out) {
         o.s16(svuzp1_s16(i.s16(0), i.s16(1)));
         o.p(svuzp2_b16(i.p(0), i.p(1)));
         o.p(svuzp2_b32(i.p(0), i.p(1)));
+    }
+}
+#[target_feature(enable = "sve")]
+unsafe fn group25(i: &In, o: &mut Out) {
+    unsafe {
         o.p(svuzp2_b64(i.p(1), i.p(2)));
         o.p(svuzp2_b8(i.p(1), i.p(2)));
         o.s8(svuzp2_s8(i.s8(0), i.s8(1)));
@@ -1625,6 +1980,13 @@ unsafe fn group21(i: &In, o: &mut Out) {
         o.f32(svuzp2_f32(i.f32(0), i.f32(1)));
         o.s32(svuzp2_s32(i.s32(1), i.s32(2)));
         o.s16(svuzp2_s16(i.s16(1), i.s16(2)));
+        o.p(svrev_b8(i.p(1)));
+        o.s8(svrev_s8(i.s8(0)));
+        o.f64(svrev_f64(i.f64(1)));
+        o.s64(svrev_s64(i.s64(0)));
+        o.f32(svrev_f32(i.f32(0)));
+        o.s32(svrev_s32(i.s32(1)));
+        o.s16(svrev_s16(i.s16(1)));
         o.p(svwhilele_b8_s32(i32::MIN, i32::MAX));
         o.p(svwhilele_b8_s64(2i64, -1i64));
         o.p(svwhilele_b64_s32(i32::MIN, i32::MAX));
@@ -1649,12 +2011,12 @@ unsafe fn group21(i: &In, o: &mut Out) {
         o.p(svwhilele_b32_u64(u64::MAX, 1u64 << 63));
         o.p(svwhilele_b16_u32(5u32, 1u32));
         o.p(svwhilele_b16_u64(u64::MAX, 1u64 << 63));
+        o.p(svwhilelt_b8_s32(3i32, -1i32));
     }
 }
 #[target_feature(enable = "sve")]
-unsafe fn group22(i: &In, o: &mut Out) {
+unsafe fn group26(i: &In, o: &mut Out) {
     unsafe {
-        o.p(svwhilelt_b8_s32(3i32, -1i32));
         o.p(svwhilelt_b8_s64(i64::MIN, i64::MAX));
         o.p(svwhilelt_b64_s32(3i32, -1i32));
         o.p(svwhilelt_b64_s64(i64::MIN, i64::MAX));
@@ -1687,13 +2049,13 @@ unsafe fn group22(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,f32mm")]
-unsafe fn group23(i: &In, o: &mut Out) {
+unsafe fn group27(i: &In, o: &mut Out) {
     unsafe {
         o.f32(svmmla_f32(i.f32(0), i.f32(1), i.f32(2)));
     }
 }
 #[target_feature(enable = "sve,f64mm")]
-unsafe fn group24(i: &In, o: &mut Out) {
+unsafe fn group28(i: &In, o: &mut Out) {
     unsafe {
         o.f64(svmmla_f64(i.f64(1), i.f64(2), i.f64(3)));
         o.s8(svld1ro_s8(i.p(1), i.at::<i8>(40)));
@@ -1738,7 +2100,7 @@ unsafe fn group24(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,f64mm")]
-unsafe fn group25(i: &In, o: &mut Out) {
+unsafe fn group29(i: &In, o: &mut Out) {
     unsafe {
         o.f32(svzip2q_f32(i.f32(1), i.f32(2)));
         o.s32(svzip2q_s32(i.s32(0), i.s32(1)));
@@ -1746,7 +2108,7 @@ unsafe fn group25(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,i8mm")]
-unsafe fn group26(i: &In, o: &mut Out) {
+unsafe fn group30(i: &In, o: &mut Out) {
     unsafe {
         o.s32(svmmla_s32(i.s32(1), i.s8(2), i.s8(3)));
         o.s32(svsudot_lane_s32::<0>(i.s32(0), i.s8(1), i.u8(2)));
@@ -1759,7 +2121,7 @@ unsafe fn group26(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,sve2")]
-unsafe fn group27(i: &In, o: &mut Out) {
+unsafe fn group31(i: &In, o: &mut Out) {
     unsafe {
         o.u64(svadclb_u64(i.u64(1), i.u64(2), i.u64(3)));
         o.u32(svadclb_u32(i.u32(0), i.u32(1), i.u32(2)));
@@ -1804,7 +2166,7 @@ unsafe fn group27(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,sve2")]
-unsafe fn group28(i: &In, o: &mut Out) {
+unsafe fn group32(i: &In, o: &mut Out) {
     unsafe {
         o.s32(svcdot_lane_s32::<0, 0>(i.s32(0), i.s8(1), i.s8(2)));
         o.s32(svcdot_lane_s32::<3, 0>(i.s32(1), i.s8(2), i.s8(3)));
@@ -1849,7 +2211,7 @@ unsafe fn group28(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,sve2")]
-unsafe fn group29(i: &In, o: &mut Out) {
+unsafe fn group33(i: &In, o: &mut Out) {
     unsafe {
         o.f64(svmaxp_f64_m(i.p(0), i.f64(0), i.f64(1)));
         o.f32(svmaxp_f32_m(i.p(1), i.f32(1), i.f32(2)));
@@ -1864,11 +2226,38 @@ unsafe fn group29(i: &In, o: &mut Out) {
         o.u64(svhistcnt_s64_z(i.p(1), i.s64(1), i.s64(2)));
         o.u32(svhistcnt_s32_z(i.p(0), i.s32(0), i.s32(1)));
         o.u8(svhistseg_s8(i.s8(0), i.s8(1)));
+        o.f64(svldnt1_gather_s64index_f64(i.p(1), i.at::<f64>(64), i.os64(2)));
+        o.s64(svldnt1sh_gather_s64index_s64(i.p(1), i.at::<i16>(64), i.os64(2)));
+        o.s64(svldnt1sw_gather_s64index_s64(i.p(0), i.at::<i32>(64), i.os64(1)));
+        o.s64(svldnt1_gather_s64index_s64(i.p(0), i.at::<i64>(64), i.os64(1)));
+        o.f64(svldnt1_gather_s64offset_f64(i.p(0), i.at::<f64>(64), i.os64(1)));
+        o.s64(svldnt1sh_gather_s64offset_s64(i.p(0), i.at::<i16>(64), i.os64(1)));
+        o.s64(svldnt1sw_gather_s64offset_s64(i.p(1), i.at::<i32>(64), i.os64(2)));
+        o.s64(svldnt1_gather_s64offset_s64(i.p(1), i.at::<i64>(64), i.os64(2)));
+        o.s64(svldnt1sb_gather_s64offset_s64(i.p(0), i.at::<i8>(64), i.os64(1)));
+        o.f64(svldnt1_gather_u64base_offset_f64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.s64(svldnt1sh_gather_u64base_offset_s64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.s64(svldnt1sw_gather_u64base_offset_s64(i.p(1), i.bu64(1, i.at::<u8>(1024)), -8));
+        o.s64(svldnt1_gather_u64base_offset_s64(i.p(1), i.bu64(1, i.at::<u8>(1024)), -8));
+        o.s64(svldnt1sb_gather_u64base_offset_s64(i.p(0), i.bu64(0, i.at::<u8>(1024)), 8));
+        o.f32(svldnt1_gather_u32base_offset_f32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.s32(svldnt1sh_gather_u32base_offset_s32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.s32(svldnt1_gather_u32base_offset_s32(i.p(1), i.bu32(1), i.at::<u8>(1024) as i64));
+        o.s32(svldnt1sb_gather_u32base_offset_s32(i.p(0), i.bu32(0), i.at::<u8>(1024) as i64));
+        o.f32(svldnt1_gather_u32offset_f32(i.p(0), i.at::<f32>(64), i.ou32(1)));
+        o.s32(svldnt1sh_gather_u32offset_s32(i.p(0), i.at::<i16>(64), i.ou32(1)));
+        o.s32(svldnt1_gather_u32offset_s32(i.p(1), i.at::<i32>(64), i.ou32(2)));
+        o.s32(svldnt1sb_gather_u32offset_s32(i.p(0), i.at::<i8>(64), i.ou32(1)));
         o.p(svmatch_s8(i.p(0), i.s8(0), i.s8(1)));
         o.p(svmatch_s16(i.p(1), i.s16(1), i.s16(2)));
         o.s64(svmla_lane_s64::<0>(i.s64(0), i.s64(1), i.s64(2)));
         o.s64(svmla_lane_s64::<1>(i.s64(1), i.s64(2), i.s64(3)));
         o.s32(svmla_lane_s32::<0>(i.s32(0), i.s32(1), i.s32(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group34(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svmla_lane_s32::<3>(i.s32(1), i.s32(2), i.s32(3)));
         o.s16(svmla_lane_s16::<0>(i.s16(0), i.s16(1), i.s16(2)));
         o.s16(svmla_lane_s16::<7>(i.s16(1), i.s16(2), i.s16(3)));
@@ -1891,11 +2280,6 @@ unsafe fn group29(i: &In, o: &mut Out) {
         o.p(svnmatch_s8(i.p(0), i.s8(0), i.s8(1)));
         o.p(svnmatch_s16(i.p(1), i.s16(1), i.s16(2)));
         o.u8(svpmul_u8(i.u8(1), i.u8(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group30(i: &In, o: &mut Out) {
-    unsafe {
         o.p(svunpkhi_b(i.p(1)));
         o.p(svunpklo_b(i.p(1)));
         o.s32(svraddhnb_s64(i.s64(0), i.s64(1)));
@@ -1914,6 +2298,11 @@ unsafe fn group30(i: &In, o: &mut Out) {
         o.s32(svrshrnt_n_s64::<32>(i.s32(1), i.s64(2)));
         o.s16(svrshrnt_n_s32::<1>(i.s16(0), i.s32(1)));
         o.s16(svrshrnt_n_s32::<16>(i.s16(1), i.s32(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group35(i: &In, o: &mut Out) {
+    unsafe {
         o.s8(svrshrnt_n_s16::<1>(i.s8(0), i.s16(1)));
         o.s8(svrshrnt_n_s16::<8>(i.s8(1), i.s16(2)));
         o.s32(svrsubhnb_s64(i.s64(1), i.s64(2)));
@@ -1936,11 +2325,6 @@ unsafe fn group30(i: &In, o: &mut Out) {
         o.s32(svabdlb_s32(i.s16(1), i.s16(2)));
         o.s16(svabdlb_s16(i.s8(1), i.s8(2)));
         o.s64(svabdlt_s64(i.s32(0), i.s32(1)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group31(i: &In, o: &mut Out) {
-    unsafe {
         o.s32(svabdlt_s32(i.s16(1), i.s16(2)));
         o.s16(svabdlt_s16(i.s8(1), i.s8(2)));
         o.s64(svadalp_s64_m(i.p(1), i.s64(1), i.s32(2)));
@@ -1959,6 +2343,11 @@ unsafe fn group31(i: &In, o: &mut Out) {
         o.s32(svaddwb_s32(i.s32(0), i.s16(1)));
         o.s16(svaddwb_s16(i.s16(0), i.s8(1)));
         o.s64(svaddwt_s64(i.s64(1), i.s32(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group36(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svaddwt_s32(i.s32(0), i.s16(1)));
         o.s16(svaddwt_s16(i.s16(0), i.s8(1)));
         o.u64(svsbclb_u64(i.u64(1), i.u64(2), i.u64(3)));
@@ -1981,11 +2370,6 @@ unsafe fn group31(i: &In, o: &mut Out) {
         o.s16(svshrnt_n_s32::<16>(i.s16(1), i.s32(2)));
         o.s8(svshrnt_n_s16::<1>(i.s8(0), i.s16(1)));
         o.s8(svshrnt_n_s16::<8>(i.s8(1), i.s16(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group32(i: &In, o: &mut Out) {
-    unsafe {
         o.s8(svhsub_s8_m(i.p(1), i.s8(1), i.s8(2)));
         o.s64(svhsub_s64_m(i.p(1), i.s64(1), i.s64(2)));
         o.s32(svhsub_s32_m(i.p(0), i.s32(0), i.s32(1)));
@@ -2004,6 +2388,11 @@ unsafe fn group32(i: &In, o: &mut Out) {
         o.s16(svsli_n_s16::<15>(i.s16(1), i.s16(2)));
         o.s8(svmaxp_s8_m(i.p(1), i.s8(1), i.s8(2)));
         o.s64(svmaxp_s64_m(i.p(1), i.s64(1), i.s64(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group37(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svmaxp_s32_m(i.p(0), i.s32(0), i.s32(1)));
         o.s16(svmaxp_s16_m(i.p(0), i.s16(0), i.s16(1)));
         o.s8(svminp_s8_m(i.p(1), i.s8(1), i.s8(2)));
@@ -2026,11 +2415,6 @@ unsafe fn group32(i: &In, o: &mut Out) {
         o.s16(svmlalt_s16(i.s16(0), i.s8(1), i.s8(2)));
         o.s64(svmlslb_lane_s64::<0>(i.s64(0), i.s32(1), i.s32(2)));
         o.s64(svmlslb_lane_s64::<3>(i.s64(1), i.s32(2), i.s32(3)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group33(i: &In, o: &mut Out) {
-    unsafe {
         o.s32(svmlslb_lane_s32::<0>(i.s32(0), i.s16(1), i.s16(2)));
         o.s32(svmlslb_lane_s32::<7>(i.s32(1), i.s16(2), i.s16(3)));
         o.s64(svmlslb_s64(i.s64(1), i.s32(2), i.s32(3)));
@@ -2049,6 +2433,11 @@ unsafe fn group33(i: &In, o: &mut Out) {
         o.s32(svmullb_lane_s32::<7>(i.s16(1), i.s16(2)));
         o.s64(svmullb_s64(i.s32(1), i.s32(2)));
         o.s32(svmullb_s32(i.s16(0), i.s16(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group38(i: &In, o: &mut Out) {
+    unsafe {
         o.s16(svmullb_s16(i.s8(0), i.s8(1)));
         o.s64(svmullt_lane_s64::<0>(i.s32(0), i.s32(1)));
         o.s64(svmullt_lane_s64::<3>(i.s32(1), i.s32(2)));
@@ -2071,11 +2460,6 @@ unsafe fn group33(i: &In, o: &mut Out) {
         o.s64(svqcadd_s64::<90>(i.s64(1), i.s64(2)));
         o.s32(svqcadd_s32::<90>(i.s32(0), i.s32(1)));
         o.s32(svqcadd_s32::<90>(i.s32(1), i.s32(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group34(i: &In, o: &mut Out) {
-    unsafe {
         o.s16(svqcadd_s16::<90>(i.s16(0), i.s16(1)));
         o.s16(svqcadd_s16::<90>(i.s16(1), i.s16(2)));
         o.s64(svqdmlalb_lane_s64::<0>(i.s64(0), i.s32(1), i.s32(2)));
@@ -2094,6 +2478,11 @@ unsafe fn group34(i: &In, o: &mut Out) {
         o.s32(svqdmlalt_lane_s32::<7>(i.s32(1), i.s16(2), i.s16(3)));
         o.s64(svqdmlalt_s64(i.s64(0), i.s32(1), i.s32(2)));
         o.s32(svqdmlalt_s32(i.s32(1), i.s16(2), i.s16(3)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group39(i: &In, o: &mut Out) {
+    unsafe {
         o.s16(svqdmlalt_s16(i.s16(1), i.s8(2), i.s8(3)));
         o.s64(svqdmlslb_lane_s64::<0>(i.s64(0), i.s32(1), i.s32(2)));
         o.s64(svqdmlslb_lane_s64::<3>(i.s64(1), i.s32(2), i.s32(3)));
@@ -2116,11 +2505,6 @@ unsafe fn group34(i: &In, o: &mut Out) {
         o.s64(svqdmulh_lane_s64::<1>(i.s64(1), i.s64(2)));
         o.s32(svqdmulh_lane_s32::<0>(i.s32(0), i.s32(1)));
         o.s32(svqdmulh_lane_s32::<3>(i.s32(1), i.s32(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group35(i: &In, o: &mut Out) {
-    unsafe {
         o.s16(svqdmulh_lane_s16::<0>(i.s16(0), i.s16(1)));
         o.s16(svqdmulh_lane_s16::<7>(i.s16(1), i.s16(2)));
         o.s8(svqdmulh_s8(i.s8(0), i.s8(1)));
@@ -2139,6 +2523,11 @@ unsafe fn group35(i: &In, o: &mut Out) {
         o.s32(svqdmullt_lane_s32::<0>(i.s16(0), i.s16(1)));
         o.s32(svqdmullt_lane_s32::<7>(i.s16(1), i.s16(2)));
         o.s64(svqdmullt_s64(i.s32(0), i.s32(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group40(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svqdmullt_s32(i.s16(1), i.s16(2)));
         o.s16(svqdmullt_s16(i.s8(1), i.s8(2)));
         o.s8(svqneg_s8_m(i.s8(0), i.p(1), i.s8(1)));
@@ -2161,11 +2550,6 @@ unsafe fn group35(i: &In, o: &mut Out) {
         o.s64(svqrdmlah_lane_s64::<1>(i.s64(1), i.s64(2), i.s64(3)));
         o.s32(svqrdmlah_lane_s32::<0>(i.s32(0), i.s32(1), i.s32(2)));
         o.s32(svqrdmlah_lane_s32::<3>(i.s32(1), i.s32(2), i.s32(3)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group36(i: &In, o: &mut Out) {
-    unsafe {
         o.s16(svqrdmlah_lane_s16::<0>(i.s16(0), i.s16(1), i.s16(2)));
         o.s16(svqrdmlah_lane_s16::<7>(i.s16(1), i.s16(2), i.s16(3)));
         o.s8(svqrdmlah_s8(i.s8(0), i.s8(1), i.s8(2)));
@@ -2184,6 +2568,11 @@ unsafe fn group36(i: &In, o: &mut Out) {
         o.s16(svqrdmlsh_s16(i.s16(1), i.s16(2), i.s16(3)));
         o.s64(svqrdmulh_lane_s64::<0>(i.s64(0), i.s64(1)));
         o.s64(svqrdmulh_lane_s64::<1>(i.s64(1), i.s64(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group41(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svqrdmulh_lane_s32::<0>(i.s32(0), i.s32(1)));
         o.s32(svqrdmulh_lane_s32::<3>(i.s32(1), i.s32(2)));
         o.s16(svqrdmulh_lane_s16::<0>(i.s16(0), i.s16(1)));
@@ -2206,11 +2595,6 @@ unsafe fn group36(i: &In, o: &mut Out) {
         o.s32(svqrshrnt_n_s64::<32>(i.s32(1), i.s64(2)));
         o.s16(svqrshrnt_n_s32::<1>(i.s16(0), i.s32(1)));
         o.s16(svqrshrnt_n_s32::<16>(i.s16(1), i.s32(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group37(i: &In, o: &mut Out) {
-    unsafe {
         o.s8(svqrshrnt_n_s16::<1>(i.s8(0), i.s16(1)));
         o.s8(svqrshrnt_n_s16::<8>(i.s8(1), i.s16(2)));
         o.u32(svqrshrunb_n_s64::<1>(i.s64(0)));
@@ -2229,6 +2613,11 @@ unsafe fn group37(i: &In, o: &mut Out) {
         o.s64(svqshl_s64_m(i.p(1), i.s64(1), i.s64(2)));
         o.s32(svqshl_s32_m(i.p(0), i.s32(0), i.s32(1)));
         o.s16(svqshl_s16_m(i.p(0), i.s16(0), i.s16(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group42(i: &In, o: &mut Out) {
+    unsafe {
         o.u8(svqshlu_n_s8_m::<0>(i.p(0), i.s8(0)));
         o.u8(svqshlu_n_s8_m::<7>(i.p(1), i.s8(1)));
         o.u64(svqshlu_n_s64_m::<0>(i.p(0), i.s64(0)));
@@ -2251,11 +2640,6 @@ unsafe fn group37(i: &In, o: &mut Out) {
         o.s8(svqshrnt_n_s16::<8>(i.s8(1), i.s16(2)));
         o.u32(svqshrunb_n_s64::<1>(i.s64(0)));
         o.u32(svqshrunb_n_s64::<32>(i.s64(1)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group38(i: &In, o: &mut Out) {
-    unsafe {
         o.u16(svqshrunb_n_s32::<1>(i.s32(0)));
         o.u16(svqshrunb_n_s32::<16>(i.s32(1)));
         o.u8(svqshrunb_n_s16::<1>(i.s16(0)));
@@ -2274,6 +2658,11 @@ unsafe fn group38(i: &In, o: &mut Out) {
         o.s64(svqsubr_s64_m(i.p(0), i.s64(0), i.s64(1)));
         o.s32(svqsubr_s32_m(i.p(1), i.s32(1), i.s32(2)));
         o.s16(svqsubr_s16_m(i.p(1), i.s16(1), i.s16(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group43(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svqxtnb_s64(i.s64(0)));
         o.s16(svqxtnb_s32(i.s32(1)));
         o.s8(svqxtnb_s16(i.s16(1)));
@@ -2296,11 +2685,6 @@ unsafe fn group38(i: &In, o: &mut Out) {
         o.s64(svsri_n_s64::<64>(i.s64(1), i.s64(2)));
         o.s32(svsri_n_s32::<1>(i.s32(0), i.s32(1)));
         o.s32(svsri_n_s32::<32>(i.s32(1), i.s32(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group39(i: &In, o: &mut Out) {
-    unsafe {
         o.s16(svsri_n_s16::<1>(i.s16(0), i.s16(1)));
         o.s16(svsri_n_s16::<16>(i.s16(1), i.s16(2)));
         o.s8(svrshl_s8_m(i.p(0), i.s8(0), i.s8(1)));
@@ -2319,6 +2703,11 @@ unsafe fn group39(i: &In, o: &mut Out) {
         o.s8(svrsra_n_s8::<8>(i.s8(1), i.s8(2)));
         o.s64(svrsra_n_s64::<1>(i.s64(0), i.s64(1)));
         o.s64(svrsra_n_s64::<64>(i.s64(1), i.s64(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group44(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svrsra_n_s32::<1>(i.s32(0), i.s32(1)));
         o.s32(svrsra_n_s32::<32>(i.s32(1), i.s32(2)));
         o.s16(svrsra_n_s16::<1>(i.s16(0), i.s16(1)));
@@ -2341,11 +2730,6 @@ unsafe fn group39(i: &In, o: &mut Out) {
         o.s64(svsra_n_s64::<64>(i.s64(1), i.s64(2)));
         o.s32(svsra_n_s32::<1>(i.s32(0), i.s32(1)));
         o.s32(svsra_n_s32::<32>(i.s32(1), i.s32(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group40(i: &In, o: &mut Out) {
-    unsafe {
         o.s16(svsra_n_s16::<1>(i.s16(0), i.s16(1)));
         o.s16(svsra_n_s16::<16>(i.s16(1), i.s16(2)));
         o.s64(svsublb_s64(i.s32(1), i.s32(2)));
@@ -2364,8 +2748,57 @@ unsafe fn group40(i: &In, o: &mut Out) {
         o.s32(svsubwb_s32(i.s32(1), i.s16(2)));
         o.s16(svsubwb_s16(i.s16(1), i.s8(2)));
         o.s64(svsubwt_s64(i.s64(0), i.s32(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group45(i: &In, o: &mut Out) {
+    unsafe {
         o.s32(svsubwt_s32(i.s32(1), i.s16(2)));
         o.s16(svsubwt_s16(i.s16(1), i.s8(2)));
+        svstnt1_scatter_s64index_f64(i.p(1), o.at::<f64>(64), i.os64(2), i.f64(1));
+        o.written();
+        svstnt1h_scatter_s64index_s64(i.p(0), o.at::<i16>(64), i.os64(1), i.s64(0));
+        o.written();
+        svstnt1w_scatter_s64index_s64(i.p(1), o.at::<i32>(64), i.os64(2), i.s64(1));
+        o.written();
+        svstnt1_scatter_s64index_s64(i.p(0), o.at::<i64>(64), i.os64(1), i.s64(0));
+        o.written();
+        svstnt1_scatter_s64offset_f64(i.p(0), o.at::<f64>(64), i.os64(1), i.f64(0));
+        o.written();
+        svstnt1h_scatter_s64offset_s64(i.p(1), o.at::<i16>(64), i.os64(2), i.s64(1));
+        o.written();
+        svstnt1w_scatter_s64offset_s64(i.p(0), o.at::<i32>(64), i.os64(1), i.s64(0));
+        o.written();
+        svstnt1_scatter_s64offset_s64(i.p(1), o.at::<i64>(64), i.os64(2), i.s64(1));
+        o.written();
+        svstnt1b_scatter_s64offset_s64(i.p(1), o.at::<i8>(64), i.os64(2), i.s64(1));
+        o.written();
+        svstnt1_scatter_u64base_offset_f64(i.p(0), i.bu64(0, o.at::<u8>(1024)), 8, i.f64(0));
+        o.written();
+        svstnt1h_scatter_u64base_offset_s64(i.p(1), i.bu64(1, o.at::<u8>(1024)), -8, i.s64(1));
+        o.written();
+        svstnt1w_scatter_u64base_offset_s64(i.p(0), i.bu64(0, o.at::<u8>(1024)), 8, i.s64(0));
+        o.written();
+        svstnt1_scatter_u64base_offset_s64(i.p(1), i.bu64(1, o.at::<u8>(1024)), -8, i.s64(1));
+        o.written();
+        svstnt1b_scatter_u64base_offset_s64(i.p(1), i.bu64(1, o.at::<u8>(1024)), -8, i.s64(1));
+        o.written();
+        svstnt1_scatter_u32base_offset_f32(i.p(0), i.bu32(0), o.at::<u8>(1024) as i64, i.f32(0));
+        o.written();
+        svstnt1h_scatter_u32base_offset_s32(i.p(1), i.bu32(1), o.at::<u8>(1024) as i64, i.s32(1));
+        o.written();
+        svstnt1_scatter_u32base_offset_s32(i.p(1), i.bu32(1), o.at::<u8>(1024) as i64, i.s32(1));
+        o.written();
+        svstnt1b_scatter_u32base_offset_s32(i.p(1), i.bu32(1), o.at::<u8>(1024) as i64, i.s32(1));
+        o.written();
+        svstnt1_scatter_u32offset_f32(i.p(0), o.at::<f32>(64), i.ou32(1), i.f32(0));
+        o.written();
+        svstnt1h_scatter_u32offset_s32(i.p(1), o.at::<i16>(64), i.ou32(2), i.s32(1));
+        o.written();
+        svstnt1_scatter_u32offset_s32(i.p(1), o.at::<i32>(64), i.ou32(2), i.s32(1));
+        o.written();
+        svstnt1b_scatter_u32offset_s32(i.p(1), o.at::<i8>(64), i.ou32(2), i.s32(1));
+        o.written();
         o.s32(svsubhnb_s64(i.s64(1), i.s64(2)));
         o.s16(svsubhnb_s32(i.s32(0), i.s32(1)));
         o.s8(svsubhnb_s16(i.s16(0), i.s16(1)));
@@ -2382,15 +2815,15 @@ unsafe fn group40(i: &In, o: &mut Out) {
         o.s64(svuqadd_s64_m(i.p(0), i.s64(0), i.u64(1)));
         o.s32(svuqadd_s32_m(i.p(1), i.s32(1), i.u32(2)));
         o.s16(svuqadd_s16_m(i.p(1), i.s16(1), i.u16(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group46(i: &In, o: &mut Out) {
+    unsafe {
         o.s8(svtbl2_s8(i.s8x2(1), i.u8(2)));
         o.f64(svtbl2_f64(i.f64x2(0), i.u64(1)));
         o.s64(svtbl2_s64(i.s64x2(1), i.u64(2)));
         o.f32(svtbl2_f32(i.f32x2(1), i.u32(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group41(i: &In, o: &mut Out) {
-    unsafe {
         o.s32(svtbl2_s32(i.s32x2(0), i.u32(1)));
         o.s16(svtbl2_s16(i.s16x2(0), i.u16(1)));
         o.s8(svtbx_s8(i.s8(1), i.s8(2), i.u8(3)));
@@ -2427,15 +2860,15 @@ unsafe fn group41(i: &In, o: &mut Out) {
         o.u64(svaddwb_u64(i.u64(1), i.u32(2)));
         o.u32(svaddwb_u32(i.u32(0), i.u16(1)));
         o.u16(svaddwb_u16(i.u16(0), i.u8(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group47(i: &In, o: &mut Out) {
+    unsafe {
         o.u64(svaddwt_u64(i.u64(1), i.u32(2)));
         o.u32(svaddwt_u32(i.u32(0), i.u16(1)));
         o.u16(svaddwt_u16(i.u16(0), i.u8(1)));
         o.u8(svhadd_u8_m(i.p(0), i.u8(0), i.u8(1)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group42(i: &In, o: &mut Out) {
-    unsafe {
         o.u64(svhadd_u64_m(i.p(0), i.u64(0), i.u64(1)));
         o.u32(svhadd_u32_m(i.p(1), i.u32(1), i.u32(2)));
         o.u16(svhadd_u16_m(i.p(1), i.u16(1), i.u16(2)));
@@ -2472,15 +2905,15 @@ unsafe fn group42(i: &In, o: &mut Out) {
         o.u64(svmlslb_lane_u64::<0>(i.u64(0), i.u32(1), i.u32(2)));
         o.u64(svmlslb_lane_u64::<3>(i.u64(1), i.u32(2), i.u32(3)));
         o.u32(svmlslb_lane_u32::<0>(i.u32(0), i.u16(1), i.u16(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group48(i: &In, o: &mut Out) {
+    unsafe {
         o.u32(svmlslb_lane_u32::<7>(i.u32(1), i.u16(2), i.u16(3)));
         o.u64(svmlslb_u64(i.u64(1), i.u32(2), i.u32(3)));
         o.u32(svmlslb_u32(i.u32(0), i.u16(1), i.u16(2)));
         o.u16(svmlslb_u16(i.u16(0), i.u8(1), i.u8(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group43(i: &In, o: &mut Out) {
-    unsafe {
         o.u64(svmlslt_lane_u64::<0>(i.u64(0), i.u32(1), i.u32(2)));
         o.u64(svmlslt_lane_u64::<3>(i.u64(1), i.u32(2), i.u32(3)));
         o.u32(svmlslt_lane_u32::<0>(i.u32(0), i.u16(1), i.u16(2)));
@@ -2517,15 +2950,15 @@ unsafe fn group43(i: &In, o: &mut Out) {
         o.u8(svqrshrnb_n_u16::<1>(i.u16(0)));
         o.u8(svqrshrnb_n_u16::<8>(i.u16(1)));
         o.u32(svqrshrnt_n_u64::<1>(i.u32(0), i.u64(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group49(i: &In, o: &mut Out) {
+    unsafe {
         o.u32(svqrshrnt_n_u64::<32>(i.u32(1), i.u64(2)));
         o.u16(svqrshrnt_n_u32::<1>(i.u16(0), i.u32(1)));
         o.u16(svqrshrnt_n_u32::<16>(i.u16(1), i.u32(2)));
         o.u8(svqrshrnt_n_u16::<1>(i.u8(0), i.u16(1)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group44(i: &In, o: &mut Out) {
-    unsafe {
         o.u8(svqrshrnt_n_u16::<8>(i.u8(1), i.u16(2)));
         o.u8(svqshl_u8_m(i.p(1), i.u8(1), i.s8(2)));
         o.u64(svqshl_u64_m(i.p(1), i.u64(1), i.s64(2)));
@@ -2562,15 +2995,15 @@ unsafe fn group44(i: &In, o: &mut Out) {
         o.u64(svrhadd_u64_m(i.p(0), i.u64(0), i.u64(1)));
         o.u32(svrhadd_u32_m(i.p(1), i.u32(1), i.u32(2)));
         o.u16(svrhadd_u16_m(i.p(1), i.u16(1), i.u16(2)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group50(i: &In, o: &mut Out) {
+    unsafe {
         o.u8(svrshl_u8_m(i.p(0), i.u8(0), i.s8(1)));
         o.u64(svrshl_u64_m(i.p(0), i.u64(0), i.s64(1)));
         o.u32(svrshl_u32_m(i.p(1), i.u32(1), i.s32(2)));
         o.u16(svrshl_u16_m(i.p(1), i.u16(1), i.s16(2)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group45(i: &In, o: &mut Out) {
-    unsafe {
         o.u8(svrshr_n_u8_m::<1>(i.p(0), i.u8(0)));
         o.u8(svrshr_n_u8_m::<8>(i.p(1), i.u8(1)));
         o.u64(svrshr_n_u64_m::<1>(i.p(0), i.u64(0)));
@@ -2607,15 +3040,15 @@ unsafe fn group45(i: &In, o: &mut Out) {
         o.u8(svsra_n_u8::<1>(i.u8(0), i.u8(1)));
         o.u8(svsra_n_u8::<8>(i.u8(1), i.u8(2)));
         o.u64(svsra_n_u64::<1>(i.u64(0), i.u64(1)));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group51(i: &In, o: &mut Out) {
+    unsafe {
         o.u64(svsra_n_u64::<64>(i.u64(1), i.u64(2)));
         o.u32(svsra_n_u32::<1>(i.u32(0), i.u32(1)));
         o.u32(svsra_n_u32::<32>(i.u32(1), i.u32(2)));
         o.u16(svsra_n_u16::<1>(i.u16(0), i.u16(1)));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group46(i: &In, o: &mut Out) {
-    unsafe {
         o.u16(svsra_n_u16::<16>(i.u16(1), i.u16(2)));
         o.u64(svsublb_u64(i.u32(1), i.u32(2)));
         o.u32(svsublb_u32(i.u16(0), i.u16(1)));
@@ -2652,15 +3085,15 @@ unsafe fn group46(i: &In, o: &mut Out) {
         o.p(svwhilegt_b16_s32(3i32, -1i32));
         o.p(svwhilegt_b16_s64(i64::MIN, i64::MAX));
         o.p(svwhilegt_b8_u32(u32::MAX, 0x8000_0000u32));
+    }
+}
+#[target_feature(enable = "sve,sve2")]
+unsafe fn group52(i: &In, o: &mut Out) {
+    unsafe {
         o.p(svwhilegt_b8_u64(9u64, 1u64));
         o.p(svwhilegt_b64_u32(u32::MAX, 0x8000_0000u32));
         o.p(svwhilegt_b32_u32(5u32, 1u32));
         o.p(svwhilegt_b32_u64(u64::MAX, 1u64 << 63));
-    }
-}
-#[target_feature(enable = "sve,sve2")]
-unsafe fn group47(i: &In, o: &mut Out) {
-    unsafe {
         o.p(svwhilegt_b16_u32(5u32, 1u32));
         o.p(svwhilegt_b16_u64(u64::MAX, 1u64 << 63));
         o.p(svwhilege_b8_u32(5u32, 1u32));
@@ -2682,7 +3115,7 @@ unsafe fn group47(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,sve2,sve2-aes")]
-unsafe fn group48(i: &In, o: &mut Out) {
+unsafe fn group53(i: &In, o: &mut Out) {
     unsafe {
         o.u8(svaesd_u8(i.u8(0), i.u8(1)));
         o.u8(svaese_u8(i.u8(1), i.u8(2)));
@@ -2697,7 +3130,7 @@ unsafe fn group48(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,sve2,sve2-bitperm")]
-unsafe fn group49(i: &In, o: &mut Out) {
+unsafe fn group54(i: &In, o: &mut Out) {
     unsafe {
         o.u8(svbdep_u8(i.u8(0), i.u8(1)));
         o.u64(svbdep_u64(i.u64(0), i.u64(1)));
@@ -2714,13 +3147,13 @@ unsafe fn group49(i: &In, o: &mut Out) {
     }
 }
 #[target_feature(enable = "sve,sve2,sve2-sha3")]
-unsafe fn group50(i: &In, o: &mut Out) {
+unsafe fn group55(i: &In, o: &mut Out) {
     unsafe {
         o.s64(svrax1_s64(i.s64(1), i.s64(2)));
     }
 }
 #[target_feature(enable = "sve,sve2,sve2-sm4")]
-unsafe fn group51(i: &In, o: &mut Out) {
+unsafe fn group56(i: &In, o: &mut Out) {
     unsafe {
         o.u32(svsm4e_u32(i.u32(1), i.u32(2)));
         o.u32(svsm4ekey_u32(i.u32(0), i.u32(1)));
@@ -2811,45 +3244,45 @@ pub fn run() -> String {
     // SAFETY: the machine has sve.
     unsafe { group22(&i, &mut o) }
     o.text.push('\n');
+    // SAFETY: the machine has sve.
+    unsafe { group23(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve.
+    unsafe { group24(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve.
+    unsafe { group25(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve.
+    unsafe { group26(&i, &mut o) }
+    o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("f32mm") {
         // SAFETY: the machine has sve,f32mm.
-        unsafe { group23(&i, &mut o) }
+        unsafe { group27(&i, &mut o) }
     } else {
         o.text.push_str(" no f32mm ");
     }
     o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("f64mm") && bytes() >= 32 {
         // SAFETY: the machine has sve,f64mm.
-        unsafe { group24(&i, &mut o) }
+        unsafe { group28(&i, &mut o) }
     } else {
         o.text.push_str(" no f64mm+256-bit vectors ");
     }
     o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("f64mm") && bytes() >= 32 {
         // SAFETY: the machine has sve,f64mm.
-        unsafe { group25(&i, &mut o) }
+        unsafe { group29(&i, &mut o) }
     } else {
         o.text.push_str(" no f64mm+256-bit vectors ");
     }
     o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("i8mm") {
         // SAFETY: the machine has sve,i8mm.
-        unsafe { group26(&i, &mut o) }
+        unsafe { group30(&i, &mut o) }
     } else {
         o.text.push_str(" no i8mm ");
     }
-    o.text.push('\n');
-    // SAFETY: the machine has sve,sve2.
-    unsafe { group27(&i, &mut o) }
-    o.text.push('\n');
-    // SAFETY: the machine has sve,sve2.
-    unsafe { group28(&i, &mut o) }
-    o.text.push('\n');
-    // SAFETY: the machine has sve,sve2.
-    unsafe { group29(&i, &mut o) }
-    o.text.push('\n');
-    // SAFETY: the machine has sve,sve2.
-    unsafe { group30(&i, &mut o) }
     o.text.push('\n');
     // SAFETY: the machine has sve,sve2.
     unsafe { group31(&i, &mut o) }
@@ -2902,30 +3335,45 @@ pub fn run() -> String {
     // SAFETY: the machine has sve,sve2.
     unsafe { group47(&i, &mut o) }
     o.text.push('\n');
+    // SAFETY: the machine has sve,sve2.
+    unsafe { group48(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve,sve2.
+    unsafe { group49(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve,sve2.
+    unsafe { group50(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve,sve2.
+    unsafe { group51(&i, &mut o) }
+    o.text.push('\n');
+    // SAFETY: the machine has sve,sve2.
+    unsafe { group52(&i, &mut o) }
+    o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("sve2-aes") {
         // SAFETY: the machine has sve,sve2,sve2-aes.
-        unsafe { group48(&i, &mut o) }
+        unsafe { group53(&i, &mut o) }
     } else {
         o.text.push_str(" no sve2-aes ");
     }
     o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("sve2-bitperm") {
         // SAFETY: the machine has sve,sve2,sve2-bitperm.
-        unsafe { group49(&i, &mut o) }
+        unsafe { group54(&i, &mut o) }
     } else {
         o.text.push_str(" no sve2-bitperm ");
     }
     o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("sve2-sha3") {
         // SAFETY: the machine has sve,sve2,sve2-sha3.
-        unsafe { group50(&i, &mut o) }
+        unsafe { group55(&i, &mut o) }
     } else {
         o.text.push_str(" no sve2-sha3 ");
     }
     o.text.push('\n');
     if std::arch::is_aarch64_feature_detected!("sve2-sm4") {
         // SAFETY: the machine has sve,sve2,sve2-sm4.
-        unsafe { group51(&i, &mut o) }
+        unsafe { group56(&i, &mut o) }
     } else {
         o.text.push_str(" no sve2-sm4 ");
     }
