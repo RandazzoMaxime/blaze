@@ -99,7 +99,11 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   value, E0373 ("may outlive the current block") for a closure a `let` binds as a block's
   value, and E0597 rather than E0515 for what a function returns as an `impl Trait` that
   captures no lifetime (rustc's `OpaqueType` constraint), even when a `move` closure in it
-  borrows a variable it took by value. The mutable borrows of a variable
+  borrows a variable it took by value; but E0515 where liveness keeps no region of the
+  hidden type live (an alias whose bounds say it outlives `'static`), as rustc then blames
+  the return. A borrow an `async` closure captures is blamed as any borrow of a local
+  (E0515 when it is returned, not E0373), as rustc's `borrow_spans` knows captures only of
+  closures and coroutines. The mutable borrows of a variable
   declared without `mut` are one E0596, at the declaration once there are two.
 - `'static` in what a type or signature spells (`x: &'static u32` in a struct, a parameter
   `&'static T`) is related as any other region; a copied value proves its type `Copy`
@@ -290,6 +294,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   before it the one lifetime elision gives the output when the bounds write `'_` or elide it
   (`impl Iterator<Item = &i32> + '_`), and `use<'_>` lists that one. So mutating `self` while
   an iterator `fn evens(&self) -> impl Iterator<Item = &i32> + '_` returned is live is E0502.
+  In a trait or its impls the trait's or impl's own parameters are always captured, whatever
+  `use<..>` says, as rustc relates the `impl Trait` there (a GAT of the trait) invariantly
+  in all of them.
 - `impl Trait`'s hidden type: each of its regions must be `'static` or one of the lifetimes
   the `impl Trait` captures (rustc's member constraints), else E0700 at the signature; and it
   must outlive what the bounds say (`impl Copy + 'a`). The same holds of an `impl Trait` an
@@ -302,9 +309,14 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   rustc picks the captured lifetime a
   region becomes and checks the body with that choice; ra-jit only tests that one exists, so
   it reports E0700 where rustc does and leaves the errors that choice causes unreported.
+- A return type with `_` in it is rustc's E0121, which takes the type the body infers: the
+  return slot is checked as any other local, its regions inferred, not tied to a signature.
 - Closures: captures, E0373, `FnMut` escapes, E0596 and E0594 through captures. A capture's
   borrow is reported at the first use of the place in the closure (rustc's `path_expr_id`,
-  which `compute_min_captures` keeps from the capture recorded first). A closure's
+  which `compute_min_captures` keeps from the capture recorded first). An `async`
+  closure's captures flow into its upvars as a closure's do, and its body knows its upvars
+  outlive the borrow of its environment (rustc's `compute_components` of a
+  `CoroutineClosure`), so an `AsyncFnMut` future may reborrow a `&mut` capture. A closure's
   body has two kinds of universal region, as rustc's: its own (the late-bound lifetimes of
   its signature, `for<'a> FnOnce(&'a T)`, and the borrow of its environment) and its
   creator's (every other region of its type, and the enclosing item's lifetime parameters,
@@ -369,8 +381,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
-  a `T` is E0310 at the `impl Trait`. In its defining body the type it hides is also
-  well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
+  a `T` is E0310 at the `impl Trait`; and well-formed where the body defines it, as rustc's
+  `add_item_bounds_for_hidden_type` requires (#114728). In its defining body the type it hides is
+  also well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
   to it there and prove what that asks: `-> (Box<dyn Any>, impl Sized)` hiding
   `Outlives<'static, <T as Trait>::Assoc>` needs `<T as Trait>::Assoc: 'static` (E0310 at
   the function), the type around it (`&'t impl Trait`) still assumed. Its trait and
@@ -466,12 +479,6 @@ then one each of five more. The causes, grouped:
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them
   out.
-- **Blame through a callee's `impl Trait`**: a local borrowed into a call whose `impl Trait`
-  is returned through one that captures no lifetime is E0597 or E0716 in rustc 1.99 (the
-  call's argument blamed) and in the pinned nightly too, except under a `for<'a>` outlives
-  bound (`borrowck/alias-liveness/higher-ranked-outlives-for-capture.rs`), where the nightly
-  blames the return (E0515). ra-jit gives E0515 for both, so
-  `impl-trait/precise-capturing/migration-note.rs` has 12 of its 13 errors right.
 - **Captures of an empty `match`**: rustc's capture analysis has a closure that matches
   on `x` with no arms read `x`; rust-analyzer's captures nothing there, so the E0381 of an
   uninitialized `x` is missed.
