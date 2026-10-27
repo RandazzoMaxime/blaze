@@ -45,7 +45,7 @@ lays out, mangles and passes values as the pinned nightly does.
 | Full link | yes (1) | yes (1) | yes (1) | yes (1) | yes, with nothing of rustc's (2) |
 | Splice | yes (3) | yes (3) | yes (4) | yes, with a limit (5) | yes (2) |
 | Debug info | yes (6) | yes (6) | lines only (7) | unverified (7) | no |
-| `cargo blaze` | yes (8) | unverified (9) | yes, by hand (9) | yes, by hand (9) | no |
+| `cargo blaze` | yes (8) | unverified (9) | yes, by hand (9) | yes, by hand (9) | `wasm32-wasip1` by hand (2) |
 | Disk store | yes (10) | yes (10) | yes (10) | yes (10) | unverified |
 | Remote store | yes, not real AWS (11) | unverified | unverified | unverified | unverified |
 | Fuzzed | yes (12) | no | no | no | no |
@@ -62,7 +62,8 @@ lays out, mangles and passes values as the pinned nightly does.
    simd128 and relaxed-simd), stress 100 of 100, splices 71 of 71. With nothing of rustc's,
    wasip1 programs, a program over blaze-manifest and blaze-resolve, wasm-host's `no_std`
    simd128 guests and two Cloudflare Workers (workers-rs, wasm-bindgen) build, link and answer
-   as rustc's builds ([platforms.md](platforms.md), wasm32). The train runs the corpus,
+   as rustc's builds ([platforms.md](platforms.md), wasm32); `cargo blaze build --target
+   wasm32-wasip1` built the second by hand, its build scripts and proc macros blaze's too. The train runs the corpus,
    stress and `allrajit_wasm.py` on every push to main. No unwinding is emitted; the wasm
    targets are `panic=abort`. Modules are 8 to 50 times the size of rustc's.
 3. `splices.py` 71 of 71 in CI on both Linux architectures; `farsplices.py` 6 of 6 on
