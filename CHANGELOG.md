@@ -1026,6 +1026,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
   the loud program (`HELLO WORLD`). Each worker now links in a directory of its own, named by
   what it is loaded with (`harness/cargo_ra_jit.py`, flags group).
+- Three programs that ran differently from rustc now run the same (#73): a diverging type
+  variable falls back to `!` in every edition, as rustc at the pinned nightly does, not to `()`
+  before 2024; `if let` in a closure captures only the places its pattern moves, as `let` and
+  `match` do, not its whole scrutinee; and a value assigned through `*(&mut x)` after a `match`
+  that ruled `x` out is dropped, since a place borrowed `&mut` may hold a value from then on
+  (rust-lang/rust#90752). `tests/ui` `editions/never-type-fallback.rs`,
+  `closures/2229_closure_analysis/run_pass/if-let-capture.rs` and `drop/issue-90752.rs` are
+  pinned.
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the
