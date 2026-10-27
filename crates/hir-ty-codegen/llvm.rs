@@ -457,7 +457,7 @@ fn wrap<'ctx>(
         lower::entry_count(context, outer, weights.entered);
     }
     inner.set_linkage(Linkage::Internal);
-    let always = Attribute::get_named_enum_kind_id("alwaysinline");
+    let always = attribute_kind("alwaysinline");
     inner.add_attribute(AttributeLoc::Function, context.create_enum_attribute(always, 0));
     let builder = context.create_builder();
     builder.position_at_end(context.append_basic_block(outer, ""));
@@ -470,6 +470,15 @@ fn wrap<'ctx>(
     Ok(())
 }
 
+/// The kind of LLVM's attribute `name`. LLVM answers 0 for a name it does not know (one it
+/// renamed or removed, as LLVM 21 did `nocapture`), and an attribute of kind 0 crashes its
+/// verifier, so an unknown name stops here.
+pub(crate) fn attribute_kind(name: &str) -> u32 {
+    let kind = Attribute::get_named_enum_kind_id(name);
+    assert_ne!(kind, 0, "the linked LLVM has no attribute `{name}`");
+    kind
+}
+
 /// Tells LLVM what the function's `#[inline]` asks, as rustc does.
 fn mark_hint<'ctx>(context: &'ctx Context, function: FunctionValue<'ctx>, hint: Hint) {
     let hint = match hint {
@@ -478,7 +487,7 @@ fn mark_hint<'ctx>(context: &'ctx Context, function: FunctionValue<'ctx>, hint: 
         Hint::Always => "alwaysinline",
         Hint::Never => "noinline",
     };
-    let hint = Attribute::get_named_enum_kind_id(hint);
+    let hint = attribute_kind(hint);
     function.add_attribute(AttributeLoc::Function, context.create_enum_attribute(hint, 0));
 }
 
@@ -806,10 +815,10 @@ pub(super) fn assemble(text: &str) -> Result<Vec<u8>, String> {
 ///
 /// On AArch64 the quick selection is not the global instruction selector. That one deletes
 /// the unused copy of the selector register at a landing pad and leaves the register a
-/// live-in of the block, and LLVM 20.1's fast register allocator does not reload a value it
-/// has put in a live-in register: after optimization, which keeps values in registers across
-/// an unwind edge, a landing pad then reads the selector where it wants a drop flag
-/// (`breakers/cases/src/unwind_many_flags.rs`).
+/// live-in of the block, and the fast register allocator (LLVM 20.1, where this was found)
+/// does not reload a value it has put in a live-in register: after optimization, which keeps
+/// values in registers across an unwind edge, a landing pad then reads the selector where it
+/// wants a drop flag (`breakers/cases/src/unwind_many_flags.rs`).
 fn set_options(arch: Arch) {
     static SET: Once = Once::new();
     SET.call_once(|| {
