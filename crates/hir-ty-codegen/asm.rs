@@ -66,6 +66,12 @@ pub(super) fn half(instruction: &str) -> String {
     format!(".arch_extension fp16\n.globl {SYMBOL}\n{SYMBOL}:\n{instruction}\nret\n")
 }
 
+/// An x86-64 instruction of AVX512-FP16 on the halves passed in `xmm0` up, which leaves its
+/// result in `xmm0`.
+pub(super) fn x86_half(instruction: &str) -> String {
+    format!(".globl {SYMBOL}\n{SYMBOL}:\n{instruction}\nret\n")
+}
+
 /// A function of the one AArch64 instruction whose word is `word`.
 pub(super) fn instruction_word(word: u32) -> String {
     format!(".globl {SYMBOL}\n{SYMBOL}:\n.inst {word:#010x}\nret\n")
@@ -398,6 +404,14 @@ pub(super) fn avx512_function(loads: &[Load], text: &str, out: Out) -> String {
             Load::Immediate => {}
             Load::Pointer => {
                 _ = writeln!(s, "mov r11, qword ptr [r10 + {at}]\nmov r11, qword ptr [r11]")
+            }
+            Load::Int(bytes) => {
+                let (to, width) = if bytes == 8 { ("rcx", "qword") } else { ("ecx", "dword") };
+                _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]\nmov {to}, {width} ptr [rax]");
+            }
+            Load::Vector(8) => {
+                let name = vector_name(k, 16);
+                _ = writeln!(s, "mov rax, qword ptr [r10 + {at}]\nvmovq {name}, qword ptr [rax]");
             }
             Load::Vector(bytes) => {
                 let name = vector_name(k, bytes);

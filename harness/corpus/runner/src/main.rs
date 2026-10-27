@@ -629,6 +629,10 @@ fn main() {
     println!("x86_instructions {}", cases::x86_instructions::run());
     #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
     print!("avx512\n{}", cases::avx512::run());
+    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+    print!("x86_halves\n{}", cases::x86_halves::run());
+    #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+    print!("x86_lowered\n{}", cases::x86_lowered::run());
     #[cfg(target_arch = "aarch64")]
     println!("simd_aarch64 {}", cases::simd_aarch64::run());
     #[cfg(all(target_arch = "aarch64", feature = "nightly"))]

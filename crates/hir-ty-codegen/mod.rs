@@ -8263,15 +8263,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
-            // x86-64's LLVM keeps a `bfloat` without AVX-512's as the `f32` it widens to, and
-            // narrows it back by `__truncsfbf2` where it is returned, passed or stored, which
-            // quiets a signalling NaN at points of rustc's IR that this one does not have.
-            Primitive::Float(rustc_abi::Float::F16B) if self.cg.target.arch == Arch::X86_64 => {
-                unsupported!("f16b on x86-64, which LLVM narrows from f32 wherever it moves")
-            }
-            // `f16b` has no arithmetic in Rust, only its bits moved, and AArch64's LLVM passes
-            // it where it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float
-            // register.
+            // `f16b` has no arithmetic in Rust, only its bits moved, and LLVM passes it where it
+            // passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float register.
+            // x86-64's LLVM rounds it on entry and between blocks, which `receive_bfloat` and
+            // `check_bfloat_blocks` follow.
             Primitive::Float(rustc_abi::Float::F16 | rustc_abi::Float::F16B)
                 if f16_f128::soft_floats(self.cg.target) =>
             {
@@ -9590,6 +9585,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     fn codegen(&mut self) -> Result<()> {
         let body = self.body.expect("MIR body");
+        self.check_bfloat_blocks(body)?;
         let FnAbi { ret, args: mut param_modes } = self.body_abi(body, self.abi)?;
         self.ret_mode = ret;
         if self.variadic {
@@ -9655,6 +9651,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 _ => self.stack_slot(layout),
             };
             self.receive(mode, &mut incoming, addr, layout);
+            if self.cg.target.arch == Arch::X86_64
+                && let BackendRepr::Scalar(scalar) = layout.backend_repr
+                && scalar.primitive() == Primitive::Float(rustc_abi::Float::F16B)
+            {
+                self.receive_bfloat(addr)?;
+            }
             // An unsized parameter's slot is where the value is and its metadata, as
             // rustc's `LocalRef::UnsizedPlace`.
             let borrowed = matches!(mode, PassMode::IndirectUnsized);
@@ -16264,6 +16266,18 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         {
             unsupported!("`llvm.{name}` returning {dst_ty:?}");
         }
+        self.call_lowered(&lowered, args, dst)?;
+        Ok(true)
+    }
+
+    /// Calls the function of `lowered`'s instructions on `args`, which it loads as it says,
+    /// and writes what it leaves where `dst` is.
+    fn call_lowered(
+        &mut self,
+        lowered: &avx512::Lowered,
+        args: &[Operand],
+        dst: Value,
+    ) -> Result<()> {
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             8 * (1 + args.len() as u32),
@@ -16283,7 +16297,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let callee = self.cg.assembly(text, &sig);
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
         self.builder.ins().call(callee, &[slot]);
-        Ok(true)
+        Ok(())
     }
 
     /// Calls the instructions `x86::lower` made of the intrinsic `name`: the arguments are
@@ -16881,7 +16895,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.neon_assembly(&format!("llvm.{name}"), &lowered, args, dst, dst_ty)?
             }
             _ if self.cg.target.arch == Arch::X86_64
-                && (name.starts_with("x86.avx512.") || name.starts_with("x86.avx2.vpdp"))
+                && [
+                    "x86.avx512.",
+                    "x86.avx512fp16.",
+                    "x86.avx512bf16.",
+                    "x86.avx2.vpdp",
+                    "x86.vcvtne",
+                    "x86.vbcstne",
+                ]
+                .iter()
+                .any(|it| name.starts_with(it))
                 && self.avx512_assembly(name, args, dst, dst_ty)? => {}
             _ if self.cg.target.arch == Arch::X86_64
                 && let Some(lowered) = x86::lower(name) =>
@@ -16954,6 +16977,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let (a, a_signed) = self.neon_lanes_of(ty)?;
         let (r, r_signed) = self.neon_lanes_of(dst_ty)?;
         let widths = (r.float && a.float).then_some((r.bits, a.bits));
+        if self.cg.target.arch == Arch::X86_64 {
+            return self.x86_half_vector(name, args, dst, (a, r));
+        }
         let single_and_half = name == "simd_cast" && matches!(widths, Some((16, 32) | (32, 16)));
         if self.cg.target.arch != Arch::Aarch64 || !(single_and_half || self.half_precision()) {
             unsupported!(
@@ -16965,6 +16991,36 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             unsupported!("`{name}` of lanes of f16 into {dst_ty:?}");
         };
         self.neon_assembly(name, &lowered, args, dst, dst_ty)
+    }
+
+    /// A generic intrinsic on a vector of `f16` on x86-64 (`a` its operand's lanes, `r` its
+    /// result's), as LLVM selects it in the function: by AVX512-FP16's instructions where the
+    /// function has those, `simd_cast` to single floats by F16C's where it has only those.
+    /// Each instruction is `avx512::half_vector`'s.
+    fn x86_half_vector(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dst: Value,
+        (a, r): (neon::Lanes, neon::Lanes),
+    ) -> Result<()> {
+        if self.function_enables("avx512fp16") {
+            match name {
+                "simd_fma" => return Err(f16_f128::half_fma_refused()),
+                "simd_neg" => unsupported!(
+                    "`simd_neg` of lanes of f16 with AVX512-FP16, which LLVM folds into the \
+                     fma it feeds in some functions and not others"
+                ),
+                _ => (),
+            }
+        }
+        let lowered = avx512::half_vector(name, a.count * a.bits / 8, r.count * r.bits / 8, |it| {
+            self.function_enables(it)
+        });
+        let Some(lowered) = lowered.filter(|it| it.loads.len() == args.len()) else {
+            unsupported!("`{name}` of lanes of f16 on x86-64 without an instruction for it here");
+        };
+        self.call_lowered(&lowered, args, dst)
     }
 
     /// The lane type and lane count of a vector type. Lanes sit in memory in order.
