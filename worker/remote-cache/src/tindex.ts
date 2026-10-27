@@ -29,6 +29,7 @@ const CLOCK_SLACK = 300;
 const COPY_PACK_BYTES = 32 * 1024 * 1024;
 const MAX_READ = 4 * 1024 * 1024;
 const SEGMENT_READS = 4;
+const PACK_REWRITES = 4;
 
 export type IndexEnv = cas.CasEnv;
 
@@ -344,19 +345,20 @@ async function refresh(env: IndexEnv, tenant: TenantRecord, segments: Uint8Array
   }
 
   const toCopy: { loc: cas.Location; hash: Uint8Array }[] = [];
+  const toRewrite: string[] = [];
   for (const [object, items] of old) {
-    if (items[0].loc.ns !== own.ns) {
-      toCopy.push(...items);
-      continue;
+    if (items[0].loc.ns !== own.ns) toCopy.push(...items);
+    else if (budget === 0) left++;
+    else {
+      budget--;
+      toRewrite.push(object);
     }
-    if (budget === 0) {
-      left++;
-      continue;
-    }
-    budget--;
-    await rewritePack(env, object);
-    done.packs++;
   }
+  // Streamed, not buffered, so several at once cost no memory.
+  for (let i = 0; i < toRewrite.length; i += PACK_REWRITES) {
+    await Promise.all(toRewrite.slice(i, i + PACK_REWRITES).map((object) => rewritePack(env, object)));
+  }
+  done.packs += toRewrite.length;
 
   if (toCopy.length > 0) {
     toCopy.sort((a, b) => (a.loc.object < b.loc.object ? -1 : a.loc.object > b.loc.object ? 1 : a.loc.offset - b.loc.offset));
