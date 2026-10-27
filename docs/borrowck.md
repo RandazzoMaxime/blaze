@@ -570,6 +570,38 @@ checker off to 52-74 ms with it on, while the build took 250-400 ms. A cold chec
 nushell used 10-25% more CPU time. Both were measured on a loaded machine, so read them as
 rough.
 
+## Speed
+
+The check runs on every edited file, so its time is on the edit's path. Two things keep it
+small: an edit re-checks only the bodies it changed (the query reads each body's source map
+relative to its item, which moving the body does not change), and each check should cost a
+small fraction of type inference, which it needs anyway.
+
+`ra-jit borrowck --project DIR --timings OUT.jsonl` checks every body of a project's own crates
+in both modes, cold, on one thread, and writes per body type inference's time, the checker's
+time in each phase and the sizes it worked on; `RA_JIT_BORROWCK_ONLY=part` limits it to the
+bodies whose name contains `part`. `harness/borrowck_speed.py` runs it over the bench apps and
+reports totals, p50/p99/max and the slowest bodies; `--rustc TOOLCHAIN` measures rustc's own
+`mir_borrowck` and `typeck` with `-Zself-profile` as the baseline.
+
+Before any speed work, on main 31b3345f (arm64 ix VM, 16 vCPUs): the checker's total
+without MIR lowering, beside type inference's, in ms, and its slowest body:
+
+| App | Bodies | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|---|
+| ripgrep | 2642 | 2176 | 526 (24%) | 33 | 511 (24%) | 35 |
+| fd | 268 | 363 | 156 (43%) | 21 | 151 (42%) | 22 |
+| bat | 568 | 2824 | 300 (11%) | 58 | 318 (11%) | 61 |
+| hyperfine | 306 | 2548 | 183 (7%) | 19 | 176 (7%) | 23 |
+| just | 1660 | 1743 | 1086 (62%) | 52 | 1148 (66%) | 94 |
+| axum | 1576 | 8257 | 4033 (49%) | 81 | 3994 (48%) | 91 |
+| helix | 6025 | 8261 | 3641 (44%) | 248 | 3479 (42%) | 157 |
+| nushell | 35844 | 40051 | 23622 (59%) | 841 | 23677 (59%) | 905 |
+| biome (first 62445 bodies) | 62445 | 37973 | 20313 (53%) | 1522 | 17887 (47%) | 932 |
+
+Generating constraints, which asks the trait solver about every statement's types, is more
+than half of it everywhere (nushell: 13.4 s of 23.6 s), then liveness, the walk and moves.
+
 ## Debugging
 
 - `echo file.rs | ra-jit borrowck --edition 2021` prints a file's diagnostics as JSON.

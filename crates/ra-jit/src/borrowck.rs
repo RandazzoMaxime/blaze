@@ -8,7 +8,10 @@
 //! the file changes. `harness/borrowck_ui.py` scores rustc's own `tests/ui` with it.
 //!
 //! `ra-jit borrowck --project DIR` checks a cargo workspace instead: the errors the borrow
-//! checker finds in its crates, which for code rustc accepts must be none.
+//! checker finds in its crates, which for code rustc accepts must be none. With
+//! `--timings OUT`, it times the checker on each body of the workspace instead, writing one
+//! JSON object per body to `OUT` and a summary to standard output. Without `--project`,
+//! `--timings OUT` writes for each file how many bodies were checked and the time by phase.
 
 use std::{
     io::{BufRead as _, Write as _},
@@ -28,16 +31,27 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
     hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut edition = "2015".to_owned();
     let mut project = None;
+    let mut timings = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--edition" => edition = args.next().context("--edition needs a year")?,
             "--project" => project = Some(args.next().context("--project needs a directory")?),
+            "--timings" => timings = Some(args.next().context("--timings needs a file")?),
             _ => anyhow::bail!("unexpected argument {arg}"),
         }
     }
     if let Some(project) = project {
-        return check_project(&project);
+        return match timings {
+            Some(out) => time_project(&project, &out),
+            None => check_project(&project),
+        };
     }
+    // With `--timings OUT`, how many bodies the borrow checker checked for each file, and how
+    // long it took by phase: an edit that leaves a body as it was must not check it again.
+    let mut timings_out = match &timings {
+        Some(out) => Some(std::io::BufWriter::new(std::fs::File::create(out)?)),
+        None => None,
+    };
     let dir =
         std::env::temp_dir().join(format!("ra-jit-borrowck-{}-{edition}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
@@ -106,8 +120,25 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
             dump_mir(&db, file, &name);
         }
         let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            diagnostics(&db, &config, file)
+            hir_ty_borrowck::timings::measure(|| diagnostics(&db, &config, file))
         }));
+        let found = found.map(|(found, timings)| {
+            if let Some(out) = &mut timings_out {
+                let phases: serde_json::Map<_, _> = hir_ty_borrowck::timings::Phase::ALL
+                    .iter()
+                    .map(|&it| (it.name().into(), (timings.get(it).as_micros() as u64).into()))
+                    .collect();
+                let line = serde_json::json!({
+                    "path": test,
+                    "bodies": timings.counts.bodies,
+                    "points": timings.counts.points,
+                    "loans": timings.counts.loans,
+                    "phases_us": phases,
+                });
+                let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+            }
+            found
+        });
         let mut out =
             serde_json::json!({ "path": test, "ms": started.elapsed().as_millis() as u64 });
         match found {
@@ -219,6 +250,223 @@ fn check_project(project: &str) -> anyhow::Result<()> {
         files.len()
     );
     Ok(())
+}
+
+/// `ra-jit borrowck --project DIR --timings OUT`: for each body of the workspace's crates, the
+/// time type inference takes on it and the time the borrow checker takes in each mode, by
+/// phase, with the sizes it worked on, one JSON object per line in `OUT`; the totals on
+/// standard output. Each body is inferred and then checked, one at a time on one thread, so a
+/// body's time includes the queries it is the first to need.
+fn time_project(project: &str, out: &str) -> anyhow::Result<()> {
+    use hir::{AssocItem, DefWithBody, ModuleDef};
+    use hir_ty_borrowck::{
+        Mode,
+        timings::{Phase, measure},
+    };
+    let root = AbsPathBuf::assert_utf8(dunce::canonicalize(project)?);
+    let cargo_config = CargoConfig {
+        sysroot: Some(RustLibSource::Discover),
+        all_targets: true,
+        ..Default::default()
+    };
+    let load_config = LoadCargoConfig {
+        load_out_dirs_from_check: true,
+        with_proc_macro_server: ProcMacroServerChoice::Sysroot,
+        prefill_caches: false,
+        num_worker_threads: 1,
+        proc_macro_processes: 1,
+    };
+    let (db, vfs, _) =
+        load_cargo::load_workspace_at(root.as_ref(), &cargo_config, &load_config, &|_| ())?;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
+    // By mode, as `Mode as usize`: Nll, Polonius.
+    let mut totals = [[std::time::Duration::ZERO; Phase::ALL.len()]; 2];
+    let mut check_totals = [std::time::Duration::ZERO; 2];
+    let (mut infer_total, mut bodies) = (std::time::Duration::ZERO, 0usize);
+    hir::attach_db(&db, || -> anyhow::Result<()> {
+        let mut found: Vec<(DefWithBody, String)> = Vec::new();
+        for krate in hir::Crate::all(&db) {
+            if !krate.origin(&db).is_local() {
+                continue;
+            }
+            let crate_name =
+                krate.display_name(&db).map_or_else(String::new, |it| it.to_string());
+            for module in krate.modules(&db) {
+                let path = module
+                    .path_to_root(&db)
+                    .into_iter()
+                    .rev()
+                    .filter_map(|it| it.name(&db))
+                    .map(|it| it.as_str().to_owned())
+                    .collect::<Vec<_>>();
+                let prefix = std::iter::once(crate_name.clone()).chain(path).collect::<Vec<_>>();
+                let named = |name: String| format!("{}::{name}", prefix.join("::"));
+                let mut push = |def: DefWithBody, name: String| found.push((def, named(name)));
+                for decl in module.declarations(&db) {
+                    match decl {
+                        ModuleDef::Function(it) => push(it.into(), it.name(&db).as_str().into()),
+                        ModuleDef::Const(it) => push(
+                            it.into(),
+                            it.name(&db).map_or("_".to_owned(), |it| it.as_str().into()),
+                        ),
+                        ModuleDef::Static(it) => push(it.into(), it.name(&db).as_str().into()),
+                        ModuleDef::Adt(hir::Adt::Enum(it)) => {
+                            for variant in it.variants(&db) {
+                                push(
+                                    variant.into(),
+                                    format!("{}::{}", it.name(&db).as_str(), variant.name(&db).as_str()),
+                                );
+                            }
+                        }
+                        ModuleDef::Trait(it) => {
+                            for item in it.items(&db) {
+                                let name = format!(
+                                    "{}::{}",
+                                    it.name(&db).as_str(),
+                                    item.name(&db).map_or("_".to_owned(), |it| it.as_str().into())
+                                );
+                                match item {
+                                    AssocItem::Function(f) => push(f.into(), name),
+                                    AssocItem::Const(c) => push(c.into(), name),
+                                    AssocItem::TypeAlias(_) => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                for imp in module.impl_defs(&db) {
+                    let self_ty = hir::HirDisplay::display(&imp.self_ty(&db), &db, krate.to_display_target(&db)).to_string();
+                    for item in imp.items(&db) {
+                        let name = format!(
+                            "<{self_ty}>::{}",
+                            item.name(&db).map_or("_".to_owned(), |it| it.as_str().into())
+                        );
+                        match item {
+                            AssocItem::Function(f) => push(f.into(), name),
+                            AssocItem::Const(c) => push(c.into(), name),
+                            AssocItem::TypeAlias(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        // RA_JIT_BORROWCK_ONLY=part times only the bodies whose name contains it, to profile one.
+        let only = std::env::var("RA_JIT_BORROWCK_ONLY").ok();
+        for (def, name) in found {
+            if only.as_deref().is_some_and(|it| !name.contains(it)) {
+                continue;
+            }
+            let Ok(id) = hir_def::DefWithBodyId::try_from(def) else { continue };
+            let path = def
+                .module(&db)
+                .definition_source_file_id(&db)
+                .original_file(&db)
+                .file_id(&db);
+            let path = vfs.file_path(path).to_string();
+            let started = Instant::now();
+            let infer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hir_ty::InferenceResult::of(&db, hir_ty::InferBodyId::DefWithBodyId(id));
+            }));
+            let infer_time = started.elapsed();
+            if infer.is_err() {
+                continue;
+            }
+            // Both modes, each body checked by one first and then the other, in turn, so the
+            // queries the first pays for cold are paid by each mode as often.
+            let modes = if bodies % 2 == 0 { [Mode::Polonius, Mode::Nll] } else { [Mode::Nll, Mode::Polonius] };
+            let mut by_mode = serde_json::Map::new();
+            let mut panicked = false;
+            for mode in modes {
+                let started = Instant::now();
+                let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    measure(|| hir_ty_borrowck::borrowck_in_mode(&db, id, mode).skipped.is_some())
+                }));
+                let total = started.elapsed();
+                let Ok((skipped, timings)) = checked else {
+                    panicked = true;
+                    break;
+                };
+                let at = mode as usize;
+                check_totals[at] += total;
+                let mut phases = serde_json::Map::new();
+                for phase in Phase::ALL {
+                    totals[at][phase as usize] += timings.get(phase);
+                    phases.insert(phase.name().into(), (timings.get(phase).as_micros() as u64).into());
+                }
+                let counts = timings.counts;
+                by_mode.insert(
+                    mode_name(mode).into(),
+                    serde_json::json!({
+                        "borrowck_us": total.as_micros() as u64,
+                        "phases_us": phases,
+                        "skipped": skipped,
+                        "counts": {
+                            "bodies": counts.bodies,
+                            "blocks": counts.blocks,
+                            "points": counts.points,
+                            "locals": counts.locals,
+                            "regions": counts.regions,
+                            "universals": counts.universals,
+                            "constraints": counts.constraints,
+                            "localized": counts.localized,
+                            "loans": counts.loans,
+                        },
+                    }),
+                );
+            }
+            if panicked {
+                continue;
+            }
+            bodies += 1;
+            infer_total += infer_time;
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "name": name,
+                    "path": path,
+                    "infer_us": infer_time.as_micros() as u64,
+                    "first": mode_name(modes[0]),
+                    "modes": by_mode,
+                })
+            )?;
+        }
+        Ok(())
+    })?;
+    file.flush()?;
+    let mut summary = serde_json::Map::new();
+    for mode in [Mode::Polonius, Mode::Nll] {
+        let phases: serde_json::Map<_, _> = Phase::ALL
+            .iter()
+            .map(|&it| (it.name().into(), totals[mode as usize][it as usize].as_secs_f64().into()))
+            .collect();
+        summary.insert(
+            mode_name(mode).into(),
+            serde_json::json!({
+                "borrowck_secs": check_totals[mode as usize].as_secs_f64(),
+                "phases_secs": phases,
+            }),
+        );
+    }
+    writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        serde_json::json!({
+            "bodies": bodies,
+            "infer_secs": infer_total.as_secs_f64(),
+            "modes": summary,
+        })
+    )?;
+    Ok(())
+}
+
+fn mode_name(mode: hir_ty_borrowck::Mode) -> &'static str {
+    match mode {
+        hir_ty_borrowck::Mode::Polonius => "polonius",
+        hir_ty_borrowck::Mode::Nll => "nll",
+        hir_ty_borrowck::Mode::Off => "off",
+    }
 }
 
 /// Prints the MIR of each function named `name` at the top of `file`, and of its closures, to
