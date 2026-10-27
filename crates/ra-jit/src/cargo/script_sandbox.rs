@@ -546,7 +546,8 @@ fn inputs(lines: &[Line], script: &Script<'_>, spec: &Spec) -> Vec<String> {
     };
     let mut paths: Vec<String> = lines
         .iter()
-        .filter(|it| it.reached == Reached::Read && input(Path::new(&it.what)))
+        .filter(|it| matches!(it.reached, Reached::Read | Reached::Looked))
+        .filter(|it| input(Path::new(&it.what)))
         .map(|it| it.what.clone())
         .collect();
     paths.sort();
