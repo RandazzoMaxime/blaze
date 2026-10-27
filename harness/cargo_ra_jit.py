@@ -42,7 +42,7 @@ Writes CARGO-RA_JIT.md and cargo_ra_jit.json next to this file, or CARGO-RA_JIT-
 cargo_ra_jit_llvm.json under `RA_JIT_BACKEND=llvm`. A run of some projects replaces their rows
 and keeps the others. `--small` is the three projects of the CI job.
 """
-import collections, glob, json, os, re, shutil, signal, subprocess, sys, tempfile, time, urllib.request
+import collections, glob, json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -421,6 +421,25 @@ def checking(root):
     return False
 
 
+def linked_for_loads(ws):
+    """The build scripts and proc macros linked into ra-jit's own target directory
+    (`target/rust-analyzer`) of the checkout `ws`, with when each was written: a load of
+    `cargo ra-jit` links them there, and reads them there again after."""
+    top = os.path.join(ws, "target", "rust-analyzer")
+    linked = {}
+    for at, _, files in os.walk(top):
+        for name in files:
+            path = os.path.join(at, name)
+            try:
+                info = os.stat(path, follow_symlinks=False)
+            except OSError:
+                continue
+            library = name.endswith((".so", ".dylib", ".dll"))
+            if library or (stat.S_ISREG(info.st_mode) and info.st_mode & 0o111):
+                linked[os.path.relpath(path, top)] = info.st_mtime_ns
+    return linked
+
+
 def wait_warm(side, root):
     """Waits until the daemon has every build of `root` loaded or has given up on one. The
     result is the seconds it took and how each ended."""
@@ -514,12 +533,15 @@ def project(name, spec, work, mode):
         theirs.cargo("build", "-p", build[1], "--bin", spec["client"])
         ask = asked_by(os.path.join(ws, "target-ref/debug", spec["client"]))
     runs("cold run")
+    linked = linked_for_loads(ws)
     warm("warm-up")
-    # The daemon loads the workspace with what cargo said of its build scripts and proc
-    # macros, and builds none of them again for it.
-    if os.path.isdir(os.path.join(ws, "target", "rust-analyzer")):
-        row["wrong"].append("warm-up: the daemon built the build scripts and proc macros again")
-        print("  warm-up      the daemon built the build scripts and proc macros again", flush=True)
+    # The daemon loads the workspace with the build scripts and proc macros the cold build
+    # had: cargo's, or those its load linked into ra-jit's own target directory. It links
+    # none of them again.
+    again = sorted(path for path, written in linked_for_loads(ws).items() if linked.get(path) != written)
+    if again:
+        row["wrong"].append(f"warm-up: the daemon built the build scripts and proc macros again: {', '.join(again[:3])}")
+        print(f"  warm-up      the daemon built the build scripts and proc macros again: {', '.join(again[:3])}", flush=True)
     step("warm build", "build", build, status)
     runs("warm run")
     step("cold test", "test", test, test_results)

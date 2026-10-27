@@ -77,6 +77,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
+  `offset_of!`, which lowering computes as the address of a field of a value at address 0,
+  is rustc's `NullOp::OffsetOf` and takes no reference.
 - Builtin derives are checked as rustc expands them (`rustc_builtin_macros/src/deriving`;
   `ra-jit borrowck` expands them, as `ra-jit check` and builds do). The methods derived for
   a `#[repr(packed)]` struct copy each field out of it, `{ self.x }` at the field, rather
@@ -130,10 +132,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   signature with no `for<'a>` has it, so its parameters' types are the `Fn` bound's arguments
   (`|z: &[i32]|` passed as `F: FnOnce(S)` takes the `S` it is called with). A variable with a
   written type is related to it as rustc's user type annotation, so an error through it is
-  blamed on the annotation. A parameter that elides one lifetime has
+  blamed on the annotation. The lifetime a return type elides is the one lifetime the
+  parameters' types write or elide, as rustc's name resolution finds them in the written
+  signature: a `'static` in a type alias's expansion (`id: Id` of `type Id = IdLt<'static>`)
+  is not counted, nor the lifetime `&dyn Trait` leaves out of its object, only what its
+  bounds write (`dyn Trait<'_> + 'a`). A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`); one that
   writes `Self` gives elision none of the impl's lifetimes (`self` of `impl Id<'_>`), and
-  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
+  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes. `Self` written in a
+  trait object's or `impl Trait`'s bounds or a function pointer's signature is the impl's self
+  type too, its anonymous lifetimes the impl's own (`f: &mut dyn FnMut(&mut Self)` in
+  `impl Builder<'_>`), as rustc makes each `'_` of an impl header one parameter of the impl.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
   pointers compare when they have a common supertype, an array's pointer cast to its
   element's relates the element, and a cast between pointers to trait objects keeps the
@@ -250,7 +259,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   a placeholder outlives `'static`, and a placeholder made to outlive anything is rustc's E0308
   "one type is more general than the other". So a closure parameter `x: fn(&u32)` whose
   expected type is `fn(&'1 u32)` needs `'1: 'static`. A function item cast to a `for<'a> fn`
-  keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables.
+  keeps its own `for<'a>`, as rustc's reify, rather than its late-bound lifetimes as variables,
+  and a closure cast to one is its signature's `fn` pointer, related the same way. A projection
+  rust-analyzer normalized under a `for<'a>` stays as written in a `let`'s type: rustc
+  normalizes it for the placeholder, so `let _: for<'a> fn(<&'a () as Trait>::Ty) = |_| {}`
+  with only `impl Trait for &'static ()` needs the placeholder to be `'static`, rustc's
+  "not general enough" (its type op's error, which its type check cannot see) rather than E0308.
   rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
@@ -258,7 +272,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Errors on universal regions: "lifetime may not live long enough", E0521, E0309, E0310,
   E0311, with rustc's object lifetime defaults (`&'a dyn Trait` is `dyn Trait + 'a`, a
   closure's parameter `|x: &dyn Trait|` too, a trait
-  bounded by `'static` makes its objects `'static`, elsewhere in a body the lifetime is
+  bounded by `'static` makes its objects `'static`, in a closure's parameter as well (salsa's
+  `cycle_fn = |db: &'db dyn Db, ..|`), elsewhere in a body the lifetime is
   inferred). Of universal regions made to outlive each other, as rustc only the first made
   (a closure's creator's before its own) is checked against all it outlives, the others only
   against it, so the error is the one rustc reports.
@@ -367,7 +382,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
   a `T` is E0310 at the `impl Trait`; and well-formed where the body defines it, as rustc's
-  `add_item_bounds_for_hidden_type` requires (#114728). Its trait and associated type bounds hold of the type
+  `add_item_bounds_for_hidden_type` requires (#114728). In its defining body the type it hides is
+  also well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
+  to it there and prove what that asks: `-> (Box<dyn Any>, impl Sized)` hiding
+  `Outlives<'static, <T as Trait>::Assoc>` needs `<T as Trait>::Assoc: 'static` (E0310 at
+  the function), the type around it (`&'t impl Trait`) still assumed. Its trait and
+  associated type bounds hold of the type
   it hides where the body returns it, as rustc proves them there: `impl Iterator<Item =
   Box<dyn Foo>>` hiding `Iter<'a, T>` needs the where clauses of that `Iterator` impl with
   `'a` `'static`. A closure or coroutine outlives as its captures do, and
@@ -430,9 +450,13 @@ accepts, and on any unit the checker panics on, as a panic hides every error in 
 
 The other check is that it finds nothing in code rustc accepts.
 `ra-jit borrowck --project DIR` checks a cargo workspace; its last line counts the files,
-errors and files it panicked on; a panic makes it fail. `harness/borrowck_apps.py` runs it
-over every application of `apps/apps.json` at its pinned rev, plus the harness's `corpus` and
-`mixfutures` crates (which CI checks too), and lists each app's errors and panics. At
+errors and files it panicked on; a panic makes it fail. It refuses a workspace `cargo metadata`
+fails on: rust-analyzer would read it with `--no-deps`, whose crates have no dependencies, and
+every type of another crate would be an error the bodies using it do not show.
+`harness/borrowck_apps.py` runs it over every application of `apps/apps.json` at its pinned rev,
+with what `cargo metadata` needs that a clone lacks (bun's vendored crates, which its own build
+fetches), plus the harness's `corpus` and `mixfutures` crates (which CI checks too), and lists
+each app's errors and panics. At
 47793534, 20 of the 23 check clean; nushell (53, E0716 in its tests), ruff (19, E0716 and
 "lifetime may not live long enough") and rust-analyzer (1, E0515) get errors rustc does not
 give.
@@ -445,10 +469,8 @@ with another code, then, of the errors not reported, 5 "lifetime may not live lo
 3 each of E0507, E0309, E0310, E0311 and higher-ranked errors, 2 each of E0716 and E0597,
 then one each of five more. The causes, grouped:
 
-- **Higher-ranked regions and placeholders**: function pointer types are related with
-  placeholders, but a projection in them is not normalized for the placeholder
-  (`nll/closure-malformed-projection-input-issue-102800.rs`), and auto traits of a coroutine's
-  witness (`T: Send` of an `async` block holding a `for<'a>` future) are not proven with them.
+- **Higher-ranked regions and placeholders**: auto traits of a coroutine's witness (`T: Send`
+  of an `async` block holding a `for<'a>` future) are not proven with placeholders.
 - **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
   signature or impl header has an associated type (what normalizing it implies) are not
   checked yet (`fn as_ref2<'a>(&'a self) -> Self::Output<'a>` normalized to `FooRef<'a, U>`
@@ -532,7 +554,14 @@ changes to rust-analyzer were needed, each made as rustc does it:
   is `dyn Trait + 'x`, not `'static`. In an impl header, a trait object behind a reference
   whose lifetime is elided has that lifetime too (`hir-ty/src/lower.rs`, `impl_header`), as
   rustc makes both one fresh parameter of the impl: rusqlite's `impl Params for
-  &[&dyn ToSql]` holds for `params![id, name]` of locals.
+  &[&dyn ToSql]` holds for `params![id, name]` of locals. In a type written in a body (a
+  `let`'s type, a cast's), a lifetime left to inference names nothing, so a trait object it
+  would default has a lifetime inferred on its own (`hir-ty/src/lower.rs`, `object_default`),
+  as rustc's `resolve_object_lifetime_default` stops at `ObjectLifetimeDefault { lifetime:
+  None }` or the body and lowering gives a fresh region: `err as &dyn Error` is
+  `&'1 (dyn Error + '2)`, so cargo's `source` returns it as `dyn Error + 'static`.
+  `Box<dyn Trait>` there is the same, not `'static`; a trait bounded by `'static` still
+  makes its objects `'static`.
 - A return-position `impl Trait` has a lifetime parameter for each lifetime elided in its
   function's parameters, after the function's own (`hir-ty/src/lower.rs`, `elided_lifetimes`),
   as rustc duplicates them as parameters of the opaque type. In its bounds, `'_` or an elided
@@ -550,15 +579,18 @@ changes to rust-analyzer were needed, each made as rustc does it:
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
+- A temporary may be unsized, as rustc's `as_temp` makes one of what is moved out of an
+  unsized place: a place expression as a statement (`S[0];`, `*s;`) is moved into one, sized
+  or not, as rustc's `stmt_expr` does, and so is an operand (`[a[..]]`), so moving out of a
+  borrowed `str`, slice or `dyn` is E0507 or E0508 (`dst/dst-index-fail.rs`,
+  `unsized/issue-115203.rs`). rust-analyzer refused to lower a body with one, and only
+  fake-read an unsized statement. rustc reports E0161 there too, which ra-jit does not.
 
 These are differences still open, each the cause of some failures, all of them errors
 missed rather than errors made up:
 
 - Temporaries of a block's tail expression in edition 2021 are dropped at a different point.
 - Comparisons against constant patterns take their operands by value.
-- A place expression as a statement (`S[0];`, `*s;`) is moved into a temporary in rustc, so
-  an unsized or borrowed one is E0161 or E0507 (`dst/dst-index-fail.rs`); rust-analyzer
-  does not read it.
 - An arm with a guard binds its by-reference bindings before the guard and the rest after,
   in rustc, so what it binds by value is dropped first; rust-analyzer binds them in the
   pattern's order (`dropck/eager-by-ref-binding-for-guards.rs`, where it reports two errors
@@ -576,6 +608,38 @@ For an edit of the corpus's largest file, the check went from a median of 40 ms 
 checker off to 52-74 ms with it on, while the build took 250-400 ms. A cold check of all of
 nushell used 10-25% more CPU time. Both were measured on a loaded machine, so read them as
 rough.
+
+## Speed
+
+The check runs on every edited file, so its time is on the edit's path. Two things keep it
+small: an edit re-checks only the bodies it changed (the query reads each body's source map
+relative to its item, which moving the body does not change), and each check should cost a
+small fraction of type inference, which it needs anyway.
+
+`ra-jit borrowck --project DIR --timings OUT.jsonl` checks every body of a project's own crates
+in both modes, cold, on one thread, and writes per body type inference's time, the checker's
+time in each phase and the sizes it worked on; `RA_JIT_BORROWCK_ONLY=part` limits it to the
+bodies whose name contains `part`. `harness/borrowck_speed.py` runs it over the bench apps and
+reports totals, p50/p99/max and the slowest bodies; `--rustc TOOLCHAIN` measures rustc's own
+`mir_borrowck` and `typeck` with `-Zself-profile` as the baseline.
+
+Before any speed work, on main 31b3345f (arm64 ix VM, 16 vCPUs): the checker's total
+without MIR lowering, beside type inference's, in ms, and its slowest body:
+
+| App | Bodies | Inference | Polonius | max | NLL | max |
+|---|---|---|---|---|---|---|
+| ripgrep | 2642 | 2176 | 526 (24%) | 33 | 511 (24%) | 35 |
+| fd | 268 | 363 | 156 (43%) | 21 | 151 (42%) | 22 |
+| bat | 568 | 2824 | 300 (11%) | 58 | 318 (11%) | 61 |
+| hyperfine | 306 | 2548 | 183 (7%) | 19 | 176 (7%) | 23 |
+| just | 1660 | 1743 | 1086 (62%) | 52 | 1148 (66%) | 94 |
+| axum | 1576 | 8257 | 4033 (49%) | 81 | 3994 (48%) | 91 |
+| helix | 6025 | 8261 | 3641 (44%) | 248 | 3479 (42%) | 157 |
+| nushell | 35844 | 40051 | 23622 (59%) | 841 | 23677 (59%) | 905 |
+| biome (first 62445 bodies) | 62445 | 37973 | 20313 (53%) | 1522 | 17887 (47%) | 932 |
+
+Generating constraints, which asks the trait solver about every statement's types, is more
+than half of it everywhere (nushell: 13.4 s of 23.6 s), then liveness, the walk and moves.
 
 ## Debugging
 

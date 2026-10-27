@@ -257,11 +257,7 @@ fn for_load(compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::R
     let named = || format!("`{}`", unit.crate_name);
     if record.is_proc_macro() {
         if std::env::var_os(own_macro::SERVER).is_none() {
-            let why = format!(
-                "no proc-macro server is beside ra-jit ({}), and ra-jit links proc macros only \
-                 for its own",
-                own_macro::SHIPPED
-            );
+            let why = own_macro::missing_server();
             return Err(failed(format!("the proc macro {}", named()), why));
         }
         let built = own_macro::made(&record).ok_or("cargo names no place for it".to_owned());

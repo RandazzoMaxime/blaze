@@ -61,6 +61,8 @@ HARNESSES = [
     ("core", ["wholeprogram.py"], {}, on("linux", "macos"), None),
     # `cargo blaze build` from nothing: G's whole build, no cargo build.
     ("core", ["coldbuild.py"], {}, on("linux"), 2),
+    # Its program of writable statics of its own crates on macOS too, where anim's `HOME` was refused.
+    ("core", ["coldbuild.py", "statics"], {}, on("macos"), None),
     ("core", ["splices.py"], {}, EVERYWHERE, 2),
     ("core", ["live_e2e.py"], {}, on("linux-x86_64"), 1),
     # A type added beside another, the code moved to it and the old one deleted, each a patch.

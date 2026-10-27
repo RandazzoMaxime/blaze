@@ -6,8 +6,9 @@
 // toolchain only.
 #![cfg_attr(
     feature = "nightly",
-    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics)
+    feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b, unsized_fn_params)
 )]
+#![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
 // The `core::arch::aarch64` functions `neon_intrinsics` calls that are not stable yet.
 #![cfg_attr(
@@ -18,7 +19,8 @@
         stdarch_neon_fcma,
         stdarch_arm_barrier,
         stdarch_arm_hints,
-        stdarch_aarch64_rand
+        stdarch_aarch64_rand,
+        stdarch_neon_f16
     )
 )]
 
@@ -369,6 +371,17 @@ pub mod consts {
     }
     pub fn repeat(v: u16) -> [u16; 5] {
         [v; 5]
+    }
+    // A slice matched from its end in a constant: its length is the target's `usize`.
+    const FROM_END: (u8, usize) = {
+        let primes: &[u8] = &[3, 5, 7, 11];
+        match primes {
+            [.., before, last] => (*before + *last, primes.len()),
+            _ => (0, 0),
+        }
+    };
+    pub fn from_end(n: u8) -> (u8, usize) {
+        (FROM_END.0 + n, FROM_END.1)
     }
 }
 
@@ -1209,6 +1222,316 @@ pub mod simd_lanes {
     }
 }
 
+/// Unsized values taken by value (`unsized_fn_params`), which rustc passes as the address of
+/// the value and its metadata: slices, `str`, `dyn Trait` and a struct with an unsized tail,
+/// of several lengths, moved out of a `Box`, passed on, through a trait and a vtable, and
+/// dropped by the callee.
+#[cfg(feature = "nightly")]
+pub mod unsized_params {
+    use std::cell::Cell;
+    use std::fmt::Display;
+
+    thread_local! {
+        static DROPS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub struct Noisy(pub u32);
+    impl Drop for Noisy {
+        fn drop(&mut self) {
+            DROPS.with(|it| it.set(it.get() * 10 + self.0));
+        }
+    }
+
+    pub struct Tail<T: ?Sized> {
+        pub n: u8,
+        pub rest: T,
+    }
+
+    #[inline(never)]
+    pub fn sum(x: [u64]) -> u64 {
+        let mut total = x.len() as u64 * 1000;
+        for v in &x {
+            total = total.wrapping_mul(31).wrapping_add(*v);
+        }
+        total
+    }
+    #[inline(never)]
+    pub fn passed_on(x: [u64], bias: u64) -> u64 {
+        sum(x) ^ bias
+    }
+    #[inline(never)]
+    pub fn bumped(mut x: [u32]) -> Vec<u32> {
+        if let Some(first) = x.first_mut() {
+            *first += 1;
+        }
+        x.to_vec()
+    }
+    #[inline(never)]
+    pub fn shout(s: str) -> String {
+        format!("{}:{}", s.len(), s.to_uppercase())
+    }
+    #[inline(never)]
+    pub fn show(x: dyn Display, width: usize) -> String {
+        format!("[{:>width$}]", &x)
+    }
+    #[inline(never)]
+    pub fn joined(x: [String]) -> String {
+        x.join("+")
+    }
+    #[inline(never)]
+    pub fn counted(x: [Noisy]) -> usize {
+        x.len()
+    }
+    #[inline(never)]
+    pub fn tail(x: Tail<[u16]>) -> (u8, usize, u32) {
+        (x.n, x.rest.len(), x.rest.iter().map(|&it| u32::from(it)).sum())
+    }
+
+    pub trait Total {
+        fn total(self) -> u64;
+    }
+    impl Total for [u64] {
+        fn total(self) -> u64 {
+            passed_on(self, 7)
+        }
+    }
+
+    pub trait Consume {
+        fn consume(self) -> String;
+    }
+    impl Consume for String {
+        fn consume(self) -> String {
+            self + "!"
+        }
+    }
+    impl Consume for (u8, u64, [u16; 3]) {
+        fn consume(self) -> String {
+            format!("{:?}", self)
+        }
+    }
+    impl Consume for Noisy {
+        fn consume(self) -> String {
+            format!("noisy {}", self.0)
+        }
+    }
+
+    pub fn run() -> String {
+        let mut out = Vec::new();
+        for len in [0usize, 1, 3, 17] {
+            let values: Vec<u64> = (0..len as u64).map(|it| it * it + 5).collect();
+            out.push(sum(*values.clone().into_boxed_slice()).to_string());
+            out.push(values.clone().into_boxed_slice().total().to_string());
+            let small: Vec<u32> = (0..len as u32).collect();
+            out.push(format!("{:?}", bumped(*small.into_boxed_slice())));
+            let strings: Vec<String> = (0..len).map(|it| "ab".repeat(it)).collect();
+            out.push(joined(*strings.into_boxed_slice()));
+        }
+        for s in ["", "a", "héllo wörld", "ß"] {
+            let boxed: Box<str> = s.into();
+            out.push(shout(*boxed));
+        }
+        let shown: [Box<dyn Display>; 3] = [Box::new(42u8), Box::new("text"), Box::new(-1.5f64)];
+        for (width, it) in shown.into_iter().enumerate() {
+            out.push(show(*it, width * 3));
+        }
+        DROPS.with(|it| it.set(0));
+        let noisy: Box<[Noisy]> = vec![Noisy(1), Noisy(2), Noisy(3)].into_boxed_slice();
+        out.push(format!("{} {}", counted(*noisy), DROPS.with(Cell::get)));
+        let empty: Box<[Noisy]> = Vec::new().into_boxed_slice();
+        out.push(format!("{} {}", counted(*empty), DROPS.with(Cell::get)));
+        let tails: [Box<Tail<[u16]>>; 3] = [
+            Box::new(Tail { n: 1, rest: [0u16; 0] }),
+            Box::new(Tail { n: 2, rest: [7] }),
+            Box::new(Tail { n: 3, rest: [1, 2, 65535, 9] }),
+        ];
+        for it in tails {
+            out.push(format!("{:?}", tail(*it)));
+        }
+        DROPS.with(|it| it.set(0));
+        let consumed: [Box<dyn Consume>; 3] =
+            [Box::new(String::from("owned")), Box::new((9, u64::MAX, [1, 2, 3])), Box::new(Noisy(4))];
+        for it in consumed {
+            out.push(it.consume());
+        }
+        out.push(DROPS.with(Cell::get).to_string());
+        out.join(" | ")
+    }
+}
+
+/// `f16` and `f128`, which AArch64 has no arithmetic for without its half-precision extension:
+/// an `f16` is worked on as an `f32` and rounded back, an `f128` by compiler-builtins and C's
+/// `long double` functions. The values are at the edges of each format: signed zeros, the
+/// least and greatest subnormals, ties of the rounding back, the greatest finite values and
+/// what rounds past them, infinities, quiet and signalling NaNs with payloads.
+#[cfg(all(feature = "nightly", target_arch = "aarch64", target_os = "linux"))]
+pub mod soft_floats {
+    use core::intrinsics as i;
+
+    const HALVES: [u16; 22] = [
+        0x0000, 0x8000, 0x3c00, 0xbc00, 0x3800, 0x0001, 0x8001, 0x03ff, 0x0400, 0x7bff, 0xfbff,
+        0x7c00, 0xfc00, 0x7e00, 0x7c01, 0x7fff, 0xfe01, 0x3555, 0x4248, 0x6800, 0x6801, 0x5bfe,
+    ];
+    const SINGLES: [u32; 16] = [
+        0x3f80_1000, 0x3f80_3000, 0x3f80_1001, 0x477f_f000, 0x477f_efff, 0x3380_0000,
+        0x3300_0000, 0x3300_0001, 0x387f_e000, 0x7fa0_0001, 0x7fc1_2345, 0xffc0_0000,
+        0x7f80_0000, 0x8000_0000, 0x4f80_0000, 0xcf00_0001,
+    ];
+    const DOUBLES: [u64; 10] = [
+        0x3ff0_0200_0000_0000, 0x3ff0_0200_0000_0001, 0x40ef_fe00_0000_0000,
+        0x3e70_0000_0000_0000, 0x7ff4_0000_0000_0001, 0x7ff8_dead_beef_0000,
+        0x8000_0000_0000_0000, 0x7fef_ffff_ffff_ffff, 0x0000_0000_0000_0001,
+        0xc3e0_0000_0000_0001,
+    ];
+
+    pub fn half_ops(a: f16, b: f16) -> [u16; 10] {
+        [a + b, a - b, a * b, a / b, a % b, -a, a.abs(), a.copysign(b), unsafe {
+            i::fma(a, b, a)
+        }, unsafe { i::powi(a, 3) }]
+        .map(f16::to_bits)
+    }
+    pub fn half_compares(a: f16, b: f16) -> [bool; 6] {
+        [a == b, a != b, a < b, a <= b, a > b, a >= b]
+    }
+    pub fn half_rounding(a: f16) -> [u16; 6] {
+        [unsafe { i::sqrt(a) }, i::floor(a), i::ceil(a), i::trunc(a), i::round(a), i::round_ties_even(a)]
+            .map(f16::to_bits)
+    }
+    pub fn half_widened(a: f16) -> (u32, u64, u128) {
+        ((a as f32).to_bits(), (a as f64).to_bits(), (a as f128).to_bits())
+    }
+    // Not to 128-bit integers: rustc at `opt-level=0` (LLVM's GlobalISel) converts an `f16` to
+    // one as to a 64-bit integer and leaves the upper half zero, so `-1.0 as i128` is 2^64 - 1
+    // there, and saturates as `as` should only optimized.
+    pub fn half_to_ints(a: f16) -> (i8, u8, i16, u16, i32, u32, i64, u64) {
+        (a as i8, a as u8, a as i16, a as u16, a as i32, a as u32, a as i64, a as u64)
+    }
+    pub fn halves_of(a: f32, b: f64) -> (u16, u16) {
+        ((a as f16).to_bits(), (b as f16).to_bits())
+    }
+    pub fn ints_to_half(a: i64, b: u64, c: i128, d: u128, e: i8, f: u32) -> [u16; 6] {
+        [a as f16, b as f16, c as f16, d as f16, e as f16, f as f16].map(f16::to_bits)
+    }
+    /// `f16b` moves as an `f16` does, and is compared and widened as the `f32` it is the top
+    /// half of.
+    pub fn brain(a: u16, b: u16) -> (u16, bool, Option<core::cmp::Ordering>, u32, String) {
+        let (a, b) = (core::num::f16b::from_bits(a), core::num::f16b::from_bits(b));
+        (b.to_bits(), a == b, a.partial_cmp(&b), f32::from(a).to_bits(), format!("{a:?}"))
+    }
+    pub fn pair(a: f16, b: f128) -> (f16, f128, Option<f16>) {
+        (b as f16, a as f128, if a > 0.0 { Some(-a) } else { None })
+    }
+
+    pub fn quad_ops(a: f128, b: f128) -> [u128; 11] {
+        [a + b, a - b, a * b, a / b, a % b, -a, a.abs(), a.copysign(b), unsafe {
+            i::fma(a, b, a)
+        }, unsafe { i::powi(a, 3) }, unsafe { i::sqrt(a) }]
+        .map(f128::to_bits)
+    }
+    pub fn quad_compares(a: f128, b: f128) -> [bool; 6] {
+        [a == b, a != b, a < b, a <= b, a > b, a >= b]
+    }
+    pub fn quad_rounding(a: f128) -> [u128; 5] {
+        [i::floor(a), i::ceil(a), i::trunc(a), i::round(a), i::round_ties_even(a)].map(f128::to_bits)
+    }
+    pub fn quad_narrowed(a: f128) -> (u16, u32, u64) {
+        ((a as f16).to_bits(), (a as f32).to_bits(), (a as f64).to_bits())
+    }
+    pub fn quad_to_ints(a: f128) -> (i8, u8, i16, u16, i32, u32, i64, u64, i128, u128) {
+        (a as i8, a as u8, a as i16, a as u16, a as i32, a as u32, a as i64, a as u64, a as i128, a as u128)
+    }
+    pub fn quads_of(a: f32, b: f64, c: i32, d: u64, e: i128, f: u128, g: i8, h: u16) -> [u128; 8] {
+        [a as f128, b as f128, c as f128, d as f128, e as f128, f as f128, g as f128, h as f128]
+            .map(f128::to_bits)
+    }
+
+    fn quads() -> Vec<f128> {
+        let mut quads: Vec<f128> = [
+            0.0, -0.0, 1.0, -1.5, 0.5, 2.5, -2.5, 3.0, 127.5, -128.5, 255.5, 65535.75,
+            2147483647.5, -2147483648.75, -2147483649.0, 4294967295.5, 4294967296.0,
+            9223372036854775807.0, -9223372036854775808.0, 18446744073709551615.0,
+            1e30, -1e30, 1e40, 1e-4000, f128::MAX, f128::MIN_POSITIVE, f128::INFINITY,
+            f128::NEG_INFINITY, f128::NAN,
+        ]
+        .to_vec();
+        quads.extend(
+            [
+                0x7fff_4000_0000_0000_0000_0000_0000_0001u128, // signalling NaN
+                0xffff_8000_0000_0000_dead_beef_0000_0000, // negative quiet NaN with a payload
+                0x0000_0000_0000_0000_0000_0000_0000_0001, // least subnormal
+                0x407d_ffff_ffff_ffff_ffff_ffff_ffff_ffff, // 2^127 - 2^14, the greatest below i128::MAX
+                0x407e_0000_0000_0000_0000_0000_0000_0000, // 2^127
+                0xc07e_0000_0000_0000_0000_0000_0000_0000, // -2^127
+                0xc07e_0000_0000_0000_0000_0000_0000_0001,
+                0x407e_ffff_ffff_ffff_ffff_ffff_ffff_ffff, // 2^128 - 2^15
+                0x407f_0000_0000_0000_0000_0000_0000_0000, // 2^128
+                0x3ff0_0000_0000_0000_1000_0000_0000_0000, // rounds to f64 at a tie
+                0x3fff_0020_0000_0000_0000_0000_0000_0000, // 1 + 2^-11, a tie of f16
+            ]
+            .map(f128::from_bits),
+        );
+        quads
+    }
+
+    pub fn run() -> String {
+        let halves = HALVES.map(f16::from_bits);
+        let mut out = String::new();
+        for &a in &halves {
+            for &b in &halves {
+                out += &format!("{:x?}{:?}", half_ops(a, b), half_compares(a, b));
+            }
+            out += &format!(
+                "\n{:x?} {:x?} {:?} {:?}\n",
+                half_rounding(a),
+                half_widened(a),
+                half_to_ints(a),
+                pair(a, a as f128)
+            );
+        }
+        for (&a, &b) in HALVES.iter().zip(HALVES.iter().rev()) {
+            out += &format!("{:?} ", brain(a, b));
+        }
+        for (single, double) in SINGLES.iter().zip(DOUBLES.iter().cycle()) {
+            out += &format!("{:x?} ", halves_of(f32::from_bits(*single), f64::from_bits(*double)));
+        }
+        for (a, b) in [(1i64 << 40) + (1 << 29) + 1, 2049, -65520, i64::MIN, 0x7ff8_0000_0000_0001]
+            .into_iter()
+            .zip([u64::MAX, 65519, 65520, (1 << 53) + 3, 0])
+        {
+            let ints = ints_to_half(a, b, a as i128 * -3, b as u128 * 5, a as i8, b as u32);
+            out += &format!("{ints:x?} {:x?}\n", ints_to_half(0, 0, i128::MIN, u128::MAX, -128, u32::MAX));
+        }
+        let quads = quads();
+        for &a in &quads {
+            for &b in &quads {
+                out += &format!("{:x?}{:?}", quad_ops(a, b), quad_compares(a, b));
+            }
+            out += &format!(
+                "\n{:x?} {:x?} {:?}\n",
+                quad_rounding(a),
+                quad_narrowed(a),
+                quad_to_ints(a)
+            );
+        }
+        for (k, (single, double)) in SINGLES.iter().zip(DOUBLES.iter().cycle()).enumerate() {
+            let k = k as i128;
+            out += &format!(
+                "{:x?}\n",
+                quads_of(
+                    f32::from_bits(*single),
+                    f64::from_bits(*double),
+                    i32::MIN + k as i32,
+                    u64::MAX - k as u64,
+                    i128::MIN + k * 12345,
+                    u128::MAX - k as u128 * 99999,
+                    k as i8 - 100,
+                    u16::MAX - k as u16,
+                )
+            );
+        }
+        out
+    }
+}
+
 pub mod statics {
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
@@ -2014,6 +2337,20 @@ pub mod packed_drop {
         drop(w);
         drop(m.1.1.a);
         ODD.with(|it| it.get())
+    }
+}
+
+/// `offset_of!` of a field of a packed struct takes no reference to it.
+pub mod packed_offset_of {
+    #[repr(C, packed)]
+    pub struct Header {
+        pub magic: u16,
+        pub version: u8,
+        pub checksum: u32,
+    }
+
+    pub fn run(base: usize) -> usize {
+        base + core::mem::offset_of!(Header, checksum)
     }
 }
 
@@ -5663,6 +6000,190 @@ pub mod neon_intrinsics {
     }
 }
 
+/// `core::arch::aarch64` functions of halves, which are AArch64's half-precision instructions
+/// in a function with them (`fp16`): arithmetic, `fma`, comparisons, conversions, rounding and
+/// lane moves, of vectors and of single halves, and `f16` arithmetic of such a function, with
+/// the edges of `f16` (signed zeros, subnormals, ties, the greatest finite values,
+/// infinities, quiet and signalling NaNs with payloads, a signalling NaN beside a quiet one).
+/// They run only where the processor has the extension, and the output says whether it did.
+#[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "nightly"))]
+pub mod half_intrinsics {
+    use core::arch::aarch64::*;
+    use core::mem::transmute;
+
+    const HALVES: [u16; 24] = [
+        0x0000, 0x8000, 0x3c00, 0xbc00, 0x3800, 0x0001, 0x8001, 0x03ff, 0x0400, 0x7bff, 0xfbff,
+        0x7c00, 0xfc00, 0x7e00, 0x7c01, 0x7fff, 0xfe01, 0x3555, 0x4248, 0x6800, 0x6801, 0x5bfe,
+        0x3c01, 0xd7ff,
+    ];
+    const SINGLES: [u32; 8] = [
+        0x3f80_1000, 0x477f_f000, 0x3380_0000, 0x7fa0_0001, 0xffc1_2345, 0x8000_0000,
+        0x4f80_0000, 0x387f_e000,
+    ];
+
+    fn eight(v: float16x8_t) -> [u16; 8] {
+        unsafe { transmute(v) }
+    }
+    fn four(v: float16x4_t) -> [u16; 4] {
+        unsafe { transmute(v) }
+    }
+
+    #[target_feature(enable = "fp16")]
+    unsafe fn vectors(a: float16x8_t, b: float16x8_t, c: float16x8_t, s: float32x4_t) -> Vec<u16> {
+        let (x, y, z) = (vget_low_f16(a), vget_high_f16(b), vget_low_f16(c));
+        let mut out = Vec::new();
+        for v in [
+            vaddq_f16(a, b),
+            vsubq_f16(a, b),
+            vmulq_f16(a, b),
+            vdivq_f16(a, b),
+            vfmaq_f16(c, a, b),
+            vfmsq_f16(c, a, b),
+            vnegq_f16(a),
+            vabsq_f16(b),
+            vsqrtq_f16(a),
+            vrndmq_f16(a),
+            vrndpq_f16(b),
+            vrndaq_f16(a),
+            vpaddq_f16(a, b),
+            vabdq_f16(a, b),
+            vbslq_f16(vcgtq_f16(a, b), a, b),
+            vcvtq_f16_s16(vreinterpretq_s16_f16(a)),
+            vcvtq_f16_u16(vreinterpretq_u16_f16(b)),
+            vcvt_high_f16_f32(x, s),
+            vsetq_lane_f16::<3>(vgetq_lane_f16::<6>(b), a),
+            vzip1q_f16(a, b),
+            vuzp2q_f16(a, b),
+            vextq_f16::<3>(a, b),
+            vrev64q_f16(a),
+            vcombine_f16(vtrn1_f16(x, y), vdup_lane_f16::<2>(z)),
+            vdupq_n_f16(vget_lane_f16::<1>(y)),
+        ] {
+            out.extend(eight(v));
+        }
+        for v in [
+            vadd_f16(x, y),
+            vsub_f16(x, y),
+            vmul_f16(x, y),
+            vdiv_f16(y, x),
+            vfma_f16(z, x, y),
+            vfms_f16(z, y, x),
+            vneg_f16(y),
+            vabs_f16(x),
+            vsqrt_f16(y),
+            vrndm_f16(y),
+            vrndp_f16(x),
+            vrnd_f16(x),
+            vrndx_f16(y),
+            vcvt_f16_f32(s),
+            vcvt_f16_u16(vreinterpret_u16_f16(x)),
+            vdup_n_f16(vgetq_lane_f16::<7>(a)),
+        ] {
+            out.extend(four(v));
+        }
+        for mask in [
+            vceqq_f16(a, b),
+            vcgeq_f16(a, b),
+            vcgtq_f16(a, b),
+            vcleq_f16(a, b),
+            vcltq_f16(a, b),
+            vceqzq_f16(a),
+            vcgezq_f16(b),
+            vcgtzq_f16(a),
+            vclezq_f16(b),
+            vcltzq_f16(a),
+            vreinterpretq_u16_s16(vcvtq_s16_f16(a)),
+            vcvtq_u16_f16(b),
+        ] {
+            out.extend(transmute::<_, [u16; 8]>(mask));
+        }
+        for mask in [vceq_f16(x, y), vcle_f16(x, y), vcltz_f16(y), vcge_f16(y, z), vcgt_f16(z, x)] {
+            out.extend(transmute::<_, [u16; 4]>(mask));
+        }
+        for wide in [vcvt_f32_f16(x), vcvt_high_f32_f16(b)] {
+            let wide: [u32; 4] = transmute(wide);
+            out.extend(wide.iter().flat_map(|it| [(it >> 16) as u16, *it as u16]));
+        }
+        out
+    }
+
+    #[target_feature(enable = "fp16")]
+    unsafe fn halves(a: f16, b: f16, c: f16) -> ([u16; 22], [i64; 18]) {
+        let rounded = [
+            vaddh_f16(a, b),
+            vsubh_f16(a, b),
+            vmulh_f16(a, b),
+            vdivh_f16(a, b),
+            vfmah_f16(c, a, b),
+            vfmsh_f16(c, a, b),
+            vabdh_f16(a, b),
+            vsqrth_f16(a),
+            vrndmh_f16(a),
+            vrndph_f16(a),
+            vrndh_f16(a),
+            vrndah_f16(a),
+            vrndnh_f16(a),
+            vrndxh_f16(a),
+            vnegh_f16(a),
+            vabsh_f16(a),
+            a + b,
+            a * b - c,
+            a / b,
+            unsafe { core::intrinsics::fma(a, b, c) },
+            unsafe { core::intrinsics::sqrt(b) },
+            core::intrinsics::round_ties_even(b),
+        ];
+        let ints = [
+            vcageh_f16(a, b) as i64,
+            vcagth_f16(a, b) as i64,
+            vcaleh_f16(a, b) as i64,
+            vcvtph_s32_f16(a) as i64,
+            vcvtph_u32_f16(a) as i64,
+            vcvtph_s64_f16(a),
+            vcvtah_s64_f16(a),
+            vcvtah_u32_f16(a) as i64,
+            vcvtah_u64_f16(a) as i64,
+            vcvtmh_s32_f16(a) as i64,
+            vcvtmh_u64_f16(a) as i64,
+            vcvtnh_s32_f16(a) as i64,
+            vcvtnh_u64_f16(a) as i64,
+            vcvtah_s32_f16(b) as i64,
+            vcvtmh_s64_f16(b),
+            vcvtnh_s64_f16(b),
+            vcvtph_u64_f16(b) as i64,
+            vcvtmh_u32_f16(b) as i64,
+        ];
+        (rounded.map(f16::to_bits), ints)
+    }
+
+    pub fn run() -> String {
+        if !std::arch::is_aarch64_feature_detected!("fp16") {
+            return "no fp16".to_owned();
+        }
+        let halves_at = |at: usize| HALVES[at % HALVES.len()];
+        let mut out = String::new();
+        unsafe {
+            for k in 0..HALVES.len() {
+                let lanes = |step: usize, start: usize| -> float16x8_t {
+                    transmute(core::array::from_fn::<u16, 8, _>(|i| halves_at(start + i * step)))
+                };
+                let (a, b, c) = (lanes(1, k), lanes(5, k + 3), lanes(7, 2 * k));
+                let s = vld1q_f32(transmute::<_, [f32; 8]>(SINGLES)[k % 5..].as_ptr());
+                out += &format!("{:x?}\n", vectors(a, b, c, s));
+            }
+            for (i, &a) in HALVES.iter().enumerate() {
+                for (j, &b) in HALVES.iter().enumerate() {
+                    let c = halves_at(i * 3 + j * 7);
+                    let (a, b, c) = (f16::from_bits(a), f16::from_bits(b), f16::from_bits(c));
+                    out += &format!("{:x?}", halves(a, b, c));
+                }
+                out += "\n";
+            }
+        }
+        out + "fp16"
+    }
+}
+
 /// Portable vectors of fewer than 64 bits by value, which AArch64's LLVM passes in a vector
 /// register with their lanes widened (`<4 x u8>` as `<4 x u16>`), or after their one lane: the
 /// runner, which rustc builds, calls these and hands them back.
@@ -5688,6 +6209,130 @@ pub mod small_vectors {
     /// Through a function pointer, which no inlining sees through.
     pub fn called(f: fn(Simd<u8, 4>, Simd<u8, 4>) -> Simd<u8, 4>) -> [u8; 4] {
         f(Simd::from_array([250, 1, 2, 3]), Simd::from_array([10, 20, 30, 40])).to_array()
+    }
+}
+
+/// `core::arch`'s scalable vectors of AArch64 (SVE, SVE2): counts of a vector's lanes and of a
+/// pattern's, predicates, loads and stores of whole and unpacked vectors with partial predicates,
+/// selection, tuples and reinterpretation. Every result depends on the vector length, so it is
+/// checked at each one qemu runs it at; a machine without SVE2 prints that alone.
+#[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+pub mod sve {
+    use core::arch::aarch64::*;
+    use std::fmt::Write;
+
+    pub fn run() -> String {
+        if !std::arch::is_aarch64_feature_detected!("sve2") {
+            return "no sve2".to_owned();
+        }
+        // SAFETY: the machine has SVE2.
+        unsafe { checked() }
+    }
+
+    #[target_feature(enable = "sve,sve2")]
+    unsafe fn checked() -> String {
+        let mut out = String::new();
+        let counts = [svcntb(), svcnth(), svcntw(), svcntd()];
+        let patterns = [
+            svcntb_pat::<{ svpattern::SV_VL7 }>(),
+            svcnth_pat::<{ svpattern::SV_POW2 }>(),
+            svcntw_pat::<{ svpattern::SV_MUL3 }>(),
+            svcntd_pat::<{ svpattern::SV_VL256 }>(),
+            svcntb_pat::<{ svpattern::SV_MUL4 }>(),
+            svcntw_pat::<{ svpattern::SV_VL1 }>(),
+        ];
+        write!(out, "{counts:?} {patterns:?}").unwrap();
+        let three = svptrue_pat_b32::<{ svpattern::SV_VL3 }>();
+        let active = [
+            svcntp_b8(svptrue_b8(), svptrue_b16()),
+            svcntp_b32(svptrue_b8(), three),
+            svcntp_b16(svptrue_pat_b16::<{ svpattern::SV_VL5 }>(), svptrue_b16()),
+            svcntp_b64(svptrue_b64(), svptrue_pat_b8::<{ svpattern::SV_ALL }>()),
+            svcntp_b8(svptrue_b8(), three),
+        ];
+        write!(out, " {active:?}").unwrap();
+        let words: Vec<i32> = (0..64).map(|it| (it - 9) * 0x0102_0305).collect();
+        let bytes: Vec<i8> = (0..64).map(|it| (it * 37 - 100) as i8).collect();
+        let mut stored = vec![-1i32; 64];
+        let mut narrow = vec![7i8; 64];
+        // SAFETY: each load and store is of at most 64 lanes, and the buffers have as many.
+        unsafe {
+            let five = svptrue_pat_b32::<{ svpattern::SV_VL5 }>();
+            let loaded = svld1_s32(five, words.as_ptr());
+            svst1_s32(svptrue_b32(), stored.as_mut_ptr(), loaded);
+            let signed = svld1sb_s32(svptrue_b32(), bytes.as_ptr());
+            let unsigned = svld1ub_u32(svptrue_b32(), bytes.as_ptr().cast());
+            let chosen = svsel_s32(three, signed, svreinterpret_s32_u32(unsigned));
+            svst1_s32(svptrue_pat_b32::<{ svpattern::SV_VL8 }>(), stored.as_mut_ptr().add(16), chosen);
+            svst1b_s32(svptrue_b32(), narrow.as_mut_ptr(), svld1_s32(svptrue_b32(), words.as_ptr()));
+            let pair = svcreate2_s32(loaded, chosen);
+            let pair = svset2_s32::<0>(pair, signed);
+            svst1_s32(svptrue_pat_b32::<{ svpattern::SV_VL4 }>(), stored.as_mut_ptr().add(32), svget2_s32::<0>(pair));
+            svst1_s32(svptrue_pat_b32::<{ svpattern::SV_VL4 }>(), stored.as_mut_ptr().add(40), svget2_s32::<1>(pair));
+            let doubles = svreinterpret_f64_s32(loaded);
+            let mut float_bits = [0f64; 32];
+            svst1_f64(svptrue_b64(), float_bits.as_mut_ptr(), doubles);
+            write!(out, " {:?}", float_bits.map(f64::to_bits)).unwrap();
+            let base = words.as_ptr();
+            let overlaps = [
+                svcntp_b32(svptrue_b32(), svwhilerw_s32(base, base.add(3))),
+                svcntp_b32(svptrue_b32(), svwhilewr_s32(base.add(3), base)),
+                svcntp_b8(svptrue_b8(), svwhilewr_s8(bytes.as_ptr(), bytes.as_ptr().wrapping_add(1000))),
+                svcntp_b64(svptrue_b64(), svwhilerw_s64(base.cast(), base.cast())),
+            ];
+            write!(out, " {overlaps:?}").unwrap();
+        }
+        write!(out, " {stored:?} {narrow:?}").unwrap();
+        out
+    }
+}
+
+/// Each function of `core::arch`'s SVE and SVE2 of an LLVM intrinsic ra-jit has a stub of,
+/// generated (`sve_ops.rs`).
+#[cfg(all(feature = "nightly", target_arch = "aarch64"))]
+pub mod sve_ops;
+
+/// rust-analyzer's `ExprCollector::new(db: &dyn SourceDatabase, module: ModuleId, ..) ->
+/// ExprCollector<'_>`: lifetime elision counts the lifetimes the parameters' types write or
+/// elide, not the `'static` of `type ModuleId = ModuleIdLt<'static>`'s expansion, nor the
+/// default of a trait object of a `'static` trait.
+pub mod elision_through_alias {
+    use std::cell::Cell;
+
+    pub trait Db: 'static {
+        fn n(&self) -> u8;
+    }
+
+    impl Db for u8 {
+        fn n(&self) -> u8 {
+            *self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct IdLt<'db>(pub &'db u8);
+
+    pub type Id = IdLt<'static>;
+
+    pub struct Collector<'db> {
+        pub db: &'db dyn Db,
+        pub cell: Cell<&'db u8>,
+    }
+
+    impl<'db> Collector<'db> {
+        pub fn new(db: &dyn Db, id: Id) -> Collector<'_> {
+            Collector { db, cell: Cell::new(id.0) }
+        }
+    }
+
+    pub fn first(x: &u8, id: Id) -> &u8 {
+        if *id.0 > *x { x } else { x }
+    }
+
+    pub fn run() -> u8 {
+        let (n, x) = (4u8, 2u8);
+        let collector = Collector::new(&n, IdLt(&7));
+        collector.db.n() + collector.cell.get() + first(&x, IdLt(&1))
     }
 }
 
@@ -6881,6 +7526,42 @@ pub mod object_lifetime_default {
         let mut c = Container { t: Ref { r: &first }, u: Ref2 { r: &first } };
         put(Ref { r: &a }, Ref2 { r: &b }, &mut c);
         format!("{}{}", c.t.r.show(), c.u.r.show())
+    }
+}
+
+/// salsa's `cycle_fn` closures, as ruff's `ty_python_semantic` writes them: a closure's
+/// parameter `db: &'db dyn Db` of a trait bounded by `'static` (salsa's `Database` is) is
+/// `&'db (dyn Db + 'static)`, rustc's object lifetime default, as it is in a signature.
+pub mod closure_static_trait_object {
+    pub trait Db: 'static {
+        fn n(&self) -> u32;
+    }
+
+    impl Db for u32 {
+        fn n(&self) -> u32 {
+            *self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Ty<'db>(pub &'db u32);
+
+    impl<'db> Ty<'db> {
+        fn normalized(self, db: &'db dyn Db, previous: Ty<'db>) -> Ty<'db> {
+            if db.n() > *previous.0 { self } else { previous }
+        }
+    }
+
+    pub fn recover<'db>(db: &'db dyn Db, last: &Ty<'db>, value: Ty<'db>) -> Ty<'db> {
+        (|db: &'db dyn Db, cycle, previous: &Ty<'db>, result: Ty<'db>| {
+            let _: u32 = cycle;
+            result.normalized(db, *previous)
+        })(db, 0, last, value)
+    }
+
+    pub fn run() -> u32 {
+        let (a, b) = (1, 2);
+        *recover(&5u32, &Ty(&a), Ty(&b)).0
     }
 }
 
@@ -8658,6 +9339,41 @@ pub mod byte_compares {
     }
 }
 
+/// A trait object written in a body under a lifetime left to inference, as cargo's
+/// credential error's `source` casts: `&dyn Error` is `&'_ (dyn Error + '_)`, two lifetimes
+/// inferred apart, so it coerces to `dyn Error + 'static` behind a shorter reference.
+pub mod body_object_lifetimes {
+    use std::error::Error;
+    use std::fmt;
+
+    #[derive(Debug)]
+    pub struct Chained {
+        source: Option<Box<Chained>>,
+    }
+
+    impl fmt::Display for Chained {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("chained")
+        }
+    }
+
+    impl Error for Chained {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source.as_ref().map(|err| err as &dyn Error)
+        }
+    }
+
+    pub fn annotated(e: &Chained) -> &(dyn Error + 'static) {
+        let object: &dyn Error = e;
+        object
+    }
+
+    pub fn boxed(e: Box<Chained>) -> Box<dyn Error> {
+        let object: Box<dyn Error> = e;
+        object
+    }
+}
+
 /// Statics of `&dyn` of other statics, read by value in another static's, as rustls's cipher
 /// suites are: each was evaluated with vtables of its own.
 pub mod dyn_static_suites {
@@ -9508,5 +10224,56 @@ pub mod async_fn_item_of_trait {
 
     pub fn run(n: u32) -> (u32, u32, u32, (u32, u32)) {
         (loaded(Doubled(n)), loaded(Ready(n)), served(&Doubled(n)), routed(n))
+    }
+}
+
+/// ruff's `ty_python_semantic` inference builder, `impl<'db> TypeInferenceBuilder<'db, '_>`:
+/// `Self` written in a trait object's bounds (`&mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>`)
+/// or a function pointer's signature is the impl's self type, its anonymous lifetime the
+/// impl's own, as everywhere else `Self` is written.
+pub mod self_in_object_bounds {
+    #[derive(Clone, Copy)]
+    pub struct Ty<'db>(pub &'db u32);
+
+    pub struct Builder<'db, 'ast> {
+        pub db: &'db u32,
+        pub ast: &'ast u32,
+    }
+
+    struct Guard<'db, 'ast, 'infer> {
+        f: &'infer mut dyn FnMut(&mut Builder<'db, 'ast>, Ty<'db>) -> Ty<'db>,
+    }
+
+    impl<'db, 'ast, 'infer> Guard<'db, 'ast, 'infer> {
+        fn new(f: &'infer mut dyn FnMut(&mut Builder<'db, 'ast>, Ty<'db>) -> Ty<'db>) -> Self {
+            Guard { f }
+        }
+    }
+
+    impl<'db> Builder<'db, '_> {
+        pub fn infer(&mut self, t: Ty<'db>, f: &mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>) -> Ty<'db> {
+            f(self, t)
+        }
+
+        pub fn guarded(&mut self, t: Ty<'db>, f: &mut dyn FnMut(&mut Self, Ty<'db>) -> Ty<'db>) -> Ty<'db> {
+            let guard = Guard::new(f);
+            (guard.f)(self, t)
+        }
+
+        pub fn pointer(&mut self, f: fn(&mut Self)) {
+            f(self)
+        }
+
+        pub fn produce(&mut self, f: &mut dyn FnMut() -> Self) {
+            *self = f()
+        }
+    }
+
+    pub fn run() -> u32 {
+        let (db, ast) = (3, 4);
+        let mut builder = Builder { db: &db, ast: &ast };
+        let t = builder.guarded(Ty(&db), &mut |b, t| Ty(if *b.ast > 0 { t.0 } else { b.db }));
+        builder.pointer(|b| b.ast = b.db);
+        *builder.infer(t, &mut |_, t| t).0 + *builder.ast
     }
 }

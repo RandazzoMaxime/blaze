@@ -84,6 +84,21 @@ impl Toolchain {
     }
 }
 
+/// What `cargo --version` says after `cargo ` for the toolchain at `sysroot`, from rustup's
+/// channel manifest there: the release of its rustc (cargo's `CFG_RELEASE`) with the commit
+/// and date of its cargo.
+pub(super) fn cargo_version(sysroot: &Path) -> Option<String> {
+    let manifest = sysroot.join("lib/rustlib/multirust-channel-manifest.toml");
+    let manifest = std::fs::read_to_string(manifest).ok()?;
+    let version = |package: &str| {
+        let (_, rest) = manifest.split_once(&format!("\n[pkg.{package}]\nversion = \""))?;
+        rest.split_once('"').map(|(version, _)| version)
+    };
+    let (release, _) = version("rustc")?.split_once(' ')?;
+    let (_, commit) = version("cargo")?.split_once(' ')?;
+    Some(format!("{release} {commit}"))
+}
+
 /// How cfgs follow from `-C` and `--cfg`.
 #[derive(Default)]
 struct Given<'a> {
@@ -224,10 +239,14 @@ impl<'a> Given<'a> {
     }
 }
 
-/// The variables rustc reads for a question that ra-jit answers only when unset.
-const UNSET: [&str; 8] = [
-    "RUSTC_OVERRIDE_VERSION_STRING",
-    "RUST_TARGET_PATH",
+/// The variables rustc reads for any question, which ra-jit answers only when they are unset.
+const UNSET: [&str; 2] = ["RUSTC_OVERRIDE_VERSION_STRING", "RUST_TARGET_PATH"];
+
+/// The variables of Apple's SDK and deployment targets, which a shell of nixpkgs on macOS
+/// sets. rustc reads them to link and for the target's spec, which says the deployment
+/// target; its version, cfgs, sysroot and file names are the same with them, and are
+/// answered with them set.
+const APPLE: [&str; 6] = [
     "SDKROOT",
     "MACOSX_DEPLOYMENT_TARGET",
     "IPHONEOS_DEPLOYMENT_TARGET",
@@ -385,7 +404,11 @@ pub(super) fn answer(
                 cfgs.dedup();
                 cfgs.iter().for_each(|it| out += &format!("{it}\n"));
             }
-            "target-spec-json" if given.unstable_options && nightly => {
+            "target-spec-json"
+                if given.unstable_options
+                    && nightly
+                    && APPLE.iter().all(|it| var(it).is_none()) =>
+            {
                 out += target.target_spec_json.get(&toolchain.host)?;
             }
             _ => return None,
