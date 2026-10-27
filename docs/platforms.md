@@ -191,29 +191,49 @@ reader are arm64 only as well.
 ## wasm32
 
 ra-jit runs natively and emits wasm32 with its own lowering from Cranelift IR, written as a
-relocatable object that `rust-lld` links ahead of rustc's rlibs. The splice writes the
-module again with new function bodies under the same indices.
+relocatable wasm object: `v128` with the simd128 and relaxed-simd operations, 128-bit
+integers, the wasm C ABI (vectors as `v128`, an aggregate of one scalar as that scalar,
+C-variadic calls and definitions through a buffer), `#[link_section]` statics as custom
+sections and a `target_features` section, as LLVM writes them. In the harnesses `rust-lld`
+links these objects ahead of rustc's rlibs. With nothing of rustc's (the whole build of
+[no-rustc.md](no-rustc.md), `RA_JIT_STD_FROM=off`), ra-jit compiles the target's standard
+library as a unit of its own and links with `rust-lld -flavor wasm` (`link.rs`), with the
+toolchain's wasi-libc for `wasm32-wasip1`. A `#![no_std]` program's unit is `core`,
+`compiler_builtins` and what it names with `extern crate`, as rustc puts them in, so a
+guest's own `#[panic_handler]` is the only one (#622). The splice writes the module again
+with new function bodies under the same indices.
 
-Measured 2026-10-27 on an arm64 ix VM with the pinned nightly (`nightly-2026-10-25`) and
-wasmtime 49.0.2, at main 2ee9f8ab94 with #534, for `wasm32-wasip1`: corpus MATCH with 913 of
-914 functions from ra-jit, stress 100 of 100, splices 71 of 71, unwinds and includes 8 of 8,
-breakers 176 of 176. The train runs the corpus and stress for `wasm32-wasip1` on every push to
-main (`harness/wasm32.py`, [harness.md](harness.md)). These link ra-jit's objects ahead of
-rustc's rlibs.
+Measured 2026-10-27 on arm64 ix VMs with the pinned nightly (`nightly-2026-10-25`) and
+wasmtime 49.0.2, at main fdc1c53f15 (#622 for the `no_std` rows):
 
-With nothing of rustc's (the whole build of [no-rustc.md](no-rustc.md), `RA_JIT_STD_FROM=off`),
-ra-jit compiles the wasip1 standard library itself: the std unit of a program refuses 84
-functions, all of them `f16` or `f128`. A std program, and a program over blaze-manifest and
-blaze-resolve reading blaze's own workspace and lock file (issue #458), compile with no
-function refused, 45,837 functions for the second. Neither links yet: the link line of
-`link.rs` is the C compiler's, and `cargo blaze build --target wasm32-*` is refused.
+| What | Result |
+|---|---|
+| `wasm32-wasip1` corpus | MATCH, 957 of 959 functions from ra-jit |
+| the same with `+simd128,+relaxed-simd` | MATCH, 964 of 966 |
+| stress, splices | 100 of 100, 71 of 71 |
+| breakers | 176 of 177: `procmacro`'s `spelled` fails the same way on the aarch64 host without blaze's proc-macro server |
+| `allrajit_wasm.py`, nothing of rustc's | 3 wasip1 programs, a wasm32-unknown-unknown cdylib and a `#![no_std]` simd128 guest, each as cargo's build answers |
+| blaze-manifest + blaze-resolve over blaze's workspace and lock file (issue #458), nothing of rustc's | 45,837 functions, built and linked in 9.1 s (3.2 GB), output byte-identical to rustc's native build; 36.6 MB vs 3.9 MB, 0.30 vs 0.03 s a run |
+| the same with `cargo blaze build --release --target wasm32-wasip1`, a store that starts empty | 64.5 s (9.6 GB at `CARGO_BUILD_JOBS=2`), its build scripts, 157 macro expansions (blaze's proc-macro server) and std unit blaze's; output byte-identical; 0.06 s again with nothing changed |
+| indexable-inc/wasm-host guests (`no_std`, `+simd128,+relaxed-simd,+wide-arithmetic,+tail-call`), nothing of rustc's | request transcripts byte-identical to rustc's; bench_raw 534,750 B vs 10,757 B, 833 to 836 vs 240 to 242 ns a request; bench_worker 984,365 B vs 49,930 B, 4,324 to 4,367 vs 318 to 319 ns |
+| Cloudflare Workers through workers-rs 0.8.7 and wasm-bindgen 0.2.129 (`worker-build --release` with ra-jit as its cargo build), nothing of rustc's | under `wrangler dev` 4.148.0 the hello and a SHA-256/HMAC worker (sha2, hmac) answer as rustc's builds; 1,218,107 vs 145,034 B and 1,304,087 vs 159,091 B; p50 1.44 to 1.47 vs 1.36 to 1.37 ms, and 3.04 to 3.14 vs 1.60 to 1.64 ms hashing 10 KiB |
+
+The train runs the corpus, stress and `allrajit_wasm.py` on every push to main
+(`harness/wasm32.py`, [harness.md](harness.md)).
 
 Limits: no unwinding is emitted (the wasm targets are `panic=abort`), threads are not
-supported, defining a C-variadic function is refused, and `v128` (`simd128`, relaxed SIMD) and
-some wide-integer operations are refused. `wasm32-unknown-unknown` was exercised only through
-one Dioxus page, on an earlier branch ([reports/WASM32.md](reports/WASM32.md)), where
-wasm-bindgen had to run again after every edit and took 0.27 to 0.36 s on a hello world, more
-than the compile and the splice together. There is no LLVM backend for wasm.
+supported, `simd_fma` is refused (wasm has no fused multiply-add; LLVM calls libm's for
+each lane), and the std unit refuses 84 functions, all `f16` or `f128`, which no program
+here reaches. The modules are 8 to 50 times the size of rustc's and run 1.1 to 14 times as
+long: ra-jit has no LTO or inlining across crates and keeps SIMD values in memory. In
+workers-rs, five js_sys functions (`MaybeIterator`, `Global`) are refused for type errors,
+and no module reaches them. `cargo blaze build --target wasm32-*` of a package with proc
+macros needs blaze's proc-macro server beside ra-jit (`blaze-proc-macro-srv`, which releases
+ship); the guests and workers above are built by ra-jit directly (`--shared`). With a store
+that starts empty, the workspace load compiles every build script at once, a ra-jit process
+each of up to a few GB: on a 16 GB machine `CARGO_BUILD_JOBS=2` kept it at 9.6 GB, where the
+default was killed at 14 GB. wasm-bindgen runs again after every edit, 0.27 to 0.36 s on a hello world
+([reports/WASM32.md](reports/WASM32.md)). There is no LLVM backend for wasm.
 
 Running the compiler itself in a browser is a separate experiment in `crates/ra-jit-wasm`.
 
