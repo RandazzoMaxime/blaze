@@ -15240,7 +15240,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let mut out = self.builder.ins().iconst(types::I64, 0);
                     for minterm in 0..8i64 {
                         let mut term = self.builder.ins().iconst(types::I64, -1);
-                        for (place, &value) in bits.iter().enumerate() {
+                        for (place, value) in bits.into_iter().enumerate() {
                             let set = minterm >> (2 - place) & 1 == 1;
                             let value = if set { value } else { self.builder.ins().bnot(value) };
                             term = self.builder.ins().band(term, value);
