@@ -1,7 +1,7 @@
 # Installing blaze
 
 ```sh
-curl -fsSL https://ix.dev/blaze/install.sh | sh
+curl -fsSL https://ix.dev/blaze | sh
 ```
 
 Then, in a project of yours:

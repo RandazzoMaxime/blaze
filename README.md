@@ -20,7 +20,7 @@
 ## Install
 
 ```sh
-curl -fsSL https://ix.dev/blaze/install.sh | sh
+curl -fsSL https://ix.dev/blaze | sh
 ```
 
 For macOS on Apple silicon and Linux, with or without Rust installed: blaze downloads the Rust it
