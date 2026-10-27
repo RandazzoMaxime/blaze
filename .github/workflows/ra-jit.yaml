@@ -13,9 +13,9 @@
 #       (Linux x86-64, macOS) and the larger ones (AArch64), and the ripgrep bench. A failed
 #       nightly opens an issue, or adds to the one still open.
 #
-# A change to nothing but documentation or the site runs fmt alone. `ci` is the one check that
-# says whether everything that ran passed: it is the check branch rules and the merge queue
-# require. The queue tests each pull request merged onto main and whatever is ahead of it, and
+# A change to nothing but documentation, the site or the agent rules (agents/) runs fmt alone.
+# `ci` is the one check that says whether everything that ran passed: it is the check branch
+# rules and the merge queue require. The queue tests each pull request merged onto main and whatever is ahead of it, and
 # main moves only to what it tested (docs/harness.md, "CI").
 name: ra-jit
 on:
@@ -76,7 +76,7 @@ jobs:
           while read -r file; do
             case "$file" in
               .github/workflows/ra-jit*.yaml|.github/actions/*) code=true;;
-              *.md|docs/*|site/*|LICENSE*|.github/*) ;;
+              *.md|docs/*|site/*|agents/*|LICENSE*|.github/*) ;;
               *) code=true;;
             esac
           done <<< "$files"
@@ -99,6 +99,11 @@ jobs:
       # vendor/ too: the forks' rustfmt.toml files are read for their code, and a fork's own
       # edits are held to them like ra-jit's.
       - run: cargo fmt --all -- --check
+      # The agent rules: agents/rules.ts type-checks, and AGENTS.md is what it generates.
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile --cwd site
+      - run: site/node_modules/.bin/tsc -p agents
+      - run: bun agents/rules.ts --check
 
   linux-x64:
     name: linux x64
