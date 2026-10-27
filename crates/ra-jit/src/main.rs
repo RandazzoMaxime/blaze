@@ -8513,6 +8513,9 @@ fn run_holding(
     // What rustc built stands in for a function that is not compiled, and it is not of a
     // source written since: an error there fails the build rather than run the old code.
     let written: FxHashSet<&Path> = table.all_written_since_built().collect();
+    // The sources read here that rustc compiled other text of: its copies of what they write
+    // are of the text before.
+    let mut rewritten: Option<(Vec<vfs::FileId>, Sources)> = None;
     if !written.is_empty() {
         let paths = written_sources(&files, written.iter().copied());
         let mut edited: Vec<_> = paths.keys().copied().collect();
@@ -8527,6 +8530,12 @@ fn run_holding(
             }
             bail!("{why}");
         }
+        let crates: Vec<_> = edited
+            .iter()
+            .flat_map(|&id| ide_db::base_db::relevant_crates(&db, id).to_vec())
+            .collect();
+        known.distrust(&db, &crates);
+        rewritten = Some((edited, sources));
     }
     let sysroot = checkouts.loaded.workspaces().first().and_then(|it| it.sysroot.root());
     let _ = SYSROOT.set(sysroot.map(|it| AsRef::<Path>::as_ref(it).to_owned()));
@@ -8618,12 +8627,27 @@ fn run_holding(
         Some(shared) => shared.keep(),
         None => {}
     }
-    hir::attach_db(&db, || known.out_of_date(&db));
-    // What rustc compiled, by where in the checkout it is: the files as this build read them.
+    let out_of_date = hir::attach_db(&db, || known.out_of_date(&db));
+    if let Some((edited, sources)) = &rewritten {
+        let why = hir::attach_db(&db, || {
+            refusal(&db, edited, sources, &args.checkout, None, out_of_date)
+        });
+        if let Some(why) = why {
+            if let Refused::Error(said) = &why {
+                errors_for_the_daemon(&args, said)?;
+            }
+            bail!("{why}");
+        }
+    }
+    // What rustc compiled, by where in the checkout it is: the files as this build read them,
+    // but for those written after rustc read them.
     let as_compiled: FxHashMap<PathBuf, triomphe::Arc<str>> = files
         .iter()
         .filter_map(|it| {
             let Watched::Source(id) = it.file else { return None };
+            if rewritten.as_ref().is_some_and(|(edited, _)| edited.contains(&id)) {
+                return None;
+            }
             let inside = it.path.strip_prefix(&args.checkout).ok()?;
             Some((inside.to_owned(), db.file_text(id).text(&db).clone()))
         })
