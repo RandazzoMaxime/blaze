@@ -928,6 +928,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A whole-program build gives the same object every time ([#200](https://github.com/indexable-inc/blaze/issues/200)).
+  Functions went into the object in the order the compile-ahead threads finished them, so
+  their names, the ids of what they call and their places in the program changed from one
+  build of the same source to the next; the layout alone moved a benchmark by 8%. The object
+  is now given roots and instances in the order they were asked for, the thread that puts
+  them in it waiting for the next in line while the others compile on, and the threads take
+  instances in that order too. `harness/wholeprogram.py` builds each case twice and holds the
+  objects to the same bytes.
+
 - The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
   rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
   1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives
