@@ -10,6 +10,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `cargo blaze build` links a library's `cdylib` (#262): a package whose crate types include
+  `cdylib`, such as a napi-rs Node addon or a pyo3 extension, gets its shared library at
+  cargo's path (`target/debug/lib<name>.so`, `.dylib` on macOS), exporting its
+  `#[no_mangle]` and `#[export_name]` functions and statics, with `cargo:rustc-cdylib-link-arg`
+  honoured. Before, the build printed `Finished` and wrote no library. A build that would write
+  a `staticlib` stops with an error saying blaze does not link one yet. Reported by @bompus.
+
 - blaze is its own toolchain, named `blaze-<date>` (`blaze-2026-10-25`, today the Rust nightly
   of that date): `blaze toolchain` names it and `blaze toolchain --path` prints its directory,
   and a project that pins another toolchain is told so once, as a note, while blaze builds
@@ -1009,6 +1016,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
+  `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
+  libraries as rustc does; it left them out. A program linked with
+  `-Wl,-no_compact_unwind` had `__unwind_info` all the same, and a `-Wl,-headerpad` was not
+  the least room the splice's header file asks for (`harness/nocompact.py`,
+  `harness/headerpad.py` on macOS).
 - A red train opens or comments on the "Release train is red" issue again: train_issue.py read
   each harness job's log with `gh api`, which the runner's gh refuses without
   `--allow-escape-sequences`, so the `train issue` job failed and no issue was opened.
@@ -1016,6 +1029,16 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   code that a build over ra-jit's prebuilt unit of the library kept: such an entry's calls
   into the unit (`ra-jit.<hash>.…` symbols) are now checked when it is taken, where its link
   failed on them as undefined (#328). Entries written before are not read (entry format 12).
+
+- A load's proc macros with and without `RA_JIT_PROC_MACRO_SERVER=0` (#460): each mode has
+  its own target directory, `target/rust-analyzer` with ra-jit's proc macros and
+  `target/rust-analyzer-rustc` without, so flipping the variable no longer has rustc read the
+  empty libraries a load with ra-jit's proc macros gives cargo (E0786, "memory map must have a
+  non-zero length"). The variable is part of which build and which worker it is, read from
+  the command that asks, so it takes effect without `blaze stop`; a spare worker no longer
+  keeps the daemon's. A load whose proc macro has no `blaze-proc-macro-srv` beside ra-jit
+  says where it looked, the command that builds it there, and `RA_JIT_PROC_MACRO_SERVER=0`.
+
 - The borrow checker: lifetime elision counts none of the impl's lifetimes in a parameter
   that writes `Self`, as rustc counts only what a parameter's type writes or elides, so
   `fn store(self, db: &dyn Db) -> &Store` in `impl Id<'_>` returns a borrow of `db`. It

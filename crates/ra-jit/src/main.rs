@@ -19,6 +19,7 @@ mod link;
 mod live;
 mod macro_list;
 mod macro_sandbox;
+mod manifest;
 mod memory;
 mod mirdump;
 mod outline;
@@ -172,6 +173,9 @@ struct Args {
     /// Whether the flags rustc is given cap the lints, so that a lint the source denies may
     /// not fail its build.
     lints_capped: bool,
+    /// What the flags rustc is given pass to the linker (`-C link-arg`, `-C link-args`):
+    /// the daemon's own link line has them, as rustc's has.
+    link_args: Vec<String>,
     /// The root of the workspace `project` is in. Another checkout has crates of the same
     /// names, and the ones to build are the ones below this.
     checkout: PathBuf,
@@ -358,6 +362,7 @@ impl Args {
             also,
             debug: plan::Described::NOTHING,
             lints_capped: false,
+            link_args: Vec::new(),
             checkout: PathBuf::new(),
             base: None,
             members: Arc::default(),
@@ -2620,7 +2625,9 @@ impl Checkouts {
             None => self.debug[at].debug.level,
         };
         let debug = plan::Described { level, ..self.debug[at].debug };
-        Ok(Parts { root, base, members, debug, lints_capped: self.debug[at].lints_capped })
+        let (lints_capped, link_args) =
+            (self.debug[at].lints_capped, self.debug[at].link_args.clone());
+        Ok(Parts { root, base, members, debug, lints_capped, link_args })
     }
 
     /// Whether the program of the checkout `project` is of is one rustc links from bitcode.
@@ -2818,6 +2825,7 @@ impl Checkouts {
         db: &mut RootDatabase,
         vfs: &mut vfs::Vfs,
     ) -> anyhow::Result<()> {
+        let start = Instant::now();
         let mut workspaces = Vec::new();
         let mut roots = Vec::new();
         let (mut splits, mut debug) = (Vec::new(), Vec::new());
@@ -2829,7 +2837,7 @@ impl Checkouts {
                 eprintln!("split {}: its own are {own:?}", over.display());
                 workspaces.push(self.split(base, &over, &own));
                 splits.push(Some(Split { base: self.roots[base].1.clone(), own }));
-                debug.push(self.debug[base]);
+                debug.push(self.debug[base].clone());
                 roots.push((dunce::canonicalize(project)?, over));
                 continue;
             }
@@ -2871,7 +2879,16 @@ impl Checkouts {
             roots.push((dunce::canonicalize(project)?, root));
             workspaces.push(workspace);
         }
+        let workspaces_at = start.elapsed();
         self.loaded.add(workspaces, &self.cargo_config.extra_env, &self.load_config, vfs, db)?;
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            let files = start.elapsed() - workspaces_at;
+            eprintln!(
+                "load-us: workspaces={} files={}",
+                workspaces_at.as_micros(),
+                files.as_micros()
+            );
+        }
         self.roots.extend(roots);
         self.splits.extend(splits);
         self.debug.extend(debug);
@@ -2952,7 +2969,7 @@ impl Checkouts {
             let own = self.differing(base, &over);
             self.loaded.replace(at, self.split(base, &over, &own));
             self.splits[at] = Some(Split { base: self.roots[base].1.clone(), own });
-            self.debug[at] = self.debug[base];
+            self.debug[at] = self.debug[base].clone();
         }
         self.loaded.add(Vec::new(), &self.cargo_config.extra_env, &self.load_config, vfs, db)?;
         failed
@@ -3035,6 +3052,7 @@ struct Parts {
     /// What the build has a debugger told.
     debug: plan::Described,
     lints_capped: bool,
+    link_args: Vec<String>,
 }
 
 /// Whether the files of a package under `dir`, a directory of the checkout at `base`, are
@@ -3162,13 +3180,21 @@ fn workspace_at(
     beside: Option<&mut Beside>,
     said: Option<Vec<String>>,
 ) -> anyhow::Result<(ProjectWorkspace, plan::Whole)> {
+    let start = Instant::now();
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(project));
     let manifest = ProjectManifest::discover_single(&root)?;
     let mut workspace = ProjectWorkspace::load(manifest.clone(), cargo_config, &|_| {})?;
+    let metadata_at = start.elapsed();
     // Without the standard library's source every call into it is unresolved, and each
     // function making one would be refused for a reason that says nothing of the toolchain.
     if workspace.sysroot.is_rust_lib_src_empty() {
-        if let Some(error) = workspace.sysroot.error() {
+        // A library with its `Cargo.toml` is there and could not be read; without one it is
+        // not installed, whatever the stitched library's error says of it.
+        let read = workspace
+            .sysroot
+            .rust_lib_src_root()
+            .is_some_and(|it| std::fs::metadata(it.join("Cargo.toml")).is_ok());
+        if let Some(error) = workspace.sysroot.error().filter(|_| read) {
             anyhow::bail!("{}", error.trim_end());
         }
         let toolchain =
@@ -3178,8 +3204,12 @@ fn workspace_at(
              `rustup component add rust-src` installs it"
         );
     }
-    let mut debug =
-        plan::Whole { debug: plan::Described::NOTHING, lto: false, lints_capped: false };
+    let mut debug = plan::Whole {
+        debug: plan::Described::NOTHING,
+        lto: false,
+        lints_capped: false,
+        link_args: Vec::new(),
+    };
     let mut scripts = None;
     if let ProjectWorkspaceKind::Cargo { cargo, .. } = &mut workspace.kind {
         if !selection.dev_deps {
@@ -3223,6 +3253,7 @@ fn workspace_at(
             cargo.set_primary(package, built.primary);
         }
     }
+    let planned_at = start.elapsed();
     if let Some(scripts) = scripts {
         workspace.set_build_scripts(scripts);
     } else if load_config.load_out_dirs_from_check {
@@ -3233,12 +3264,24 @@ fn workspace_at(
                 WorkspaceBuildScripts::of_messages(cargo, said.iter().map(String::as_str))
             }
             (kind, _) => {
+                // ra-jit's own target directory is one per mode of its proc macros
+                // (`own_macro::own_dir`): with them, cargo is given empty files for the
+                // libraries, which rustc would read when they are turned off.
+                let own_config;
+                let mut config = cargo_config;
                 if let ProjectWorkspaceKind::Cargo { cargo, .. } = kind
                     && cargo_config.target_dir_config == TargetDirectoryConfig::UseSubdirectory
                 {
-                    seed_own_target(cargo.target_directory().as_ref());
+                    let target = cargo.target_directory();
+                    let own = target.join(cargo::own_macro::own_dir());
+                    seed_own_target(target.as_ref(), own.as_ref());
+                    own_config = CargoConfig {
+                        target_dir_config: TargetDirectoryConfig::Directory(own.into()),
+                        ..cargo_config.clone()
+                    };
+                    config = &own_config;
                 }
-                workspace.run_build_scripts(cargo_config, &|_| {})?
+                workspace.run_build_scripts(config, &|_| {})?
             }
         };
         // A crate whose script did not run is read without what it writes: thiserror's
@@ -3249,18 +3292,27 @@ fn workspace_at(
         }
         workspace.set_build_scripts(build_scripts);
     }
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        let us = |it: Duration| it.as_micros();
+        let (metadata, plan) = (us(metadata_at), us(planned_at - metadata_at));
+        eprintln!(
+            "load-us: metadata={metadata} plan={plan} scripts={}",
+            us(start.elapsed() - planned_at)
+        );
+    }
     Ok((workspace, debug))
 }
 
 /// Starts ra-jit's own target directory from what cargo built in `target`, so that the build
 /// scripts and proc macros cargo has are not built again. Without it the first load is a
 /// second build of those.
-fn seed_own_target(target: &Path) {
-    let own = target.join("rust-analyzer");
+fn seed_own_target(target: &Path, own: &Path) {
     if own.exists() {
         return;
     }
-    let seeding = target.join(format!("rust-analyzer.{}", std::process::id()));
+    let mut seeding = own.as_os_str().to_owned();
+    seeding.push(format!(".{}", std::process::id()));
+    let seeding = PathBuf::from(seeding);
     // cargo's first layout has `.fingerprint`, `build` and `deps` in a profile's directory;
     // its second has every unit in `build/<package>/<hash>`, with `fingerprint`, `out` and a
     // build script's `run` in it.
@@ -3271,6 +3323,11 @@ fn seed_own_target(target: &Path) {
     };
     let mut found = profiles(target);
     for triple in std::fs::read_dir(target).into_iter().flatten().flatten() {
+        // ra-jit's own directories, of either mode, and one being seeded, are not cargo's.
+        let name = triple.file_name();
+        if name.to_str().is_some_and(|it| it.starts_with(cargo::own_macro::OWN_DIR)) {
+            continue;
+        }
         found.extend(profiles(&triple.path()));
     }
     let entries = |dir: &Path| -> Vec<std::fs::DirEntry> {
@@ -4345,6 +4402,8 @@ struct Build {
     /// for the program once the build is kept ([`Build::keep`]), and one that is undone leaves
     /// those of the build before.
     unwritten: Vec<(PathBuf, Vec<u8>)>,
+    /// Where [`Build::keep`] wrote them.
+    wrote: Vec<PathBuf>,
 }
 
 impl Build {
@@ -4354,8 +4413,28 @@ impl Build {
         for (path, bytes) in std::mem::take(&mut self.unwritten) {
             let _writing = whole::writing(&path);
             replace(&path, &bytes)?;
+            self.wrote.push(path);
         }
         Ok(())
+    }
+
+    /// The build whose files a manifest of the store has ([`manifest`]): nothing compiled.
+    fn of_manifest(unwritten: Vec<(PathBuf, Vec<u8>)>) -> Build {
+        Build {
+            compiled: 0,
+            skipped: Vec::new(),
+            reached: Vec::new(),
+            nothing_of_rustc: true,
+            refused_exports: Vec::new(),
+            instances: 0,
+            codegen: Duration::ZERO,
+            emit: Duration::ZERO,
+            steps: [Duration::ZERO; 3],
+            looked: Default::default(),
+            unset: None,
+            unwritten,
+            wrote: Vec::new(),
+        }
     }
 }
 
@@ -4565,8 +4644,9 @@ fn link_executable(
         Ok(exports)
     });
     let exports = exports.transpose()?;
-    let took = link::executable(db, &program, &objects, sysroot, exe, exports.as_deref())
-        .map_err(|it| refused_linked(it, args))?;
+    let took =
+        link::executable(db, &program, &objects, sysroot, exe, exports.as_deref(), &args.link_args)
+            .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
         "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
@@ -4599,7 +4679,7 @@ fn own_link_line(db: &RootDatabase, args: &Args) -> anyhow::Result<Option<(Strin
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-    let cmd = link::command(db, &program, &objects, sysroot, exe)?;
+    let cmd = link::command(db, &program, &objects, sysroot, exe, &args.link_args)?;
     Ok(Some((cmd, exe.clone())))
 }
 
@@ -4923,6 +5003,7 @@ fn build(
         looked,
         unset: unset_in(db, &local),
         unwritten,
+        wrote: Vec::new(),
     };
     // A patch is of the last full build and replaces nothing the next edit is built from.
     if !undoable || known.stats.patched.is_some() {
@@ -6430,6 +6511,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             also: Vec::new(),
             debug: args.debug,
             lints_capped: args.lints_capped,
+            link_args: args.link_args.clone(),
             checkout: args.checkout.clone(),
             base: args.base.clone(),
             members: args.members.clone(),
@@ -6503,6 +6585,8 @@ struct Target {
     /// The executable blaze links the program into itself, with nothing of rustc's: a build
     /// from nothing (docs/no-rustc.md, step K).
     exe: Option<PathBuf>,
+    /// `exe` is a shared library, a `cdylib` (#262).
+    shared: bool,
     /// What its link takes that rustc compiled. Code rustc instantiated for one program is in
     /// that program's own objects, so another has to be told where its copies are. Empty for
     /// the files the daemon was started with.
@@ -6521,6 +6605,7 @@ impl Target {
             link_cmd: args.link_cmd.clone(),
             splice: args.splice.clone(),
             exe: args.exe.clone(),
+            shared: args.shared,
             symbol_files: args.symbol_files.clone(),
         }
     }
@@ -6531,10 +6616,20 @@ impl Target {
 
     /// The daemon's arguments, were it started for this program.
     fn args(self, daemon: &Args, checkouts: &Checkouts) -> anyhow::Result<Args> {
-        let Target { project, krate, batch, out, patch, link_cmd, splice, exe, symbol_files } =
-            self;
+        let Target {
+            project,
+            krate,
+            batch,
+            out,
+            patch,
+            link_cmd,
+            splice,
+            exe,
+            shared,
+            symbol_files,
+        } = self;
         let project = project.unwrap_or_else(|| daemon.project.clone());
-        let Parts { root: checkout, base, members, debug, lints_capped } =
+        let Parts { root: checkout, base, members, debug, lints_capped, link_args } =
             checkouts.parts(&project)?;
         let symbol_files =
             if symbol_files.is_empty() { daemon.symbol_files.clone() } else { symbol_files };
@@ -6549,6 +6644,7 @@ impl Target {
             members,
             debug,
             lints_capped,
+            link_args,
             krate,
             batch,
             widened: Vec::new(),
@@ -6557,6 +6653,7 @@ impl Target {
             link_cmd,
             splice,
             exe,
+            shared,
             symbol_files,
             rustc_binary: None,
             by_symbol: Vec::new(),
@@ -6595,6 +6692,7 @@ impl Target {
                     link_cmd,
                     splice,
                     exe,
+                    shared: false,
                     symbol_files,
                 }))
             }
@@ -6614,7 +6712,8 @@ impl Target {
 
     /// The fields after the request's name on its line, each after a tab. Empty is absent.
     fn parse(fields: &[&str]) -> Option<Target> {
-        let &[project, krate, out, patch, link_cmd, splice, exe, ref symbol_files @ ..] = fields
+        let &[project, krate, out, patch, link_cmd, splice, exe, shared, ref symbol_files @ ..] =
+            fields
         else {
             return None;
         };
@@ -6629,6 +6728,7 @@ impl Target {
             link_cmd: given(link_cmd),
             splice: given(splice).map(PathBuf::from),
             exe: given(exe).map(PathBuf::from),
+            shared: shared == "shared",
             symbol_files: symbol_files.iter().map(PathBuf::from).collect(),
         })
     }
@@ -6651,14 +6751,15 @@ impl Target {
             None => self.krate.clone(),
         };
         let mut fields = format!(
-            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.project.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             crates,
             self.out.display(),
             self.patch.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
             self.link_cmd.as_deref().unwrap_or_default(),
             self.splice.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
-            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default()
+            self.exe.as_ref().map(|it| it.display().to_string()).unwrap_or_default(),
+            if self.shared { "shared" } else { "" }
         );
         for file in &self.symbol_files {
             fields.push('\t');
@@ -7822,7 +7923,7 @@ impl Held {
         let asked = ["--crate", "ra_jit_spare", "--out", "none"].map(str::to_owned);
         let asked = std::iter::once(dir.display().to_string()).chain(asked);
         let args = Args::parse(asked)?;
-        process_wide();
+        held_wide();
         // An empty package has no build script, and asking cargo for one waits for the lock
         // of the target directory, which a build that started beside this holds until it ends.
         let scriptless = LoadCargoConfig { load_out_dirs_from_check: false, ..load_config() };
@@ -8184,7 +8285,8 @@ fn follow_cargo(
             }
             seen.1
         };
-        let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
+        let Parts { root, base, members, debug, lints_capped, link_args } =
+            checkouts.parts(&args.project)?;
         let mut names = args.crates().filter(|it| ready.contains(&root.join(it.as_str()))).cloned();
         if let Some(krate) = names.next() {
             let of_ready = Args {
@@ -8196,6 +8298,7 @@ fn follow_cargo(
                 members,
                 debug,
                 lints_capped,
+                link_args,
                 ..args.clone()
             };
             resolve_crates(db, &of_ready, beside_cargo())?;
@@ -8221,6 +8324,11 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
         // wait for files to change or for a proc macro to expand: none reads a variable.
         unsafe { std::env::set_var(name, value) };
     }
+    // The spare was started with the daemon's variables: one the build leaves unset is unset.
+    for name in cargo::cli::WORKER_ENV_EXACT.iter().filter(|it| !told.env.contains_key(**it)) {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(name) };
+    }
     std::env::set_current_dir(&told.cwd)?;
     if !told.ahead {
         std::thread::spawn(end_with_input);
@@ -8230,11 +8338,9 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
 
 /// What is said once for the process about how every workspace is read.
 fn process_wide() {
-    hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
-    project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
-    ra_jit_expand::install();
-    // Every proc-macro server is started in the sandbox.
-    macro_sandbox::install();
+    held_wide();
+    // Which proc-macro server expands is read from the build's variables, which a spare is
+    // told after it loaded the library ([`held_wide`]), and is kept from then on.
     let server = cargo::own_macro::server();
     if let Some(Ok(server)) = server.and_then(Path::to_str).map(AbsPathBuf::try_from) {
         load_cargo::serve_listed_with(server);
@@ -8247,6 +8353,16 @@ fn process_wide() {
             made.collect()
         }));
     }
+}
+
+/// What of [`process_wide`] a spare says before it is told its build: nothing that depends
+/// on the build's variables.
+fn held_wide() {
+    hir_def::nameres::EXPAND_BUILTIN_DERIVES.store(true, std::sync::atomic::Ordering::Relaxed);
+    project_model::SYSROOT_AS_BUILT.store(true, std::sync::atomic::Ordering::Relaxed);
+    ra_jit_expand::install();
+    // Every proc-macro server is started in the sandbox.
+    macro_sandbox::install();
 }
 
 /// Loads the workspace `args` names and builds what they ask for, then serves it when they
@@ -8307,11 +8423,11 @@ fn run_holding(
 
     // What other machines compiled is fetched next to the workspace too.
     let shared = std::thread::spawn(|| {
-        let shared = remote::Shared::from_env();
+        let shared = remote::Shared::from_env()?;
         if let Some(shared) = &shared {
-            shared.pull();
+            shared.pull()?;
         }
-        shared
+        anyhow::Ok(shared)
     });
 
     let start = Instant::now();
@@ -8352,6 +8468,7 @@ fn run_holding(
             load(&projects, &cargo_config, load_config(), selection, beside, scripts_said)?
         }
     };
+    let loaded_at = start.elapsed();
     let listed = Arc::new(Listed::default());
     ide_db::base_db::set_process_env(&mut db, process::own());
     // What is compiled ahead is stored too, so the store is told the toolchain first. A build
@@ -8367,11 +8484,18 @@ fn run_holding(
     let shipped = (nothing_of_rustc && args.prebuilt.is_none() && !patches_its_library(&args))
         .then(|| shipped::fetch_ahead(emits.triple()))
         .flatten();
+    let following_at = start.elapsed();
     let built = follow_cargo(&mut db, &mut vfs, &mut checkouts, &args, &listed)?;
+    if std::env::var_os("RA_JIT_STATS").is_some() {
+        let (loaded, toolchain) = (loaded_at.as_micros(), (following_at - loaded_at).as_micros());
+        let cargo = (start.elapsed() - following_at).as_micros();
+        eprintln!("load-us: loaded={loaded} toolchain={toolchain} cargo={cargo}");
+    }
     let beside = built.is_some();
-    let Parts { root, base, members, debug, lints_capped } = checkouts.parts(&args.project)?;
+    let Parts { root, base, members, debug, lints_capped, link_args } =
+        checkouts.parts(&args.project)?;
     (args.checkout, args.base, args.members, args.debug) = (root, base, members, debug);
-    args.lints_capped = lints_capped;
+    (args.lints_capped, args.link_args) = (lints_capped, link_args);
     // The names are resolved before cargo says which program it built: those of the crates
     // it built are, and not of every crate of the workspace.
     if let Some(built) = built {
@@ -8408,7 +8532,7 @@ fn run_holding(
     }
     // The store reads its packs when first opened, which serving does: what is fetched after
     // that is not in it for this build.
-    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))?;
+    let shared = shared.join().map_err(|_| anyhow::anyhow!("fetching the store panicked"))??;
     shipped::fetched(shipped);
     let built = built_crates(&db, &args)?;
     let mut served = frozen::serve(&mut db, &built);
@@ -8439,8 +8563,10 @@ fn run_holding(
     // What the other checkouts don't share with this one, before a request waits for it.
     for also in &args.also {
         let start = Instant::now();
-        let Parts { root: checkout, base, members, debug, lints_capped } = checkouts.parts(also)?;
-        let of_it = Args { checkout, base, members, debug, lints_capped, ..args.clone() };
+        let Parts { root: checkout, base, members, debug, lints_capped, link_args } =
+            checkouts.parts(also)?;
+        let of_it =
+            Args { checkout, base, members, debug, lints_capped, link_args, ..args.clone() };
         let resolved = resolve_crates(&db, &of_it, cores())?;
         eprintln!("resolve {}: {resolved} crates in {:.1?}", also.display(), start.elapsed());
     }
@@ -8477,6 +8603,7 @@ fn run_holding(
             members: args.members,
             debug: args.debug,
             lints_capped: args.lints_capped,
+            link_args: args.link_args,
             selection: args.selection,
             ..whole
         };
@@ -8507,6 +8634,9 @@ fn run_holding(
     // What rustc built stands in for a function that is not compiled, and it is not of a
     // source written since: an error there fails the build rather than run the old code.
     let written: FxHashSet<&Path> = table.all_written_since_built().collect();
+    // The sources read here that rustc compiled other text of: its copies of what they write
+    // are of the text before.
+    let mut rewritten: Option<(Vec<vfs::FileId>, Sources)> = None;
     if !written.is_empty() {
         let paths = written_sources(&files, written.iter().copied());
         let mut edited: Vec<_> = paths.keys().copied().collect();
@@ -8521,6 +8651,12 @@ fn run_holding(
             }
             bail!("{why}");
         }
+        let crates: Vec<_> = edited
+            .iter()
+            .flat_map(|&id| ide_db::base_db::relevant_crates(&db, id).to_vec())
+            .collect();
+        known.distrust(&db, &crates);
+        rewritten = Some((edited, sources));
     }
     let sysroot = checkouts.loaded.workspaces().first().and_then(|it| it.sysroot.root());
     let _ = SYSROOT.set(sysroot.map(|it| AsRef::<Path>::as_ref(it).to_owned()));
@@ -8553,19 +8689,53 @@ fn run_holding(
             if let Some((cmd, exe)) = own_link_line(&db, &args)? {
                 (args.link_cmd, args.splice) = (Some(cmd), Some(exe));
             }
-            let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
-            // An `include!` in a body is first seen when the body is compiled.
-            if WatchedFile::include_sources(&mut files, &mut tree, &mut db) != Loaded::Nothing {
-                known.touch(&db, None);
-                listed.touch(&db, None);
-                cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
-            }
+            let start = Instant::now();
+            let manifest_mode = manifest::mode();
+            let manifest_key =
+                manifest_mode.and_then(|_| manifest::key(&db, &args, table.is_empty()));
+            let from_manifest = match (manifest_mode, &manifest_key) {
+                (Some(manifest::Mode::Use), Some(key)) => match manifest::lookup(&db, &args, key) {
+                    Ok(files) => Some(files),
+                    Err(why) => {
+                        eprintln!("manifest: none used, {why} ({:.1?})", start.elapsed());
+                        None
+                    }
+                },
+                _ => None,
+            };
+            let served = from_manifest.is_some();
+            let cold = match from_manifest {
+                Some(files) => {
+                    let mut cold = Build::of_manifest(files);
+                    cold.keep(&mut known)?;
+                    eprintln!(
+                        "manifest: {} files of the program from the store in {:.1?}, nothing compiled",
+                        cold.wrote.len(),
+                        start.elapsed()
+                    );
+                    cold
+                }
+                None => {
+                    let mut cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+                    // An `include!` in a body is first seen when the body is compiled.
+                    if WatchedFile::include_sources(&mut files, &mut tree, &mut db)
+                        != Loaded::Nothing
+                    {
+                        known.touch(&db, None);
+                        listed.touch(&db, None);
+                        cold = build_unheld(&db, &table, &args, &mut known, &listed)?;
+                    }
+                    cold
+                }
+            };
             if let Some(unset) = &cold.unset {
                 errors_for_the_daemon(&args, &errors::Said::one(errors::of_none(unset)))?;
                 bail!("{unset}");
             }
-            eprint!("cold: ");
-            report(&cold);
+            if !served {
+                eprint!("cold: ");
+                report(&cold);
+            }
             if let Some(said) = ra_jit_expand::report() {
                 eprintln!("{said}");
             }
@@ -8599,6 +8769,33 @@ fn run_holding(
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
                 }
             }
+            if let (Some(key), false) = (&manifest_key, served) {
+                let start = Instant::now();
+                let checked = match manifest_mode {
+                    Some(manifest::Mode::Check) => manifest::check(&db, &args, key, &cold.wrote)
+                        .map_err(|why| anyhow::anyhow!("manifest: check: {why}"))?,
+                    _ => false,
+                };
+                // What was loaded since the key was made, an `include!` in a body, is not in it.
+                let again = manifest::key(&db, &args, table.is_empty());
+                match () {
+                    _ if checked => eprintln!(
+                        "manifest: check: the build wrote what the store's manifest has ({:.1?})",
+                        start.elapsed()
+                    ),
+                    _ if again.as_ref() != Some(key) => eprintln!(
+                        "manifest: not kept, the build loaded files its key was made without"
+                    ),
+                    _ => match manifest::keep(&db, &args, key, &cold.wrote) {
+                        Ok(bytes) => eprintln!(
+                            "manifest: kept, {} files, {bytes} bytes ({:.1?})",
+                            cold.wrote.len(),
+                            start.elapsed()
+                        ),
+                        Err(why) => eprintln!("manifest: not kept: {why}"),
+                    },
+                }
+            }
             Some(cold)
         }
     };
@@ -8607,17 +8804,32 @@ fn run_holding(
     match shared {
         Some(shared) if args.socket.is_none() && !args.watch => {
             ra_jit_store::settled();
-            shared.push()
+            shared.push()?
         }
         Some(shared) => shared.keep(),
         None => {}
     }
-    hir::attach_db(&db, || known.out_of_date(&db));
-    // What rustc compiled, by where in the checkout it is: the files as this build read them.
+    let out_of_date = hir::attach_db(&db, || known.out_of_date(&db));
+    if let Some((edited, sources)) = &rewritten {
+        let why = hir::attach_db(&db, || {
+            refusal(&db, edited, sources, &args.checkout, None, out_of_date)
+        });
+        if let Some(why) = why {
+            if let Refused::Error(said) = &why {
+                errors_for_the_daemon(&args, said)?;
+            }
+            bail!("{why}");
+        }
+    }
+    // What rustc compiled, by where in the checkout it is: the files as this build read them,
+    // but for those written after rustc read them.
     let as_compiled: FxHashMap<PathBuf, triomphe::Arc<str>> = files
         .iter()
         .filter_map(|it| {
             let Watched::Source(id) = it.file else { return None };
+            if rewritten.as_ref().is_some_and(|(edited, _)| edited.contains(&id)) {
+                return None;
+            }
             let inside = it.path.strip_prefix(&args.checkout).ok()?;
             Some((inside.to_owned(), db.file_text(id).text(&db).clone()))
         })
@@ -10042,10 +10254,10 @@ impl Program {
         new: &[ide_db::base_db::Crate],
         files: &[WatchedFile],
     ) -> anyhow::Result<()> {
-        let Parts { root, base, members, debug, lints_capped } = parts;
+        let Parts { root, base, members, debug, lints_capped, link_args } = parts;
         (self.args.checkout, self.args.base) = (root, base);
         (self.args.members, self.args.debug) = (members, debug);
-        self.args.lints_capped = lints_capped;
+        (self.args.lints_capped, self.args.link_args) = (lints_capped, link_args);
         (self.whole, self.moved) = (None, true);
         self.unbuilt.stale = true;
         match linked {

@@ -41,6 +41,40 @@ pub(crate) fn turned_off() -> bool {
     matches!(std::env::var_os(SERVER).as_deref().and_then(OsStr::to_str), Some("0" | "off"))
 }
 
+/// The directory in cargo's target directory of a load's own target directory when ra-jit
+/// links the proc macros, where libraries are only described: cargo is given empty files for
+/// them (`wrapper.rs`, `described_only`).
+pub(crate) const OWN_DIR: &str = "rust-analyzer";
+
+/// The same when [`turned_off`], where rustc builds every unit. Cargo does not fingerprint
+/// [`SERVER`], so in one directory it would take the empty files of a load with ra-jit's proc
+/// macros for rustc's libraries, and rustc then fails reading them (E0786, #460).
+pub(crate) const BY_RUSTC_DIR: &str = "rust-analyzer-rustc";
+
+/// The load's own target directory in cargo's, for the mode [`SERVER`] says now.
+pub(crate) fn own_dir() -> &'static str {
+    if turned_off() { BY_RUSTC_DIR } else { OWN_DIR }
+}
+
+/// What a load whose proc macro ra-jit has no server for is told: where the server was
+/// looked for, and the two ways through.
+pub(crate) fn missing_server() -> String {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            Some(exe.parent()?.join(format!("{SHIPPED}{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .map_or_else(|| SHIPPED.to_owned(), |it| it.display().to_string());
+    format!(
+        "no proc-macro server is beside ra-jit (looked for {beside}), and ra-jit links proc \
+         macros only for its own. Build it there from a blaze checkout with `ra-jit \
+         vendor/proc-macro-srv --crate rust_analyzer_proc_macro_srv --crate proc_macro --out \
+         <scratch>/server.o --exe {beside}` (what `.github/scripts/build_release.py --server` \
+         runs; the releases ship it on Linux), or have rustc build the load's proc macros \
+         with `{SERVER}=0`"
+    )
+}
+
 /// The server that expands with the libraries ra-jit links, as [`SERVER`] says, relative to
 /// the current directory: `None` when it says none, or no server is beside ra-jit when it
 /// says `1` or nothing. A load names it to its cargo, or takes the variable away, so the
