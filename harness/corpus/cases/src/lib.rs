@@ -1283,7 +1283,7 @@ pub mod fma_nans {
             let [qa, qb, qc] = [a, b, c].map(|it| vsetq_lane_f32::<3>(it, vdupq_n_f32(1.0)));
             let [da, db, dc] = [a, b, c].map(|it| vset_lane_f32::<1>(it, vdup_n_f32(1.0)));
             let [qx, qy, qz] = [x, y, z].map(|it| vsetq_lane_f64::<1>(it, vdupq_n_f64(1.0)));
-            let [dx, dy, dz] = [x, y, z].map(vdup_n_f64);
+            let [dx, dy, dz] = [x, y, z].map(|it| vdup_n_f64(it));
             let mut out: Vec<u64> = Vec::new();
             for v in [
                 vfmaq_f32(qa, qb, qc),
