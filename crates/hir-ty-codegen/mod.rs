@@ -13969,13 +13969,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             ("atomic_load", [ptr]) => {
                 let scalar = self.scalar_of(dst_ty)?;
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let value = self.builder.ins().atomic_load(scalar.ty, MEM, ptr);
+                let value = match self.wide_atomics(scalar.ty)? {
+                    true => {
+                        let zero = self.builder.ins().iconst(types::I64, 0);
+                        let zero = self.builder.ins().uextend(types::I128, zero);
+                        self.cas16(ptr, zero, zero)?
+                    }
+                    false => self.builder.ins().atomic_load(scalar.ty, MEM, ptr),
+                };
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             ("atomic_store", [ptr, value]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let (value, _) = self.load_scalar(value)?;
-                self.builder.ins().atomic_store(MEM, value, ptr);
+                let (value, ty) = self.load_scalar(value)?;
+                match self.wide_atomics(ty.ty)? {
+                    true => _ = self.rmw16(AtomicRmwOp::Xchg, ptr, value)?,
+                    false => _ = self.builder.ins().atomic_store(MEM, value, ptr),
+                }
             }
             (
                 "atomic_xchg" | "atomic_xadd" | "atomic_xsub" | "atomic_and" | "atomic_nand"
@@ -13999,14 +14009,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let scalar = self.scalar_of(dst_ty)?;
                 let (ptr, _) = self.load_scalar(ptr)?;
                 let (value, _) = self.load_scalar(value)?;
-                let old = self.builder.ins().atomic_rmw(scalar.ty, MEM, op, ptr, value);
+                let old = match self.wide_atomics(scalar.ty)? {
+                    true => self.rmw16(op, ptr, value)?,
+                    false => self.builder.ins().atomic_rmw(scalar.ty, MEM, op, ptr, value),
+                };
                 self.builder.ins().store(MEM, old, dst, 0);
             }
             ("atomic_cxchg" | "atomic_cxchgweak", [ptr, expected, new]) => {
                 let (ptr, _) = self.load_scalar(ptr)?;
-                let (expected, _) = self.load_scalar(expected)?;
+                let (expected, ty) = self.load_scalar(expected)?;
                 let (new, _) = self.load_scalar(new)?;
-                let old = self.builder.ins().atomic_cas(MEM, ptr, expected, new);
+                let old = match self.wide_atomics(ty.ty)? {
+                    true => self.cas16(ptr, expected, new)?,
+                    false => self.builder.ins().atomic_cas(MEM, ptr, expected, new),
+                };
                 let swapped = self.builder.ins().icmp(IntCC::Equal, old, expected);
                 let layout = self.layout(dst_ty)?;
                 self.builder.ins().store(MEM, old, dst, layout.fields.offset(0).bytes() as i32);
@@ -15734,6 +15750,74 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let slot = self.scratch_wide();
         self.builder.ins().store(MEM, value, slot, 0);
         Ok(self.builder.ins().load(types::I128, MEM, slot, 0))
+    }
+
+    /// Whether an atomic access of `ty` is made of compare-and-swaps of compiler_builtins:
+    /// Cranelift has no atomics of 128 bits on AArch64. That is how LLVM makes them at `-O0`
+    /// on a target with outline atomics (`aarch64-unknown-linux-gnu`): it expands a load, a
+    /// store and a read-modify-write to compare-and-swaps (`AtomicExpansionKind::CmpXChg`),
+    /// and a compare-and-swap is a call of `__aarch64_cas16_acq_rel` for one sequentially
+    /// consistent, which takes CASP when the CPU has LSE and LDXP/STXP when not. Without
+    /// outline atomics there is no such function to call, and the access is refused.
+    fn wide_atomics(&self, ty: Type) -> Result<bool> {
+        if ty != types::I128 || self.cg.target.arch != Arch::Aarch64 {
+            return Ok(false);
+        }
+        let outline = cfg::CfgAtom::KeyValue {
+            key: intern::sym::target_feature,
+            value: intern::Symbol::intern("outline-atomics"),
+        };
+        if !self.env.krate.cfg_options(self.cg.db).check_atom(&outline) {
+            unsupported!("an atomic of 128 bits on AArch64 without outline atomics");
+        }
+        Ok(true)
+    }
+
+    /// What `ptr` held, swapped for `new` when it was `expected`: compiler_builtins'
+    /// compare-and-swap of 128 bits ([`Self::wide_atomics`]).
+    fn cas16(&mut self, ptr: Value, expected: Value, new: Value) -> Result<Value> {
+        let params = [types::I128, types::I128, self::ptr()];
+        self.builtin("__aarch64_cas16_acq_rel", &params, types::I128, &[expected, new, ptr])
+    }
+
+    /// `op` of 128 bits at `ptr` with `value`, and what was there before: LLVM's expansion
+    /// of an `atomicrmw` to a loop of compare-and-swaps, from a plain load of what is there.
+    fn rmw16(&mut self, op: AtomicRmwOp, ptr: Value, value: Value) -> Result<Value> {
+        let first = self.builder.ins().load(types::I128, MEM, ptr, 0);
+        let again = self.builder.create_block();
+        let done = self.builder.create_block();
+        let seen = self.builder.append_block_param(again, types::I128);
+        let old = self.builder.append_block_param(done, types::I128);
+        self.builder.ins().jump(again, &[first.into()]);
+        self.builder.switch_to_block(again);
+        let ins = self.builder.ins();
+        let new = match op {
+            AtomicRmwOp::Xchg => value,
+            AtomicRmwOp::Add => ins.iadd(seen, value),
+            AtomicRmwOp::Sub => ins.isub(seen, value),
+            AtomicRmwOp::And => ins.band(seen, value),
+            AtomicRmwOp::Nand => {
+                let and = ins.band(seen, value);
+                self.builder.ins().bnot(and)
+            }
+            AtomicRmwOp::Or => ins.bor(seen, value),
+            AtomicRmwOp::Xor => ins.bxor(seen, value),
+            AtomicRmwOp::Smax | AtomicRmwOp::Smin | AtomicRmwOp::Umax | AtomicRmwOp::Umin => {
+                let cc = match op {
+                    AtomicRmwOp::Smax => IntCC::SignedGreaterThan,
+                    AtomicRmwOp::Smin => IntCC::SignedLessThanOrEqual,
+                    AtomicRmwOp::Umax => IntCC::UnsignedGreaterThan,
+                    _ => IntCC::UnsignedLessThanOrEqual,
+                };
+                let keep = ins.icmp(cc, seen, value);
+                self.builder.ins().select(keep, seen, value)
+            }
+        };
+        let was = self.cas16(ptr, seen, new)?;
+        let swapped = self.builder.ins().icmp(IntCC::Equal, was, seen);
+        self.builder.ins().brif(swapped, done, &[was.into()], again, &[was.into()]);
+        self.builder.switch_to_block(done);
+        Ok(old)
     }
 
     /// The quotient of two integers, or the remainder. Cranelift has neither for 128 bits, so
