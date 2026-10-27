@@ -9914,7 +9914,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     /// Whether `ty` is known to have no `UnsafeCell` outside of indirections.
     fn is_freeze(&self, ty: Ty<'db>) -> bool {
-        hir_ty::drop::is_freeze(self.cg.db, self.interner, ty)
+        hir_ty::drop::is_freeze(&self.infcx, ty, self.env.param_env)
     }
 
     /// The parameters of the function being built that are addresses, with what their types
