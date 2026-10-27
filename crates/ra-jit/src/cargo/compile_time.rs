@@ -654,6 +654,7 @@ impl<'a> Driver<'a> {
         let made = Made {
             name: SCRIPT,
             proc_macro: false,
+            wasi: false,
             dep_info: exe.with_extension("d"),
             exe: exe.clone(),
         };
@@ -688,6 +689,7 @@ impl<'a> Driver<'a> {
         let made = Made {
             name: &name,
             proc_macro: true,
+            wasi: false,
             exe: deps.join(format!("{prefix}{stem}{suffix}")),
             dep_info: deps.join(format!("{stem}.d")),
         };

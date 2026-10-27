@@ -88,7 +88,7 @@ def pins():
 
 def open_pr():
     found = json.loads(gh("pr", "list", "-R", REPO, "--head", BRANCH, "--state", "open",
-                          "--json", "number,title,createdAt,url"))
+                          "--json", "number,title,createdAt,url,headRefOid"))
     return found[0] if found else None
 
 
@@ -334,6 +334,43 @@ def base_run(run_id):
     output(run=base["id"], sha=base["head_sha"])
 
 
+def poke_auto_merge(pr):
+    """GitHub merges an auto-merge pull request when a check completes after it was set, and the
+    gate's `ci` finished hours before the train: `ci` runs again (a few seconds) so it merges."""
+    runs = json.loads(gh("api", f"repos/{REPO}/commits/{pr['headRefOid']}/check-runs?check_name=ci",
+                         "--jq", "[.check_runs[] | {id, status, conclusion, html_url}]"))
+    done = [it for it in runs if it["status"] == "completed" and it["conclusion"] == "success"]
+    found = re.search(r"/actions/runs/(\d+)/job/", done[0]["html_url"]) if done else None
+    if found:
+        gh("run", "rerun", found.group(1), "-R", REPO, "--job", str(done[0]["id"]))
+
+
+def on_main_push():
+    """The workflows a push to main starts that can be dispatched (path filters aside)."""
+    found = []
+    for name in sorted(os.listdir(os.path.join(ROOT, ".github/workflows"))):
+        text = open(os.path.join(ROOT, ".github/workflows", name)).read()
+        if re.search(r"^  push:\n    branches: \[\"?main\"?\]", text, re.M) and "\n  workflow_dispatch:" in text:
+            found.append(name)
+    return found
+
+
+def after_merge(pr):
+    """A merge that GITHUB_TOKEN's auto-merge makes starts no workflow on main (no train, no
+    gate of main): once it merges, main's push workflows are dispatched on main."""
+    for _ in range(30):
+        state = json.loads(gh("pr", "view", str(pr["number"]), "-R", REPO, "--json", "state"))["state"]
+        if state != "OPEN":
+            break
+        time.sleep(30)
+    if state != "MERGED":
+        print(f"the pull request is {state.lower()} after 15 minutes: main's next push starts its workflows")
+        return
+    for name in on_main_push():
+        gh("workflow", "run", name, "-R", REPO, "--ref", "main", check=False)
+        print(f"dispatched {name} on main")
+
+
 verdict_date = datetime.date.today().isoformat()
 
 
@@ -394,9 +431,11 @@ def verdict(run_id, std_path):
         blocked(date, f"The bump {pr['url']} ({name}) is red.\n\n{body}")
         sys.exit(1)
     gh("pr", "merge", str(pr["number"]), "-R", REPO, "--merge", "--auto")
+    poke_auto_merge(pr)
     gh("pr", "comment", str(pr["number"]), "-R", REPO,
        "--body", f"**The bump's gates are green**: queued with `gh pr merge --auto`.\n\n{body}")
     unblocked(date, f"is green and queued ({pr['url']})")
+    after_merge(pr)
 
 
 def main():

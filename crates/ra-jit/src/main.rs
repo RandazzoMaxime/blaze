@@ -157,6 +157,9 @@ struct Args {
     /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
     /// library's, not another of that name the program has too.
     library: bool,
+    /// The program is a build script for wasm32-wasip1 whose commands run on the host: its
+    /// standard library has blaze's `std::process` ([`run_tool_std`]).
+    run_tool: bool,
     /// Build the workspace's crates as `cargo test` does, with `cfg(test)`.
     cfg_test: bool,
     /// Run build scripts and build proc macros in a directory of ra-jit's own under the
@@ -251,6 +254,7 @@ impl Args {
         let mut prebuilt = None;
         let mut exe = None;
         let mut shared = false;
+        let mut run_tool = false;
         let mut dep_info = None;
         let mut inputs = None;
         let mut cfg_test = false;
@@ -296,6 +300,7 @@ impl Args {
                 "--prebuilt" => prebuilt = Some(PathBuf::from(value()?)),
                 "--exe" => exe = Some(PathBuf::from(value()?)),
                 "--shared" => shared = true,
+                "--run-tool" => run_tool = true,
                 "--dep-info" => dep_info = Some(PathBuf::from(value()?)),
                 "--inputs" => inputs = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
@@ -327,6 +332,9 @@ impl Args {
         if shared && exe.is_none() {
             bail!("--shared says what --exe links, and there is no --exe");
         }
+        if run_tool && target.as_deref() != Some(RUN_TOOL_TARGET) {
+            bail!("--run-tool is for build scripts compiled for --target {RUN_TOOL_TARGET}");
+        }
         Ok(Args {
             project: project.context("missing project path")?,
             krate: krate.context("missing --crate")?,
@@ -350,6 +358,7 @@ impl Args {
             dep_info,
             inputs,
             library: false,
+            run_tool,
             cfg_test,
             own_target,
             scripts_from,
@@ -3268,6 +3277,7 @@ fn workspace_at(
     beside: Option<&mut Beside>,
     said: Option<Vec<String>>,
 ) -> anyhow::Result<(ProjectWorkspace, plan::Whole)> {
+    let _load = plan::Load::start();
     let start = Instant::now();
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(project));
     let manifest = ProjectManifest::discover_single(&root)?;
@@ -3925,6 +3935,47 @@ fn write_harnesses(db: &mut RootDatabase, texts: Vec<(vfs::FileId, String)>) -> 
         db.set_file_text_with_durability(*file, text, Durability::LOW);
     }
     texts.into_iter().map(|it| it.0).collect()
+}
+
+/// The target of a build script whose commands run on the host (`--run-tool`).
+pub(crate) const RUN_TOOL_TARGET: &str = "wasm32-wasip1";
+
+/// Gives the standard library of a build with `--run-tool` blaze's `std::process` for
+/// wasm32-wasip1 build scripts ([`blaze_wasi::STD_PROCESS`]) in place of the toolchain's
+/// unsupported one. Refused when the toolchain's file is not the one blaze's was written
+/// against: blaze's uses that module's private interface to the rest of std.
+fn run_tool_std(db: &mut RootDatabase) -> anyhow::Result<()> {
+    use ide_db::base_db::{LangCrateOrigin, salsa::Durability};
+    use sha2::{Digest, Sha256};
+    let std = ide_db::base_db::all_crates(db)
+        .iter()
+        .copied()
+        .find(|it| matches!(it.data(db).origin, CrateOrigin::Lang(LangCrateOrigin::Std)))
+        .context("--run-tool: the workspace has no standard library")?;
+    let root = Crate::from(std).root_file(db);
+    let source_root = db.file_source_root(root).source_root_id(db);
+    let source_root = db.source_root(source_root).source_root(db);
+    let at = source_root
+        .path_for_file(&root)
+        .and_then(|it| it.parent())
+        .and_then(|it| it.join(blaze_wasi::STD_PROCESS_AT))
+        .context("--run-tool: std's root has no directory")?;
+    let file = source_root
+        .file_for_path(&at)
+        .copied()
+        .with_context(|| format!("--run-tool: the standard library has no {at}"))?;
+    let digest = Sha256::digest(db.file_text(file).text(db).as_bytes());
+    let digest: String = digest.iter().map(|it| format!("{it:02x}")).collect();
+    anyhow::ensure!(
+        digest == blaze_wasi::STD_PROCESS_FOR,
+        "--run-tool: blaze's std::process for build scripts (crates/blaze-wasi/std/process.rs) \
+         was written against another {at} (sha256 {}) than this toolchain's (sha256 {digest}): \
+         it is to be written again for this toolchain",
+        blaze_wasi::STD_PROCESS_FOR
+    );
+    db.set_file_text_with_durability(file, blaze_wasi::STD_PROCESS, Durability::HIGH);
+    frozen::overlaid(std, blaze_wasi::STD_PROCESS);
+    Ok(())
 }
 
 /// Whether the root of `krate` says `#![no_main]`.
@@ -4643,6 +4694,11 @@ fn std_unit(
     };
     field(b"ra-jit standard library 4");
     field(format!("{:?} {debug:?}", args.selection.target).as_bytes());
+    // A file of one of its crates whose text is blaze's, not the toolchain's.
+    if args.run_tool {
+        field(blaze_wasi::STD_PROCESS_AT.as_bytes());
+        field(blaze_wasi::STD_PROCESS.as_bytes());
+    }
     // An object of one section is linked whole, with what the program never reaches.
     if !hir_ty_codegen::sections_of_their_own() {
         field(b"one section");
@@ -5637,6 +5693,9 @@ fn link(
     }
     let start = Instant::now();
     let mut declined = String::new();
+    // No executable known of the whole object: the worker's own line links one, and the
+    // patch is spliced into that.
+    let mut unknown = false;
     let into_rustcs = into_rustcs.filter(|_| patch.is_some());
     let tried = into_rustcs.is_some();
     if let (Some(binary), Some(patch), Some(old)) = (splice, patch, into_rustcs) {
@@ -5665,6 +5724,7 @@ fn link(
     }
     if !tried && let (Some(binary), Some(patch)) = (splice, patch) {
         let known = lock(&LINKED).remove(binary).map(Executable::baseline);
+        unknown = known.is_none() && !rewritten;
         // A program that runs the executable takes the edit in memory too.
         let old = known.as_ref().and_then(|it| it.as_ref().ok());
         live::tell_superseded();
@@ -5735,7 +5795,8 @@ fn link(
         return Err(RustcLinkedLost { why: declined, onto: true }.into());
     }
     // The worker's own line has the object and not the patch, which alone has the edit.
-    if own_line && patched && patch.is_some() {
+    let relinked = own_line && patched && patch.is_some();
+    if relinked && !unknown {
         return Err(PatchUnlinked { why: declined }.into());
     }
     let reading = whole::read(object)?;
@@ -5774,7 +5835,21 @@ fn link(
         run_link(cmd, Instant::now(), &again)?;
     }
     drop(reading);
-    if let (Some(binary), Some(patch)) = (splice, patch) {
+    if let (Some(binary), Some(patch), true) = (splice, patch, relinked) {
+        let spliced = Linked::read_bare(binary.to_owned(), object).and_then(|mut baseline| {
+            let patch = std::fs::read(patch)?;
+            let spliced = baseline.splice(&patch, &AtomicBool::new(false))?;
+            Ok((baseline, spliced))
+        });
+        let (baseline, Spliced { redirected, appended, copied }) = spliced.map_err(|why| {
+            PatchUnlinked { why: format!("; not spliced into the object linked again: {why:#}") }
+        })?;
+        lock(&LINKED).insert(binary.to_owned(), Executable::Read(Box::new(baseline)));
+        eprintln!(
+            "link: {:.1?} (linked again from the whole object, which it was not, and spliced: {redirected} functions redirected, {appended} bytes, {copied} copied)",
+            start.elapsed()
+        );
+    } else if let (Some(binary), Some(patch)) = (splice, patch) {
         let linked = Executable::Linked(Linked::read(binary.to_owned(), patch, object));
         lock(&LINKED).insert(binary.to_owned(), linked);
     }
@@ -6712,6 +6787,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             dep_info: None,
             inputs: None,
             library: args.library,
+            run_tool: args.run_tool,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
             scripts_from: None,
@@ -7001,6 +7077,9 @@ struct Program {
     /// The tests last found, with the listings of the crates they were found in. A listing
     /// stays until an edit to more than bodies, which is all that changes a test.
     tests_now: Option<(Vec<Arc<ListedCrate>>, Tests)>,
+    /// A whole build's own link line for each executable it links the program at: one for
+    /// each checkout read as the one that was loaded.
+    own_lines: FxHashMap<PathBuf, String>,
 }
 
 /// The functions of a program's own crate that a test harness runs, each with its
@@ -7589,13 +7668,14 @@ impl Builds {
 }
 
 /// Where a build of a program goes. A checkout looked at as another has files of its own for
-/// the program they share.
+/// the program they share, a whole build's executable among them.
 #[derive(Clone, PartialEq)]
 struct Outputs {
     out: PathBuf,
     patch: Option<PathBuf>,
     link_cmd: Option<String>,
     splice: Option<PathBuf>,
+    exe: Option<PathBuf>,
 }
 
 impl Outputs {
@@ -7605,6 +7685,7 @@ impl Outputs {
             patch: args.patch.clone(),
             link_cmd: args.link_cmd.clone(),
             splice: args.splice.clone(),
+            exe: args.exe.clone(),
         }
     }
 }
@@ -8588,7 +8669,7 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
         unsafe { std::env::set_var(name, value) };
     }
     // The spare was started with the daemon's variables: one the build leaves unset is unset.
-    for name in cargo::cli::WORKER_ENV_EXACT.iter().filter(|it| !told.env.contains_key(**it)) {
+    for name in cargo::cli::not_the_builds(&told.env) {
         // SAFETY: as above.
         unsafe { std::env::remove_var(name) };
     }
@@ -8771,6 +8852,9 @@ fn run_holding(
     }
     eprintln!("load workspace: {:.1?}", start.elapsed());
     memory::checkpoint("load");
+    if args.run_tool {
+        run_tool_std(&mut db)?;
+    }
 
     if args.out.is_dir() {
         let texts = harnesses(&db, [&args], None);
@@ -9240,6 +9324,7 @@ fn run_holding(
         whole,
         interrupted: 0,
         moved: false,
+        own_lines: FxHashMap::default(),
     }];
     let overlay = match std::env::var("RA_JIT_OVERLAY").as_deref() {
         Ok("0") => Overlay::Never,
@@ -9532,6 +9617,7 @@ fn run_holding(
                             patch: target.patch.clone(),
                             link_cmd: target.link_cmd.clone(),
                             splice: target.splice.clone(),
+                            exe: target.exe.clone(),
                         },
                         None => Outputs::of(&programs[0].args),
                     };
@@ -9643,6 +9729,7 @@ fn run_holding(
                                 whole: None,
                                 interrupted: 0,
                                 moved: false,
+                                own_lines: FxHashMap::default(),
                             };
                             if let Some(built) =
                                 programs.iter().find(|it| it.same_as(&db, &program))
@@ -9840,11 +9927,18 @@ fn run_holding(
         let background = serving && overlay != Overlay::Always && viewed.is_empty();
         // Checkouts read as one are built in turn, so their links don't take the turn.
         let detached = serving && !viewed.is_empty();
+        // A full build of one forgets what the others' executables were linked from, which
+        // their links under way would tell again after it.
+        if detached {
+            for (_, link) in links.drain() {
+                _ = link.join();
+            }
+        }
         for (&at, wanted) in &outputs {
             let program = &mut programs[at];
             program.unbuilt.stale |= program.wrote.as_ref() != Some(&wanted.out);
             // An executable of its own that was taken away is linked again.
-            program.unbuilt.stale |= program.args.exe.as_ref().is_some_and(|it| !it.exists());
+            program.unbuilt.stale |= wanted.exe.as_ref().is_some_and(|it| !it.exists());
             // The files a link reads and writes are not written again under it.
             if let Some(link) = links.remove(&wanted.out) {
                 _ = link.join();
@@ -10182,6 +10276,7 @@ fn run_holding(
                     moved: program.moved,
                     tests: None,
                     tests_now: None,
+                    own_lines: FxHashMap::default(),
                 };
                 let mut program = Box::new(std::mem::replace(program, away));
                 builds.running.insert(at, Running { clients, kept, own_base });
@@ -10243,7 +10338,9 @@ fn run_holding(
                         // The program is linked unless every client of it loads the patch.
                         let link = !clients.iter().any(|it| it.0 == at)
                             || clients.iter().any(|it| it.0 == at && it.1.0 != Request::Patch);
-                        let link = link && !detached;
+                        // A whole build's patch that its executable does not take is built in
+                        // full, which only its build can do: it is linked there.
+                        let link = link && (!detached || program.args.exe.is_some());
                         let mut theirs = clients.iter().filter(|it| it.0 == at).peekable();
                         let defer =
                             theirs.peek().is_some() && theirs.all(|it| it.1.0 == Request::Edit);
@@ -10324,7 +10421,7 @@ fn run_holding(
         for (at, asked) in clients {
             let mut client = &asked.2;
             let _ = match replies.get(&at) {
-                Some(Ok(_)) if detached => {
+                Some(Ok(_)) if detached && programs[at].args.exe.is_none() => {
                     linking.entry(at).or_default().push(asked);
                     continue;
                 }
@@ -10335,8 +10432,17 @@ fn run_holding(
         }
         for (at, clients) in linking {
             let Some(Ok(built)) = replies.remove(&at) else { continue };
-            let Outputs { out, link_cmd, patch, splice } =
-                outputs.remove(&at).unwrap_or_else(|| Outputs::of(&programs[at].args));
+            let wanted = outputs.remove(&at);
+            let Outputs { out, link_cmd, patch, splice, .. } =
+                match programs[at].outputs(&db, wanted.as_ref()) {
+                    Ok(outputs) => outputs,
+                    Err(why) => {
+                        for (_, _, client) in clients {
+                            let _ = writeln!(&client, "failed: {why:#}");
+                        }
+                        continue;
+                    }
+                };
             // The answer names a patch when the whole object is as it was.
             let patched = built.starts_with("patch=");
             let over_rustc = programs[at].known.stats.over_rustc;
@@ -10749,6 +10855,35 @@ impl Program {
             && crates(ours).is_some_and(|it| Some(it) == crates(theirs))
     }
 
+    /// Where a build for `wanted` goes, the program's own place without it. A whole build is
+    /// linked by the worker's own line, which no client names: the one of the executable
+    /// asked for, from the object asked for, which a checkout read as another has its own of.
+    fn outputs(&mut self, db: &RootDatabase, wanted: Option<&Outputs>) -> anyhow::Result<Outputs> {
+        let mut wanted = wanted.cloned().unwrap_or_else(|| Outputs::of(&self.args));
+        let Some(exe) = wanted.exe.clone() else { return Ok(wanted) };
+        if let Some(cmd) = &wanted.link_cmd {
+            self.own_lines.entry(exe).or_insert_with(|| cmd.clone());
+            return Ok(wanted);
+        }
+        let cmd = match self.own_lines.get(&exe) {
+            Some(cmd) => cmd.clone(),
+            None => {
+                let args = Args {
+                    out: wanted.out.clone(),
+                    patch: wanted.patch.clone(),
+                    link_cmd: None,
+                    exe: Some(exe.clone()),
+                    ..self.args.clone()
+                };
+                let Some((cmd, _)) = own_link_line(db, &args)? else { return Ok(wanted) };
+                self.own_lines.insert(exe.clone(), cmd.clone());
+                cmd
+            }
+        };
+        (wanted.link_cmd, wanted.splice) = (Some(cmd), Some(exe));
+        Ok(wanted)
+    }
+
     /// Brings the program up to date with the database. The result is what to tell its
     /// clients: what they have to load, or why the source can't be built.
     fn sync(
@@ -10765,18 +10900,11 @@ impl Program {
         let named_anew = std::mem::take(&mut self.unbuilt.named_anew);
         let unnamed = if named_anew { None } else { self.widen(db) };
         self.read_copies_again(db)?;
-        let Program { args, table, known, unbuilt, wrote, whole, tests, tests_now, .. } = self;
-        if let Some((cmd, exe)) = own_link_line(db, args)? {
-            (args.link_cmd, args.splice) = (Some(cmd), Some(exe));
-        }
-        let Outputs { out, patch, link_cmd, splice } =
-            wanted.cloned().unwrap_or_else(|| Outputs::of(args));
-        // A whole build's link line is the worker's own, which no client names.
-        let (link_cmd, splice) = match &args.exe {
-            Some(_) => (link_cmd.or(args.link_cmd.clone()), splice.or(args.splice.clone())),
-            None => (link_cmd, splice),
-        };
-        let args = &Args { out, patch, link_cmd, splice, ..args.clone() };
+        let Outputs { out, patch, link_cmd, splice, exe } = self.outputs(db, wanted)?;
+        let Program {
+            args, table, known, unbuilt, wrote, whole, tests, tests_now, own_lines, ..
+        } = self;
+        let args = &Args { out, patch, link_cmd, splice, exe, ..args.clone() };
         // A patch is for the object with all of the program, which this build may be the
         // first to be asked for at this place.
         if let Some(whole) = whole.as_ref().filter(|it| **it != args.out) {
@@ -10931,6 +11059,13 @@ impl Program {
             warm.keep(known)?;
             if full {
                 *whole = Some(args.out.clone());
+                // The executables of the other checkouts were linked with the whole object of
+                // before: a patch of this one is not spliced into them, they are linked again.
+                for exe in own_lines.keys().filter(|it| Some(*it) != args.exe.as_ref()) {
+                    splicer::forget(exe);
+                    _ = splicer::claim(exe, true);
+                    lock(&LINKED).remove(exe);
+                }
             }
         }
         if failed.is_none() || full && !undone {

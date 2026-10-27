@@ -138,6 +138,9 @@ lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "x
 # graph, by hyper-util.
 base64 = "0.23"
 ra-jit-live = { path = "../ra-jit-live" }
+# blaze's std::process for build scripts compiled for wasm32-wasip1; its runner with the
+# feature `wasi`.
+blaze-wasi = { path = "../blaze-wasi" }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -167,6 +170,10 @@ heap-profile = ["tikv-jemallocator/profiling"]
 
 # Adds LLVM as a code producer, chosen with `RA_JIT_BACKEND=llvm`.
 llvm = ["hir-ty-codegen/llvm"]
+
+# Runs build scripts compiled for wasm32-wasip1 under Wasmtime when a workspace asks for it
+# (`RA_JIT_BUILD_SCRIPTS=wasi`, docs/cargo.md "Build scripts under WASI"): an experiment.
+wasi = ["blaze-wasi/run"]
 
 [lints]
 workspace = true

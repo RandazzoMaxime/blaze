@@ -24,7 +24,7 @@ use sha2::{Digest as _, Sha256};
 use super::{
     directives,
     hermetic::{self, InView},
-    keyed, own_script, sandboxed, script_sandbox,
+    keyed, own_script, sandboxed, script_sandbox, wasi_script,
 };
 
 /// The variable that names the script itself to `ra-jit build-script`.
@@ -155,6 +155,13 @@ pub(crate) fn run_as_cargo_does(
             declared: &declared,
         };
         let plan = script_sandbox::plan(&running)?;
+        // Under `wasi`, the module runs for cargo and the process ends as it did; under
+        // `wasi-compare`, it runs first and what it did is set aside.
+        if declared.is_empty()
+            && let Some(mode) = wasi_script::mode(package, &cwd, Some(&out_dir))?
+        {
+            wasi_script::as_cargo_does(&running, &plan, mode, &places)?;
+        }
         let (link_dirs, in_view) = match &plan {
             script_sandbox::Plan::Sandboxed { link_dirs, in_view, .. } => {
                 (link_dirs.clone(), in_view.clone())
@@ -424,7 +431,7 @@ fn watched(stdout: &[u8], cwd: &Path) -> Vec<String> {
 /// prints and writes is told by the script, which its key has. 4 since a run is kept by what
 /// the sandbox saw it read ([`keyed`]), 5 since what one printed is checked before it is kept
 /// ([`directives`]).
-const RUNS: &str = "build script runs 5";
+pub(super) const RUNS: &str = "build script runs 5";
 
 /// The kind of the key of a run that saw its closure alone ([`view_key`]).
 const IN_VIEW: &str = "build script runs in their closure 1";
@@ -435,7 +442,7 @@ const IN_VIEW: &str = "build script runs in their closure 1";
 /// prints or writes either: a run that the sandbox refused something fails, and a failed run
 /// is not kept. Nor does where ra-jit keeps its store, its traces and its statistics, or
 /// whether it checks the store's runs.
-const UNREAD: [&str; 14] = [
+pub(super) const UNREAD: [&str; 14] = [
     "CARGO_MAKEFLAGS",
     "MAKEFLAGS",
     "MFLAGS",
@@ -506,7 +513,7 @@ fn run_key(
 
 /// The toolchain a run's `RUSTC` is of, as the directory above its `bin`: the one ra-jit
 /// stands in front of, or cargo's when it does not.
-fn sysroot_of(env: &[(String, String)]) -> Option<PathBuf> {
+pub(super) fn sysroot_of(env: &[(String, String)]) -> Option<PathBuf> {
     let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| &it.1);
     let rustc = var(crate::as_rustc::TOOLCHAIN).or_else(|| var("RUSTC"))?;
     Some(Path::new(rustc).parent()?.parent()?.to_owned())
@@ -540,13 +547,13 @@ fn kept_reads(
 /// what the store keeps: the target directory its `OUT_DIR` is below, up to cargo's `build`
 /// directory, and its package's directory, where cargo runs it. No path holds a NUL.
 #[derive(Debug)]
-struct Places(Vec<(Vec<u8>, &'static [u8])>);
+pub(crate) struct Places(Vec<(Vec<u8>, &'static [u8])>);
 
 impl Places {
     const TARGET: &[u8] = b"\0TARGET\0";
     const PACKAGE: &[u8] = b"\0PACKAGE\0";
 
-    fn of(env: &[(String, String)]) -> Places {
+    pub(super) fn of(env: &[(String, String)]) -> Places {
         let var = |name: &str| {
             let value = env.iter().find(|it| it.0 == name)?.1.trim_end_matches(['/', '\\']);
             (!value.is_empty()).then_some(value)
@@ -567,7 +574,7 @@ impl Places {
     }
 
     /// `bytes` with what stands for each place in place of it.
-    fn unplace(&self, bytes: &[u8]) -> Vec<u8> {
+    pub(super) fn unplace(&self, bytes: &[u8]) -> Vec<u8> {
         let mut bytes = bytes.to_vec();
         for (place, mark) in &self.0 {
             bytes = replaced(&bytes, place, mark);
@@ -617,9 +624,9 @@ fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
 
 /// What a run of a build script printed and left in its `OUT_DIR`.
 #[derive(Debug, PartialEq)]
-struct Kept {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(crate) struct Kept {
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
     /// Each file below `OUT_DIR`, by its path there, whether it is executable, and its bytes.
     files: Vec<(String, bool, Vec<u8>)>,
 }
@@ -627,7 +634,7 @@ struct Kept {
 impl Kept {
     /// The run that printed `stdout` and `stderr` and wrote `out_dir`. `None` when it left too
     /// much, or a file there can't be read.
-    fn of(stdout: &[u8], stderr: &[u8], out_dir: &Path) -> Option<Kept> {
+    pub(super) fn of(stdout: &[u8], stderr: &[u8], out_dir: &Path) -> Option<Kept> {
         let mut files = Vec::new();
         let mut size = stdout.len() + stderr.len();
         let mut pending = vec![out_dir.to_owned()];
@@ -656,7 +663,7 @@ impl Kept {
     /// directory to stand for. `None` when a file that is no text names a place, whose bytes
     /// a place of another length would break, or when something it holds could not be told
     /// from what stands for one.
-    fn unplaced(&self, places: &Places) -> Option<Kept> {
+    pub(super) fn unplaced(&self, places: &Places) -> Option<Kept> {
         let texts = [&self.stdout, &self.stderr].into_iter();
         let files = self.files.iter().map(|it| &it.2);
         let names = self.files.iter().map(|it| it.0.as_bytes());
@@ -680,7 +687,7 @@ impl Kept {
     }
 
     /// What [`Kept::unplaced`] made of a run, with the places of this one.
-    fn placed(self, places: &Places) -> Kept {
+    pub(super) fn placed(self, places: &Places) -> Kept {
         let files = self.files.into_iter().map(|(name, executable, bytes)| {
             let bytes = if places.marked(&bytes) { places.place(&bytes) } else { bytes };
             (name, executable, bytes)
@@ -693,7 +700,7 @@ impl Kept {
     }
 
     /// Writes the files it left into `out_dir`, as a run would.
-    fn restore(&self, out_dir: &Path) -> anyhow::Result<()> {
+    pub(super) fn restore(&self, out_dir: &Path) -> anyhow::Result<()> {
         for (name, executable, bytes) in &self.files {
             let path = out_dir.join(name);
             if let Some(dir) = path.parent() {
@@ -707,7 +714,7 @@ impl Kept {
         Ok(())
     }
 
-    fn bytes(&self) -> Vec<u8> {
+    pub(super) fn bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let mut put = |bytes: &[u8]| {
             out.extend((bytes.len() as u64).to_le_bytes());
@@ -725,7 +732,7 @@ impl Kept {
         out
     }
 
-    fn read(bytes: &[u8]) -> Option<Kept> {
+    pub(super) fn read(bytes: &[u8]) -> Option<Kept> {
         let rest = &mut &*bytes;
         let count = |it: &[u8]| Some(u64::from_le_bytes(it.try_into().ok()?) as usize);
         let text = |it: &[u8]| String::from_utf8(it.to_vec()).ok();

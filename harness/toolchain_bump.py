@@ -20,8 +20,9 @@ A bump, in order (each step names itself when it fails, and stops there):
     apply; a conflict stops the bump and names the files);
  4. moves the pins written down elsewhere: the old toolchain name, rustc version line and
     commit in install.sh and vendor/proc-macro-srv (RUSTC_VERSION_STRING, the manifest's
-    header), Cargo.toml's rust-version, and the flake's rust-overlay input (`nix flake update
-    rust-overlay`, when nix is on PATH);
+    header), the toolchain's names and `rustc -V` in README.md, docs/toolchain.md and
+    docs/cargo.md, Cargo.toml's rust-version, and the flake's rust-overlay input (`nix flake
+    update rust-overlay`, when nix is on PATH);
  5. installs the nightly with rustup.
 
 What it leaves to you, which it prints at the end: answers.py --write on each of x86-64 Linux,
@@ -49,6 +50,9 @@ COMPONENTS = ["rustc", "cargo", "rust-std", "rust-src", "llvm-tools-preview", "r
 # Where the old pin is written down besides harness/toolchain and pins.txt.
 MENTIONS = ["install.sh", "vendor/proc-macro-srv/Cargo.toml",
             "vendor/proc-macro-srv/crates/proc-macro-srv/src/lib.rs"]
+# Docs that name the pin as it is today. Only its names and `rustc -V` move there: a bare commit
+# in them can be what something was ported from.
+DOCS = ["README.md", "docs/toolchain.md", "docs/cargo.md"]
 # vendor/proc-macro-srv's manifest and lock file are ra-jit's, written from upstream's (their
 # header says how) and carried as they are; its crates are upstream's (`server_dirs`).
 ABI = ("vendor/rustc_abi/src", "compiler/rustc_abi/src")
@@ -291,6 +295,14 @@ def move_mentions(old, new):
             moved = moved.replace(was, now)
         if moved == text:
             print(f"note: {path} names none of the old pin ({old_name}, {old_commit[:9]})")
+        open(full, "w").write(moved)
+    blaze = lambda name: name.replace("nightly-", "blaze-", 1)
+    for path in DOCS:
+        full = os.path.join(ROOT, path)
+        text = open(full).read()
+        moved = text
+        for was, now in [(old_name, new_name), (blaze(old_name), blaze(new_name)), (old_rustc, new_rustc)]:
+            moved = moved.replace(was, now)
         open(full, "w").write(moved)
     major_minor = ".".join(new_rustc.split(" ")[0].split(".")[:2])
     cargo = os.path.join(ROOT, "Cargo.toml")

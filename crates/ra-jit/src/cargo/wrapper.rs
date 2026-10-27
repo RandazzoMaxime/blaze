@@ -21,9 +21,10 @@ use super::{
     cli,
     daemon::{self, NotBuilt},
     own_macro, own_script, say, script,
-    state::{State, place},
+    state::{State, place_copy},
     switch::Enabled,
     units::{Copied, Record, stamp_now},
+    wasi_script,
 };
 use crate::{
     dep_info,
@@ -117,6 +118,9 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     };
     let plain = unit.linked && std::env::var_os(DRIVEN).is_none();
     let dir = unit.records.join(&unit.id);
+    if unit.script {
+        unit.for_wasi(&rustc, &dir)?;
+    }
     if unit.script && std::env::var_os(own_script::BY_RUSTC).is_none() {
         match unit.by_ra_jit(&rustc, &dir) {
             Ok(()) => std::process::exit(0),
@@ -185,6 +189,9 @@ fn rustc_of(rustc: &OsStr) -> Command {
 /// described for the scripts that link them. The code to end with.
 fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
     let unit = Unit::of(args);
+    if let Some(unit) = unit.as_ref().filter(|it| it.script) {
+        unit.for_wasi(rustc, &unit.records.join(&unit.id))?;
+    }
     if let Some(unit) = unit.as_ref().filter(|it| it.script)
         && std::env::var_os(own_script::BY_RUSTC).is_none()
     {
@@ -445,32 +452,37 @@ impl Unit {
             Err(why) => return Err(why.why()),
         }
         let binary = &checkout.programs[at].binary;
-        self.put(binary, read)?;
-        state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", binary.display()))?;
+        let linked = self.put(binary, read)?;
+        state
+            .cargo_has(dir, &linked)
+            .map_err(|it| format!("keeping {}: {it}", linked.display()))?;
         // Every other build with the program kept the one cargo had before.
         State::forget(known.iter().filter(|it| **it != state.key));
         Ok(())
     }
 
-    /// Puts `binary`, the daemon's build of the program, where rustc would have linked it,
-    /// with the dep-info rustc wrote of it (`read`, rustc run by [`Self::dep_info`]).
+    /// Puts a copy of `binary`, the daemon's build of the program, where rustc would have
+    /// linked it, with the dep-info rustc wrote of it (`read`, rustc run by
+    /// [`Self::dep_info`]). The result is that place.
     fn put(
         &self,
         binary: &Path,
         read: Result<std::io::Result<Output>, String>,
-    ) -> Result<(), String> {
+    ) -> Result<PathBuf, String> {
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);
             std::process::exit(super::FAILED);
         }
-        // Cargo starts the program with no word to the daemon, which may still be writing it.
+        // The copy is taken once the daemon is through writing it, and none of its later
+        // writes, for the next build or a load, reach the one cargo starts.
         let _unwritten = crate::splice::unwritten(binary);
         let record = self.as_record(0, Vec::new(), None);
         let linked = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
-        place(binary, &linked).map_err(|it| format!("installing {}: {it}", linked.display()))?;
+        place_copy(binary, &linked)
+            .map_err(|it| format!("installing {}: {it}", linked.display()))?;
         let _ = std::io::stderr().write_all(&read.stderr);
-        Ok(())
+        Ok(linked)
     }
 
     /// Has ra-jit compile and link the build script, where rustc would have put it, and
@@ -483,6 +495,20 @@ impl Unit {
         let exe = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
         own_script::compile(rustc, &self.args, &self.cwd, &self.source, &exe, &copies)?;
         self.record(stamp, &copies, None, &self.source).map_err(|it| format!("{it:#}"))
+    }
+
+    /// Builds the build script for wasm32-wasip1 beside where rustc links it, when its package
+    /// runs its script under WASI ([`wasi_script::mode`]), whoever builds the executable.
+    fn for_wasi(&self, rustc: &OsString, dir: &Path) -> anyhow::Result<()> {
+        let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+        let record = self.as_record(0, Vec::new(), None);
+        let out_dir = record.out_dir();
+        let Some(mode) = wasi_script::mode(&package, &self.cwd, out_dir.as_deref())? else {
+            return Ok(());
+        };
+        let exe = record.outputs().into_iter().next().context("rustc names no executable")?;
+        let dir = dir.join("wasi");
+        wasi_script::compile(mode, &package, rustc, &self.args, &self.cwd, &self.source, &exe, &dir)
     }
 
     /// Gives cargo what rustc would have written of the library `record` is of, which the

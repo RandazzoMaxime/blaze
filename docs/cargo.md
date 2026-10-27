@@ -22,7 +22,7 @@ engine, so the two have to be installed side by side, with `ra-jit-rustc` and
 [installer](../install.sh) and `cargo install` both do that:
 
     curl -fsSL https://ix.dev/blaze | sh
-    cargo +nightly-2026-10-25 install --locked cargo-blaze
+    cargo +nightly-2026-10-27 install --locked cargo-blaze
 
 From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less
 the PGO a release adds ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)); 0.1.0 has no such
@@ -40,7 +40,7 @@ same LLVM. `cargo build -p ra-jit --release` is the quicker build the harnesses 
 working on blaze; it is not what ships.
 
 `cargo blaze` builds with the one toolchain blaze compiles, the dated nightly in
-`harness/toolchain` (`nightly-2026-10-25`), whatever toolchain the project names (a
+`harness/toolchain` (`nightly-2026-10-27`), whatever toolchain the project names (a
 `rust-toolchain.toml`, `rustup override`, `+toolchain`, `RUSTUP_TOOLCHAIN` or rustup's
 default): it runs cargo, rustc and the daemon under that nightly by naming it in
 `RUSTUP_TOOLCHAIN` and `CARGO`. The nightly builds what older releases built, so a project on a
@@ -52,10 +52,10 @@ directory: cargo keys what it builds by the rustc, so neither rebuilds the other
 ([support.md](support.md#toolchain)).
 
 Where the nightly comes from, in this order: `RUSTC` naming a rustc whose `rustc -V` line is
-the pinned one's (`rustc 1.101.0-nightly (12433c307 2026-10-24)`: the whole line, since every
-nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-25`
+the pinned one's (`rustc 1.101.0-nightly (16d1ffac1 2026-10-26)`: the whole line, since every
+nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-27`
 with `rust-src`, when rustup has it; else blaze's own copy in
-`~/.blaze/toolchains/nightly-2026-10-25-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
+`~/.blaze/toolchains/nightly-2026-10-27-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
 out a toolchain. blaze downloads its copy the first time it needs it, once, with a line on
 stderr while it does: rustc, cargo, the standard library and its source from the Rust project's
 own servers, 97 MB on macOS, 134 MB on Linux x86-64 and 118 MB on Linux ARM64 (548 MB on macOS
@@ -529,6 +529,46 @@ sees the directories of the libraries of the loads before it started, so a works
 `/tmp` loaded later by the same daemon is not seen by it on Linux; doctests and the
 `blaze-build-script` crate's own runner (`harness/scripts.py` only) are not sandboxed.
 
+### Build scripts under WASI (an experiment, off by default)
+
+A build script can instead be compiled for `wasm32-wasip1` and run under Wasmtime. Nothing
+of the host is reachable but what is handed to it, and the module is not built for the host
+it runs on. It is off unless asked for, and asking needs a ra-jit built with the feature `wasi`
+(`cargo build --release -p ra-jit --features wasi`), which adds Wasmtime to it:
+
+- `RA_JIT_BUILD_SCRIPTS=wasi` runs every build script so, or
+- in the workspace's root manifest, `wasi-build-scripts = ["pkg", ...]` (`["*"]` for all)
+  under `[workspace.metadata.blaze.sandbox]` runs those packages' scripts so.
+
+When the wrapper is asked for a build script it also builds it for `wasm32-wasip1`, from the
+same description, beside where rustc links it (`build_script_build.wasm`). The standard
+library of that build is the toolchain's with one file of blaze's in place of
+`std/src/sys/process/unsupported.rs` (`crates/blaze-wasi/std/process.rs`, `ra-jit
+--run-tool`), so `std::process::Command` works. A command runs on the host when its output
+is first needed: `wait`, `output`, a read of its stdout. ra-jit refuses that std when the
+toolchain's file is not the one it was written against. Without `--run-tool` a wasip1 build
+keeps rustc's behaviour: `Command` is unsupported.
+
+When cargo runs the script, the module runs in its place:
+
+| | under WASI |
+|---|---|
+| files | the package's directory, read-only, at its path and at `.`; `OUT_DIR`, writable, at its path; nothing else. `std::env::current_dir()` is `/` (wasi-libc's), not the package's directory, though relative paths are found in it |
+| environment | the variables cargo documents for build scripts (`CARGO_*` of the package, features and cfgs, `OUT_DIR`, `TARGET`, `HOST`, `DEP_*`, `RUSTC`, ...) and no other |
+| commands | the toolchain's `rustc` (the `RUSTC` it is given, which is ra-jit's: [above](#build-scripts-and-proc-macros-run-in-a-sandbox)), C and C++ compilers (`cc`, `c++`, `gcc`, `g++`, `clang`, `clang++`, `cpp`, with a target's prefix or a version), their archivers (`ar`, `ranlib`, `llvm-ar`, `llvm-ranlib`) and `pkg-config`: each runs in the sandbox the script would have run in, with the environment the script gave it over the sandbox's for C toolchains (`PATH`, `CC`, Nix's wrappers). Anything else is refused, naming the program: the script sees `PermissionDenied` |
+| record | every command, with the program that ran, its arguments, how it ended or why it was refused, in `ra-jit-wasi-tools.jsonl` beside `OUT_DIR` |
+
+What it printed is checked as a native run's is. A run is kept in the store under the Nix
+model's key: the module's bytes, the package's files, the environment and arguments with
+the checkout's and target directory's places unplaced, the toolchain, and each command it
+may run as `PATH` finds it. There are no read sets. A module ra-jit can't build, or a run
+that fails, is an error: the native script does not run instead.
+
+`RA_JIT_BUILD_SCRIPTS=wasi-compare` is for measuring it. The module runs first and what it
+printed and wrote is set aside in `ra-jit-wasi/` beside `OUT_DIR`, then the native script
+runs for cargo. `harness/bswasi.py` compares the two over the bench corpus;
+[the report](reports/BSWASI.md) has which scripts run unchanged and why the others don't.
+
 ### Running only the tests that have not passed
 
 With `RA_JIT_TESTS=affected`, `cargo ra-jit test` runs, of each test executable the daemon
@@ -818,6 +858,9 @@ build a command line is, so changing one starts from a cargo build again.
 | `RA_JIT_INLINE` | With LLVM at level 2 or 3, a program built whole (`runbench.py`'s builds) has the functions it calls in any crate built into it or shown to LLVM, as a release build does; the standard library's only when they are generic or `#[inline]`, as rustc does across crates. `crate` keeps that to the function's own crate, `0` builds nothing in, `all` does it in other builds with LLVM at level 2 or 3 too (never the daemon's, whose store keeps each function by its own code alone) | across crates in a whole program, the function's own crate otherwise |
 | `RA_JIT_SPLICE` | `0` links in full after every edit instead of splicing | splice |
 | `RA_JIT_OTHER_TOOLCHAIN` | `1` builds with the project's toolchain when it is not the pinned nightly, rather than with the pinned nightly, for a project pinned to a nightly near it; nothing checks that it agrees ([support.md](support.md#toolchain)) | not set |
+
+`RA_JIT_BUILD_SCRIPTS` (`wasi`, `wasi-compare`, `native`) is read by the wrapper and by each
+run of a build script ([above](#build-scripts-under-wasi-an-experiment-off-by-default)).
 
 `RA_JIT_TESTS` is read by each `cargo ra-jit test` alone and is not part of which build it
 is: `affected` runs the tests that have not passed as they are now, by the passes the store

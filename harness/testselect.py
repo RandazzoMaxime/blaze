@@ -264,6 +264,21 @@ SAYS = {} if SANDBOXED else {
         r"Skipped \d+ tests, unchanged since the last pass; 1 test run every time \(said above\);",
     ],
 }
+
+
+def kept_from():
+    """Where the passes this run keeps say they come from, as results.rs `from` names it: the
+    harness's earlier steps are a run of this same CI job when GitHub Actions says so."""
+    var = lambda name: os.environ.get(name) or None
+    sha, run = var("GITHUB_SHA"), var("GITHUB_RUN_ID")
+    if var("RA_JIT_TESTS_FROM"):
+        return var("RA_JIT_TESTS_FROM")
+    if sha:
+        return f"commit {sha[:10]}" + (f" (run {run})" if run else "")
+    return "an earlier run on this machine"
+
+
+KEPT_FROM = re.escape(kept_from())
 if SANDBOXED:
     SAYS = {
         "outside the sandbox": [
@@ -281,11 +296,11 @@ if SANDBOXED:
         ],
         "every pass kept verified": [r"Verified the passes kept: (\d+) of \1 tests passed again$"],
         "passes pulled from a remote": [
-            r"Cached \d+ tests from an earlier run on this machine",
+            rf"Cached \d+ tests from {KEPT_FROM}",
             r"1 test outside the sandbox, run every time and never kept: " + re.escape(OUTSIDE_TEST),
         ],
         "a fresh target and daemon with the store": [
-            r"Cached \d+ tests from an earlier run on this machine",
+            rf"Cached \d+ tests from {KEPT_FROM}",
         ],
         "nothing edited after it ran outside": [
             rf"Unsandboxed {OUTSIDE_TEST}: taken out of the sandbox in \S*Cargo\.toml$",
