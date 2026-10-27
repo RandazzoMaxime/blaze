@@ -189,7 +189,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   associated item through a type (`Foo::f`, `<()>::f`, `T::f`, not `Default::default`) has its
   generic arguments and its impl's self type and trait arguments well-formed, as rustc's user
   type annotation on it. A function item, closure or safe function pointer cast to a
-  function pointer is a subtype of it by signature. A where clause `for<'a> T: 'a` is
+  function pointer is a subtype of it by signature. Two function item types are related with
+  the item's variances, as rustc's `variances_of` infers them from its signature (`fn foo<'a>()
+  -> PhantomData<&'a ()>` is covariant in `'a`; a constructor `fn(T) -> S<T>` is invariant in
+  `T`, not as `S`); a variable holding one is copied into a temporary of its own type to be
+  called, as rustc's MIR does, and the type a path's written arguments give a callee
+  (`f::<&'a T>`) is related to the callee's own at the path, blamed after the other
+  interesting constraints (rustc's `AnnotationSource::GenericArg`). A where clause `for<'a> T: 'a` is
   `T: 'static`, and a type parameter that fails it is rustc's codeless "does not live long
   enough". A trait object cast to one of its supertraits' (`dyn Foo<'static>` to
   `dyn Bar<'static, 'a>` with `trait Foo<'a>: Bar<'a, 'a>`) has the supertrait as the
