@@ -4,8 +4,8 @@
 //! is the table of what each one is.
 
 mod args;
-mod doc;
 mod clean;
+mod doc;
 mod manifest;
 mod new;
 mod tree;

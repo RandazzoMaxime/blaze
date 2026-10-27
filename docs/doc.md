@@ -112,6 +112,7 @@ GAPS
 ## Not done
 
 - Doctests are `cargo blaze test --doc`'s, not this command's.
-- `--message-format json`, `--examples`, `--tests` and `--benches` are not read.
-- No settings page, no `help.html`, no per-item "Copy item path" menu, no
-  `--extern-html-root-url`: links into the standard library point at doc.rust-lang.org.
+- `--message-format` is refused; `--examples`, `--tests` and `--benches` are not read.
+- No settings page and no `help.html`; the theme follows the system's. Links into the
+  standard library point at doc.rust-lang.org's nightly docs, as rustdoc's do with no local
+  copy; there is no `--extern-html-root-url`.
