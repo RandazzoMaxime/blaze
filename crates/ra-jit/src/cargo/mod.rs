@@ -35,6 +35,7 @@ use cli::{Asked, Invocation, Subcommand};
 use client::Start;
 use daemon::{Checkout, NotBuilt, Reply, Request};
 use state::{Built, Counts, Held, Staged, State};
+pub(crate) use toolchain::{ours_commit, ours_says};
 pub(crate) use units::Record;
 
 /// `ra-jit cargo ...`: runs the command and ends with the status cargo would end with.

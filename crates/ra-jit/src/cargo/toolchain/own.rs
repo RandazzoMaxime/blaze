@@ -147,6 +147,15 @@ pub(crate) fn rustc_version() -> &'static str {
         .expect("pins.txt has the rustc line: harness/toolchain_pins.py --write")
 }
 
+/// The commit of rust-lang/rust the toolchain blaze builds with was built from: what a
+/// nightly's channel manifest names only by the short hash in its version.
+pub(crate) fn commit() -> &'static str {
+    PINS.lines()
+        .find_map(|it| it.strip_prefix("commit "))
+        .map(str::trim)
+        .expect("pins.txt has the commit line: harness/toolchain_pins.py --write")
+}
+
 /// The host's tuple, as the Rust project names its builds.
 fn host() -> Option<&'static str> {
     Some(match (std::env::consts::ARCH, std::env::consts::OS) {

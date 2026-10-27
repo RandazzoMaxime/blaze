@@ -1236,45 +1236,39 @@ fn rustc_commit(toolchain: &str) -> Option<String> {
     {
         return commit.clone();
     }
-    let commit = commit_in_manifest(&rustlib).or_else(|| commit_in_library(Path::new(&rustlib)));
+    let commit = commit_in_manifest(&rustlib);
     lock(&KNOWN).get_or_insert_default().insert(toolchain.to_owned(), (seen, commit.clone()));
     commit
 }
 
+/// The commit the channel manifest below `rustlib` names for the toolchain: its
+/// `git_commit_hash`, or, for a nightly's manifest, which names the commit only by the short
+/// hash in its version, the commit of blaze's own nightly when that version is its
+/// (`pins.txt`). Nothing rustc built is read for it (docs/no-rustc.md, step F): it used to be
+/// read out of the paths in the sysroot's `libstd` rlib.
 fn commit_in_manifest(rustlib: &str) -> Option<String> {
     let manifest =
         std::fs::read_to_string(format!("{rustlib}/multirust-channel-manifest.toml")).ok()?;
-    let (_, rust) = manifest.split_once("[pkg.rust]")?;
-    let (_, commit) = rust.split_once("git_commit_hash = \"")?;
-    Some(commit.split_once('"')?.0.to_owned())
+    commit_of_manifest(&manifest, cargo::ours_says(), cargo::ours_commit())
 }
 
-/// The commit in the paths a built standard library below `rustlib` has its sources under.
-fn commit_in_library(rustlib: &Path) -> Option<String> {
-    let targets = std::fs::read_dir(rustlib).ok()?;
-    let libraries = targets.filter_map(|it| std::fs::read_dir(it.ok()?.path().join("lib")).ok());
-    let mut built: Vec<PathBuf> = libraries
-        .flatten()
-        .filter_map(|it| Some(it.ok()?.path()))
-        .filter(|it| {
-            let name = it.file_name().and_then(|it| it.to_str()).unwrap_or_default();
-            name.starts_with("libstd-") && name.ends_with(".rlib")
-        })
+/// What [`commit_in_manifest`] says of `manifest`, for a blaze whose own nightly's rustc says
+/// `ours` (`1.101.0-nightly (12433c307 2026-10-24)`) and was built from `commit`.
+fn commit_of_manifest(manifest: &str, ours: &str, commit: &str) -> Option<String> {
+    // The `[pkg.rust]` table's own keys, before its first subtable.
+    let rust: Vec<&str> = (manifest.lines().skip_while(|it| it.trim() != "[pkg.rust]").skip(1))
+        .take_while(|it| !it.trim_start().starts_with('['))
         .collect();
-    built.sort_unstable();
-    built.iter().find_map(|it| commit_of_sources(&std::fs::read(it).ok()?))
-}
-
-/// The commit of the first `/rustc/<commit>/` in what rustc built.
-fn commit_of_sources(built: &[u8]) -> Option<String> {
-    const UNDER: &[u8] = b"/rustc/";
-    const LENGTH: usize = 40;
-    memchr::memmem::find_iter(built, UNDER).find_map(|at| {
-        let commit = built.get(at + UNDER.len()..at + UNDER.len() + LENGTH + 1)?;
-        let (slash, commit) = commit.split_last()?;
-        let named = *slash == b'/' && commit.iter().all(u8::is_ascii_hexdigit);
-        named.then(|| String::from_utf8_lossy(commit).into_owned())
-    })
+    let value = |key: &str| {
+        rust.iter().find_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            (name.trim() == key).then(|| value.trim().trim_matches('"'))
+        })
+    };
+    if let Some(named) = value("git_commit_hash") {
+        return Some(named.to_owned());
+    }
+    (value("version")? == ours).then(|| commit.to_owned())
 }
 
 /// What tells the toolchain whose library was loaded from any other: the name of the built
@@ -10428,12 +10422,18 @@ fn main() {}
     }
 
     #[test]
-    fn the_commit_of_a_toolchain_is_the_one_its_library_has_its_sources_under() {
-        let commit = "b940084d7eb6a299eb4bfeb8e34901bc051e7ac4";
-        let built = format!("\0/rustc/short/a.rs\0/rustc/{commit}x\0/rustc/{commit}/library/b.rs");
-        assert_eq!(commit_of_sources(built.as_bytes()).as_deref(), Some(commit));
-        assert_eq!(commit_of_sources(b"/rustc/"), None);
-        assert_eq!(commit_of_sources(format!("/rustc/{commit}").as_bytes()), None);
+    fn the_commit_of_a_toolchain_is_the_one_its_channel_manifest_names() {
+        let ours = "1.101.0-nightly (12433c307 2026-10-24)";
+        let commit = "12433c307b5a497388ffe2f4e49dbf1ab8c71fa0";
+        let named = "[pkg.rust]\ngit_commit_hash = \"abc\"\n";
+        assert_eq!(commit_of_manifest(named, ours, commit).as_deref(), Some("abc"));
+        let nightly = format!(
+            "date = \"2026-10-25\"\n\n[pkg.cargo]\nversion = \"{ours}\"\n\n[pkg.rust]\nversion = \"{ours}\"\n\n[pkg.rust.target.x]\ngit_commit_hash = \"x\"\n"
+        );
+        assert_eq!(commit_of_manifest(&nightly, ours, commit).as_deref(), Some(commit));
+        let other = nightly.replace("2026-10-24)\"\n\n[pkg.rust.", "2026-10-23)\"\n\n[pkg.rust.");
+        assert_eq!(commit_of_manifest(&other, ours, commit), None);
+        assert_eq!(commit_of_manifest("[pkg.cargo]\nversion = \"1\"\n", ours, commit), None);
     }
 
     #[test]
