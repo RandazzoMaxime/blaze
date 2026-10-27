@@ -69,6 +69,9 @@ pub(crate) fn command(
     debug: crate::plan::Level,
 ) -> anyhow::Result<String> {
     let line = Line::of(db, program, sysroot, false, user, debug)?;
+    if line.windows {
+        return line.msvc_command(objects, exe);
+    }
     let mut args = vec![line.program.display().to_string()];
     args.extend(line.before.iter().cloned());
     for &object in objects {
@@ -100,6 +103,8 @@ pub(crate) struct Line {
     after: Vec<String>,
     apple: bool,
     wasm: bool,
+    /// Linked by `link.exe`: the arguments are its own.
+    windows: bool,
 }
 
 impl Line {
@@ -127,6 +132,7 @@ impl Line {
             before.extend(["-flavor", "wasm"].map(str::to_owned));
             before.extend(target.wasm_start(sysroot)?);
         } else if !target.apple
+            && !target.windows
             && let Some(gcc_ld) = sysroot.and_then(lld_dir)
         {
             before.extend([format!("-B{}", gcc_ld.display()), "-fuse-ld=lld".to_owned()]);
@@ -150,7 +156,14 @@ impl Line {
         if target.wasm && debug == crate::plan::Level::Nothing {
             after.push("--strip-debug".to_owned());
         }
-        Ok(Line { program: linker, before, after, apple: target.apple, wasm: target.wasm })
+        Ok(Line {
+            program: linker,
+            before,
+            after,
+            apple: target.apple,
+            wasm: target.wasm,
+            windows: target.windows,
+        })
     }
 
     /// How the linker is told to take every member of an archive, and to stop.
@@ -163,6 +176,9 @@ impl Line {
 
     /// Links `objects` into the executable `exe`. How long the linker took.
     pub(crate) fn link(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<Duration> {
+        if self.windows {
+            return self.msvc_link(objects, exe);
+        }
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.before);
         for &object in objects {
@@ -187,6 +203,80 @@ impl Line {
         }
         Ok(start.elapsed())
     }
+}
+
+impl Line {
+    /// The arguments of `link.exe`, in a response file next to `exe`: the line's, the objects
+    /// (an archive taken whole, as `--whole-archive` does for `cc`), the directories of the
+    /// system's libraries, and the output.
+    fn msvc_arguments(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+        let (linker, libs) = msvc_tool()?;
+        let mut args: Vec<String> = self.before.clone();
+        for &object in objects {
+            let path = object.display().to_string();
+            if object.exists() && split::is_archive(&leading_bytes(object)?) {
+                args.push(format!("/WHOLEARCHIVE:{path}"));
+            } else {
+                args.push(path);
+            }
+        }
+        args.extend(libs.iter().map(|it| format!("/LIBPATH:{}", it.display())));
+        args.extend(self.after.iter().cloned());
+        args.push(format!("/OUT:{}", exe.display()));
+        let mut response = exe.as_os_str().to_owned();
+        response.push(".link.rsp");
+        let response = PathBuf::from(response);
+        let text: Vec<String> = args.iter().map(|it| format!("\"{it}\"")).collect();
+        std::fs::write(&response, text.join("\n"))
+            .with_context(|| format!("writing {}", response.display()))?;
+        Ok((linker, response))
+    }
+
+    fn msvc_command(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<String> {
+        let (linker, response) = self.msvc_arguments(objects, exe)?;
+        Ok(format!("\"{}\" \"@{}\"", linker.display(), response.display()))
+    }
+
+    fn msvc_link(&self, objects: &[&Path], exe: &Path) -> anyhow::Result<Duration> {
+        let (linker, response) = self.msvc_arguments(objects, exe)?;
+        let mut cmd = Command::new(&linker);
+        cmd.arg(format!("@{}", response.display()));
+        let start = Instant::now();
+        let ran = cmd.output().with_context(|| format!("running {cmd:?}"))?;
+        if !ran.status.success() {
+            bail!(
+                "the link of {} failed ({}):\n{:?}\n{}{}",
+                exe.display(),
+                ran.status,
+                cmd,
+                String::from_utf8_lossy(&ran.stdout),
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        }
+        Ok(start.elapsed())
+    }
+}
+
+/// `link.exe` and the directories it finds the C runtime and the system's libraries in.
+#[cfg(windows)]
+fn msvc_tool() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
+    let Some(tool) = find_msvc_tools::find_tool(std::env::consts::ARCH, "link.exe") else {
+        bail!("no link.exe: install the MSVC build tools");
+    };
+    let libs = tool
+        .env()
+        .into_iter()
+        .find(|(name, _)| name == "LIB")
+        .map(|(_, dirs)| {
+            std::env::split_paths(dirs).filter(|it| !it.as_os_str().is_empty()).collect()
+        })
+        .unwrap_or_default();
+    Ok((tool.path().to_path_buf(), libs))
+}
+
+#[cfg(not(windows))]
+fn msvc_tool() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
+    bail!("link.exe links a Windows program from Windows")
 }
 
 /// The first bytes of the file at `path`, which tell an archive from an object.
@@ -456,6 +546,8 @@ struct Target {
     apple: bool,
     /// WebAssembly, which `wasm-ld` links with no `cc` in front of it.
     wasm: bool,
+    /// `x86_64-pc-windows-msvc`: linked by `link.exe`, not by `cc`.
+    windows: bool,
     arch: String,
     os: String,
     /// A shared library is linked, not an executable.
@@ -470,7 +562,8 @@ impl Target {
         };
         let (apple, arch) = (value("target_vendor") == "apple", value("target_arch"));
         let wasm = value("target_family") == "wasm" || arch.starts_with("wasm");
-        Target { apple, wasm, arch, os: value("target_os"), shared: false }
+        let windows = value("target_os") == "windows" && value("target_env") == "msvc";
+        Target { apple, wasm, windows, arch, os: value("target_os"), shared: false }
     }
 
     /// The directory of the C runtime the rust project builds for the target and ships with
@@ -515,6 +608,11 @@ impl Target {
         if self.wasm {
             return Vec::new();
         }
+        if self.windows {
+            return ["/NOLOGO", "/DEBUG", "/INCREMENTAL:NO", "/NXCOMPAT", "/OPT:REF,NOICF"]
+                .map(str::to_owned)
+                .to_vec();
+        }
         if self.apple {
             let arch = if self.arch == "aarch64" { "arm64" } else { &self.arch };
             // Edits are spliced into what this links, and the splice reads fixups in tables.
@@ -541,6 +639,13 @@ impl Target {
                     vec!["--whole-archive".to_owned(), l, "--no-whole-archive".to_owned()]
                 }
                 _ => vec![l],
+            };
+        }
+        if self.windows {
+            let file = if lib.verbatim { name.to_owned() } else { format!("{name}.lib") };
+            return match lib.kind {
+                NativeLibKind::Static if lib.whole_archive => vec![format!("/WHOLEARCHIVE:{file}")],
+                _ => vec![file],
             };
         }
         if self.apple {
@@ -581,6 +686,7 @@ impl Target {
             _ => ("all", spec),
         };
         match kind {
+            "native" | "all" if self.windows => Some(format!("/LIBPATH:{path}")),
             "native" | "all" => Some(format!("-L{path}")),
             "framework" => Some(if self.apple { format!("-F{path}") } else { format!("-L{path}") }),
             _ => None,
@@ -596,6 +702,13 @@ impl Target {
                 args.push("--no-entry".to_owned());
             }
             return args;
+        }
+        if self.windows {
+            // The dynamic C runtime, which rustc's objects name with `/DEFAULTLIB` and
+            // ra-jit's do not.
+            return ["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "oldnames.lib"]
+                .map(str::to_owned)
+                .to_vec();
         }
         let args: &[&str] = match (self.apple, self.shared) {
             (true, false) => &["-Wl,-dead_strip", "-nodefaultlibs"],
@@ -628,6 +741,32 @@ impl Target {
 mod tests {
     use super::*;
 
+    fn windows_target() -> Target {
+        Target {
+            apple: false,
+            wasm: false,
+            windows: true,
+            arch: "x86_64".to_owned(),
+            os: "windows".to_owned(),
+            shared: false,
+        }
+    }
+
+    /// The arguments of `link.exe` for a native library are its own: a `.lib` to name, a
+    /// `/WHOLEARCHIVE` to take an archive whole, a `/LIBPATH` to look in.
+    #[test]
+    fn a_native_library_of_a_windows_program_is_named_as_link_exe_takes_it() {
+        let target = windows_target();
+        let lib = |spec| target.lib(&lib_of(spec).unwrap());
+        assert_eq!(lib("kernel32"), ["kernel32.lib"]);
+        assert_eq!(lib("static:+whole-archive=ring"), ["/WHOLEARCHIVE:ring.lib"]);
+        assert_eq!(lib("dylib:+verbatim=x.lib"), ["x.lib"]);
+        assert_eq!(target.search("native=C:\\sdk\\lib").as_deref(), Some("/LIBPATH:C:\\sdk\\lib"));
+        assert_eq!(target.search("framework=F"), Some("-LF".to_owned()));
+        assert_eq!(target.leading()[0], "/NOLOGO");
+        assert_eq!(target.trailing(), ["msvcrt.lib", "vcruntime.lib", "ucrt.lib", "oldnames.lib"]);
+    }
+
     #[test]
     fn a_scripts_libraries_are_read_as_rustc_reads_them() {
         let lib = |spec| {
@@ -654,6 +793,7 @@ mod tests {
         let linux = Target {
             apple: false,
             wasm: false,
+            windows: false,
             arch: "x86_64".to_owned(),
             os: "linux".to_owned(),
             shared: false,
@@ -669,6 +809,7 @@ mod tests {
             let mac = Target {
                 apple: true,
                 wasm: false,
+                windows: false,
                 arch: "aarch64".to_owned(),
                 os: "macos".to_owned(),
                 shared,
