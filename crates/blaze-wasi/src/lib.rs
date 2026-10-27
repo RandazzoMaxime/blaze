@@ -7,6 +7,12 @@
 //!   import `blaze.run_tool`.
 //! - [`Request`] and [`Response`] are what that import is given and answers, as
 //!   `std/process.rs` writes and reads them.
+//! - With the feature `run`, [`run::run`] runs a script's module under Wasmtime with WASI
+//!   preview 1, its preopens and environment, and answers `blaze.run_tool` with what the
+//!   caller says.
+
+#[cfg(feature = "run")]
+pub mod run;
 
 /// blaze's `sys/process` module for wasm32-wasip1 build scripts.
 pub const STD_PROCESS: &str = include_str!("../std/process.rs");
