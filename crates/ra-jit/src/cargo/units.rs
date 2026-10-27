@@ -150,6 +150,21 @@ impl Record {
         serde_json::from_str(&text).ok()
     }
 
+    /// The record of the unit `id` that wrote a file to `out_dir`, and the directory of records
+    /// it is in: there, or in cargo's target directory when `out_dir` is in ra-jit's own and
+    /// the unit was one it was seeded with (`seed_own_target`), which cargo built.
+    pub(crate) fn described_or_seeded(out_dir: &Path, id: &str) -> Option<(Record, PathBuf)> {
+        let parts: Vec<_> = out_dir.components().collect();
+        let cargos = parts.iter().rposition(|it| it.as_os_str() == "rust-analyzer").map(|at| {
+            let parts = parts.iter().enumerate().filter(|(it, _)| *it != at);
+            parts.map(|(_, it)| it).collect::<PathBuf>()
+        });
+        [Some(out_dir.to_owned()), cargos].into_iter().flatten().find_map(|dir| {
+            let records = Record::dir_for(&dir);
+            Some((Record::described(&records, id)?, records))
+        })
+    }
+
     fn value(&self, flag: &str) -> Option<&str> {
         let at = self.args.iter().position(|it| it == flag)?;
         self.args.get(at + 1).map(String::as_str)
