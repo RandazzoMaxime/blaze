@@ -206,7 +206,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `Eat<&'1 mut I, F>: Iterator` needs `for<'a> F: FnMut(<&'1 mut I as LendingIterator>::Item<'a>)`,
   whose normalization needs `&'1 mut I: 'a`, so `'1: 'static` (rustc's "due to a current
   limitation of the type system"), and a type parameter that must outlive one is rustc's
-  codeless "does not live long enough". rust-analyzer gives a trait object
+  codeless "does not live long enough". A closure or coroutine is made where its creator's where
+  clauses hold, so they are proven again at its creation with its parent's arguments (rustc's
+  `prove_aggregate_predicates`): `for<'a> &'a S: 'a` needs `S: 'static` there, and a closure
+  of `negotiate<S>` is "`S` does not live long enough". rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
   (`fn(&mut dyn Write)` for `impl FnMut(&mut dyn Write)` holds).
