@@ -420,6 +420,9 @@ fn checkout(
 ) -> Checkout {
     let root = metadata.workspace_root.as_std_path();
     let asked_in = asked.flags.manifest_path.as_ref().map_or(cwd.to_owned(), |it| cwd.join(it));
+    // From the root of the checkout, as `project` is: the same build in a worktree of the
+    // repository is loaded by the same worker (docs/cargo.md).
+    let asked_in = asked_in.strip_prefix(root).map_or(asked_in.clone(), Path::to_owned);
     let project = programs.first().map(|it| super::state::package_dir(&it.package));
     let project = project.as_deref().unwrap_or(root);
     let config = WorkerConfig {
