@@ -553,6 +553,7 @@ fn main() {
     #[cfg(panic = "unwind")]
     println!("async_drops {:?}", cases::async_drops::run());
     println!("promoted_assoc_const {:?}", cases::promoted_assoc_const::run());
+    println!("promoted_value_qualifs {:?}", cases::promoted_value_qualifs::run());
     println!("offsets {:?}", cases::offsets::run());
     println!("backtraces {:?}", cases::backtraces::run());
     println!("inline_const_bindings {:?}", cases::inline_const_bindings::run());
