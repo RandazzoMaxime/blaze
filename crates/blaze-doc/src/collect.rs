@@ -884,7 +884,8 @@ impl Builder<'_> {
                     if let Some(name) = name {
                         implemented.insert(name);
                     }
-                    if assoc_hidden(db, assoc) {
+                    // An item the trait hides is hidden in every impl (serde's `deserialize_in_place`).
+                    if assoc_hidden(db, assoc) || trait_item.is_some_and(|it| assoc_hidden(db, it)) {
                         continue;
                     }
                     if members == Members::AssocTypes {
@@ -1237,8 +1238,12 @@ impl Builder<'_> {
 
     /// rustdoc's "Implementations on Foreign Types": an impl on a type that has a home outside
     /// the crate documented and the trait's crate, unless the trait is the standard library's.
+    /// An impl of a crate downstream is an implementor, as rustdoc's script adds it.
     fn on_foreign_type(&self, imp: Impl, trait_: hir::Trait) -> bool {
         let db = self.db;
+        if !self.allowed.contains(&imp.module(db).krate(db)) {
+            return false;
+        }
         let trait_krate = places::krate_of(db, ModuleDef::Trait(trait_));
         if trait_krate.is_some_and(|it| matches!(places::lang_crate_name(db, it), Some("core" | "alloc" | "std"))) {
             return false;
