@@ -114,6 +114,7 @@ mod imports;
 #[cfg(feature = "llvm")]
 mod llvm;
 mod neon;
+mod overlap;
 mod patch;
 mod places;
 #[cfg(feature = "llvm")]
@@ -2493,8 +2494,12 @@ const LARGE: usize = 50_000;
 /// dev-aws-6 nushell's `main`, of 35 780 instructions, took 75 ms of Cranelift with it and
 /// 47 ms with the single-pass one, on every edit to it; the largest functions of a cold build
 /// of nushell took 80 to 220 ms each. The single-pass allocator's code is larger and slower,
-/// which a function this large, a `main` or a big `match` run once, rarely pays for.
-const SINGLE_PASS: usize = 20_000;
+/// and it gives every value live across blocks a stack slot of its own: hir-ty's
+/// `<Ty as HirDisplay>::hir_fmt`, of 22 503 instructions and recursive, had a frame of 10.7 KB
+/// with it and 2.5 KB without, and hir-ide's `recursive_vars_2` overflowed its 2 MB stack. The
+/// largest functions of blaze's own hir-ide tests, up to 128 217 instructions, took at most
+/// 85 ms each with the usual one.
+const SINGLE_PASS: usize = 50_000;
 
 /// The most cases of a `match` lowered as a chain of comparisons for LLVM to make a `switch`
 /// of; a larger one, which a function Cranelift compiles after all would test one case at a
@@ -9557,6 +9562,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
         }
         let unmentioned = unmentioned_locals(body);
+        let mut shareable: Vec<(LocalId, ir::StackSlot)> = Vec::new();
         for (local, data) in body.locals.iter() {
             if self.locals.contains_idx(local)
                 || forwarded.contains_key(&local)
@@ -9596,6 +9602,23 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 continue;
             }
             let promoted = body.promoted_locals.iter().find(|it| it.0 == local);
+            // A slot of its own, which it may share with locals whose storage it never
+            // overlaps: see `overlap`.
+            if promoted.is_none()
+                && frame.is_none()
+                && !layout.is_unsized()
+                && layout.align.abi.bytes() <= 16
+            {
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    layout.size.bytes() as u32,
+                    layout.align.abi.bytes().trailing_zeros() as u8,
+                ));
+                let addr = self.builder.ins().stack_addr(ptr(), slot, 0);
+                self.locals.insert(local, LocalSlot { addr, borrowed: false });
+                shareable.push((local, slot));
+                continue;
+            }
             let addr = if let Some(&(_, expr)) = promoted {
                 let plain = self.is_plain(data.ty.as_ref());
                 match self.promoted_constant(body, expr, &layout, plain) {
@@ -9616,6 +9639,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             self.locals.insert(local, LocalSlot { addr, borrowed: false });
         }
+        self.note_shareable(body, &shareable, &forwarded);
         for (temp, to) in forwarded {
             self.locals.insert(temp, self.locals[to]);
         }
@@ -9907,7 +9931,20 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
         let ty = self.body.expect("MIR body").locals[local].ty.as_ref();
         let layout = self.layout(ty).expect("the layout of a local kept in a register");
-        let slot = LocalSlot { addr: self.stack_slot(&layout), borrowed: false };
+        let lazy = self.cg.frame_locals.as_ref().and_then(|it| it.lazy.get(&local).copied());
+        let addr = match lazy {
+            Some(at) if !layout.is_unsized() && layout.align.abi.bytes() <= 16 => {
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    layout.size.bytes() as u32,
+                    layout.align.abi.bytes().trailing_zeros() as u8,
+                ));
+                self.cg.frame_locals.as_mut().expect("the frame's locals").slots[at] = Some(slot);
+                self.builder.ins().stack_addr(ptr(), slot, 0)
+            }
+            _ => self.stack_slot(&layout),
+        };
+        let slot = LocalSlot { addr, borrowed: false };
         self.locals.insert(local, slot);
         slot
     }
@@ -12087,6 +12124,54 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let value = self.builder.ins().iconst(types::I32, number as i64);
         self.builder.ins().store(MEM, value, addr, 0);
         Ok(Some(addr))
+    }
+
+    /// Tells `overlap` which of the slots of `shareable` and of the locals kept in registers
+    /// may hold a value at once: those of two locals whose storage may overlap, a temporary
+    /// written to a binding's slot (`forwarded`) counting as part of the binding.
+    fn note_shareable(
+        &mut self,
+        body: &MirBody<'_>,
+        shareable: &[(LocalId, ir::StackSlot)],
+        forwarded: &FxHashMap<LocalId, LocalId>,
+    ) {
+        // A local kept in a register gets its slot later, if ever: see `local_slot`.
+        let mut registers: Vec<LocalId> = self.registers.keys().copied().collect();
+        registers.sort_unstable_by_key(|it| it.into_raw().into_u32());
+        let count = shareable.len() + registers.len();
+        if count < 2 {
+            return;
+        }
+        let at: FxHashMap<LocalId, usize> =
+            shareable.iter().enumerate().map(|(at, &(local, _))| (local, at)).collect();
+        // Each local with the slot it is kept in, by the slot's index.
+        let mut members: Vec<(LocalId, usize)> =
+            shareable.iter().enumerate().map(|(at, &(local, _))| (local, at)).collect();
+        let lazy: FxHashMap<LocalId, usize> = registers
+            .iter()
+            .enumerate()
+            .map(|(at, &local)| (local, shareable.len() + at))
+            .collect();
+        members.extend(registers.iter().map(|local| (*local, lazy[local])));
+        for (&temp, to) in forwarded {
+            if let Some(&slot) = at.get(to) {
+                members.push((temp, slot));
+            }
+        }
+        let locals: Vec<LocalId> = members.iter().map(|it| it.0).collect();
+        let storage = body.frame_storage_conflicts(&locals);
+        let mut conflicts = rustc_index::bit_set::BitMatrix::new(count, count);
+        for (a, &(_, slot_a)) in members.iter().enumerate() {
+            for (b, &(_, slot_b)) in members.iter().enumerate().skip(a + 1) {
+                if slot_a != slot_b && storage.conflict(a, b) {
+                    conflicts.insert(slot_a, slot_b);
+                    conflicts.insert(slot_b, slot_a);
+                }
+            }
+        }
+        let mut slots: Vec<Option<ir::StackSlot>> = shareable.iter().map(|it| Some(it.1)).collect();
+        slots.resize(count, None);
+        self.cg.frame_locals = Some(overlap::FrameLocals { slots, conflicts, lazy });
     }
 
     /// Notes the locals a debugger can be told of: the ones written with a name whose value
