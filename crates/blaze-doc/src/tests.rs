@@ -12,7 +12,7 @@ use crate::{
 
 const FIXTURE: &str = r#"
 //- proc_macros: identity, derive_identity, mirror
-//- minicore: sized, copy, clone, derive, option, iterator, send, sync, unpin, non_null, cell, phantom_data, deref, deref_mut, slice, from
+//- minicore: sized, copy, clone, derive, option, ord, iterator, send, sync, unpin, non_null, cell, phantom_data, deref, deref_mut, slice, from
 //- /lib.rs crate:fixture@0.3.1,https://example.com/fixture.git deps:dep
 //! The fixture crate. See [`Thing`], [`shapes::Square`] and [`missing_item`].
 //!
@@ -165,6 +165,18 @@ macro_rules! make {
     () => {};
 }
 
+dep::declare! {
+    /// Declared by a macro of another crate, where rustc reports no lint: [Foreign].
+    Declared
+}
+macro_rules! declare_here {
+    ($(#[doc = $doc:literal])* $name:ident) => { $(#[doc = $doc])* pub struct $name; };
+}
+declare_here! {
+    /// Declared by a macro of this crate: [Homegrown].
+    DeclaredHere
+}
+
 #[deprecated(since = "1.0", note = "use `free`")]
 pub fn old() {}
 
@@ -183,6 +195,14 @@ pub trait Each {
         Self: Sized,
     {
     }
+    /// A bound of a trait the solver looks up impls of, after one that holds, as
+    /// `Iterator::max` has it.
+    fn least(self)
+    where
+        Self: Sized,
+        Self::Item: Ord,
+    {
+    }
     /// A higher-ranked bound, which every item meets.
     fn borrowed(&self)
     where
@@ -193,6 +213,16 @@ pub trait Each {
 /// Yields squares, which are not `Copy`.
 pub struct Squares;
 impl Each for Squares {
+    type Item = shapes::Square;
+}
+/// Yields squares too, over a parameter with a bound of the impl's own.
+pub struct Finds<A>(A);
+impl<A: Clone> Each for Finds<A> {
+    type Item = shapes::Square;
+}
+/// Yields squares from what it borrows, an impl of lifetimes alone.
+pub struct Borrows<'a>(&'a u8);
+impl<'a> Each for Borrows<'a> {
     type Item = shapes::Square;
 }
 /// Yields helpers, not `Copy` either, though their crate could make them so.
@@ -206,17 +236,20 @@ impl Each for Helpers {
 pub struct Square;
 
 impl Square {
-    /// Its side.
+    /// Its side. Unresolved, and `cfg(doc)` holds: [Loud].
+    #[cfg_attr(not(doc), allow(rustdoc::broken_intra_doc_links))]
     pub const SIDE: u32 = 1;
 }
 
 mod corner {
-    /// Documented in `shapes`, which re-exports it publicly.
+    #![allow(rustdoc::broken_intra_doc_links)]
+    /// Documented in `shapes`, which re-exports it publicly. Unresolved, allowed: [Quiet].
     pub struct Corner;
 }
 pub use corner::Corner;
 
 //- /dep.rs crate:dep@1.2.0,https://example.com/dep.git
+#![doc(html_root_url = "https://docs.rs/dep/1.2.0")]
 /// Helps.
 pub struct Helper;
 
@@ -232,17 +265,33 @@ mod deep {
     pub struct Deep;
 }
 pub use deep::Deep;
+
+/// Declares a unit struct with the docs given.
+#[macro_export]
+macro_rules! declare {
+    ($(#[doc = $doc:literal])* $name:ident) => { $(#[doc = $doc])* pub struct $name; };
+}
 "#;
 
 fn load() -> (RootDatabase, Model) {
+    load_with(false, false)
+}
+
+/// The fixture documented; `dep_for_tests` makes `dep` a dependency of its tests alone.
+fn load_with(no_deps: bool, dep_for_tests: bool) -> (RootDatabase, Model) {
     let mut db = RootDatabase::with_files(FIXTURE);
-    let fixture = Crate::all(&db)
-        .into_iter()
-        .find(|it| crate::crate_name(&db, *it) == "fixture")
-        .expect("the fixture crate");
-    let crates = crate::crates_to_document(&db, &[Asked { krate: fixture, private: false }], false);
+    let named = |name: &str| {
+        Crate::all(&db).into_iter().find(|it| crate::crate_name(&db, *it) == name).expect(name)
+    };
+    let (fixture, dep) = (named("fixture"), named("dep"));
+    let mut test_only = crate::TestOnly::default();
+    if dep_for_tests {
+        test_only.insert((fixture, dep));
+    }
+    let asked = [Asked { krate: fixture, private: false }];
+    let crates = crate::crates_to_document(&db, &asked, no_deps, &test_only);
     crate::set_cfg_doc(&mut db, &crates);
-    let model = crate::model(&db, crates);
+    let model = crate::model(&db, crates, test_only);
     (db, model)
 }
 
@@ -479,9 +528,11 @@ fn provided_methods_that_cannot_apply_are_left_out() {
         each.expect("impl Each").items.iter().map(|it| it.name.clone()).collect()
     };
     assert_eq!(members("fixture::Squares"), ["Item", "borrowed"], "a square is not Copy");
+    assert_eq!(members("fixture::Finds"), ["Item", "borrowed"], "nor through `A: Clone`");
+    assert_eq!(members("fixture::Borrows"), ["Item", "borrowed"], "nor through lifetimes");
     assert_eq!(
         members("fixture::Helpers"),
-        ["Item", "copied", "borrowed"],
+        ["Item", "copied", "least", "borrowed"],
         "dep may make a helper Copy"
     );
 }
@@ -524,6 +575,10 @@ fn unresolved_links_warn() {
         "{messages:?}"
     );
     assert!(messages.iter().any(|it| it.contains("unresolved link to `Nope`")), "{messages:?}");
+    assert!(messages.iter().any(|it| it.contains("unresolved link to `Loud`")), "{messages:?}");
+    assert!(!messages.iter().any(|it| it.contains("`Quiet`")), "allowed: {messages:?}");
+    assert!(messages.iter().any(|it| it.contains("`Homegrown`")), "{messages:?}");
+    assert!(!messages.iter().any(|it| it.contains("`Foreign`")), "another's macro: {messages:?}");
     assert!(model.warnings.iter().all(|it| it.krate == "fixture"), "dependencies do not warn");
 }
 
@@ -566,6 +621,30 @@ fn writes_pages_sources_and_search() {
     assert!(index.contains("let thing = fixture::Thing::new(1);"), "the example is there: {index}");
     assert!(!index.contains("let hidden"), "hidden example lines are not");
     let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_crate_not_documented_is_linked_at_its_html_root_url() {
+    let (_db, model) = load_with(true, false);
+    let out = std::env::temp_dir().join(format!("blaze-doc-test-remote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    crate::html::write(&model, &out).expect("written");
+    assert!(!out.join("dep").exists(), "--no-deps");
+    let thing = std::fs::read_to_string(out.join("fixture/struct.Thing.html")).unwrap();
+    assert!(
+        thing.contains(
+            "href=\"https://docs.rs/dep/1.2.0/dep/deep/struct.Deep.html\" title=\"struct dep::deep::Deep\""
+        ),
+        "where it is declared, which its docs redirect from"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_dependency_of_tests_alone_is_not_documented() {
+    let (_db, model) = load_with(false, true);
+    let names: Vec<&str> = model.crates.iter().map(|it| it.name.as_str()).collect();
+    assert!(!names.contains(&"dep"), "{names:?}");
 }
 
 /// The text of an HTML page, its tags dropped.
@@ -624,4 +703,52 @@ fn deref_methods_follow_the_chain() {
         .collect();
     assert_eq!(sections, [("Chain".to_owned(), vec!["read"]), ("[u8]".to_owned(), vec!["len"])]);
     assert_eq!(bytes.impls.deref[1].anchor, "deref-methods-%5Bu8%5D");
+}
+
+#[test]
+fn one_crate_of_a_name_is_documented_as_cargo_picks_it() {
+    let reached = |crates: &[(&str, u32, &str, bool)]| {
+        crates
+            .iter()
+            .map(|&(name, krate, version, target)| crate::Reached {
+                name: name.to_owned(),
+                krate,
+                version: version.to_owned(),
+                target,
+            })
+            .collect()
+    };
+    let kept: Vec<u32> = crate::one_per_name(reached(&[
+        ("bitflags", 1, "1.3.2", true),
+        ("syn", 2, "2.0.90", false),
+        ("quote", 3, "1.0.40", false),
+        ("bitflags", 4, "2.6.0", true),
+        ("syn", 5, "1.0.109", false),
+        ("memchr", 6, "2.7.4", false),
+        ("memchr", 7, "2.6.0", true),
+        ("rand", 8, "0.9.0-beta.1", true),
+        ("rand", 9, "0.9.0", true),
+    ]))
+    .into_iter()
+    .map(|it| it.krate)
+    .collect();
+    // Both `syn`s are the host's (a proc macro's), so neither; the older `memchr` is the only
+    // one built for the target.
+    assert_eq!(kept, [4, 3, 7, 9]);
+}
+
+#[test]
+fn a_crate_only_a_crate_left_out_depends_on_is_left_out() {
+    // 0 is asked for; 1 is the older of two crates of a name, left out, and 3 only it uses.
+    let deps = |it: u32| match it {
+        0 => vec![1, 2],
+        1 => vec![3, 4],
+        2 => vec![4, 5],
+        5 => vec![2],
+        _ => vec![],
+    };
+    let kept = [2, 3, 4, 5].into_iter().collect();
+    let mut linked: Vec<u32> = crate::still_reached(&[0], &kept, deps).into_iter().collect();
+    linked.sort();
+    assert_eq!(linked, [2, 4, 5]);
 }

@@ -32,7 +32,7 @@ const OAUTH_COOKIE = '__Secure-blaze_gh_oauth';
 const SESSION_COOKIE = '__Secure-blaze_session';
 const OAUTH_MAX_AGE = 600;
 const SESSION_MAX_AGE = 30 * 86400;
-const USER_AGENT = 'ra-jit-site';
+const USER_AGENT = 'blaze-site';
 /** The logout form is one `next` field. */
 const LOGOUT_MAX = 4096;
 

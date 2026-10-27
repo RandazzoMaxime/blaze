@@ -1,4 +1,4 @@
-//! The ra-jit site's renderer: a world (the site's content as Flecs entities, comments as entities under their
+//! The blaze site's renderer: a world (the site's content as Flecs entities, comments as entities under their
 //! blocks) and a viewer in, one page's HTML out, byte for byte what the TS renderer in site/render/ writes. Sans-IO:
 //! no files, no clock and no state outside the `Site` value, so it runs at build time natively and per request in any
 //! wasm host. README.md has the architecture.

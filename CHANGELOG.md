@@ -142,6 +142,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again: ripgrep from nothing 19.4 s to 9.9 s on dev-aws-8.
+- Live edits on Windows x86-64: `ra-jit-live` takes patches in a running PE program, named by
+  the GUID of its PDB, and registers their unwind tables, and the daemon lays a patch of a PE
+  executable out for it. An executable a program runs is spliced through a copy put in its
+  place, as on Unix, instead of being linked again; the daemon wakes the program through a
+  named event; and `ra_jit_live::edit` reaches the daemon, so `demo/life`'s editor builds as you
+  type. life's edit to running is 26.6 ms at p50 (`socket`) on a Windows 11 desktop
+  ([live.md](docs/live.md#latency-under-typing)). A static with another value still asks for a
+  restart.
+
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
@@ -535,6 +544,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   working. Every page, script, stylesheet, image, narration file and form sits under `/blaze`
   (`Served` on `site` in `site/content/site.flecs`); pages carry a canonical URL and Open Graph
   tags, `/blaze/sitemap.xml` lists them, and `/blaze/install.sh` serves `install.sh`.
+- The site says blaze, not ra-jit: page titles, the top bar, `og:site_name`, the home page, the
+  charter, the RFCs, `/bench` and `/updates`, and their narration, voiced again. ra-jit is left
+  only where it is still the literal name: the `ra-jit-live` crate and `#[ra_jit::cache]`, and
+  the line that blaze was called ra-jit until 2026-10-24 and `cargo ra-jit` still works.
+  Comments keep their pages and blocks (ids unchanged).
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
@@ -931,7 +945,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A guarded match nested inside another match arm's guard preserves the enclosing guard's
   binding references, including with or-patterns. Later reads in the outer guard no longer
   use uninitialized by-value bindings, which could produce wrong results or a crash.
-
+- `cargo blaze doc` documents the crates cargo does: of two of one name the one cargo keeps
+  (none of a proc macro's two `syn`s), nothing only a left-out one or a test needs. It links
+  a crate not documented at its `html_root_url`, finds blanket impls of every crate linked and
+  applies them as solved in the documented crate, leaves out more provided methods that
+  cannot apply, warns of a broken link where rustdoc does (lint levels, `cfg_attr`, no
+  warning in another crate's macro), and documents what a macro expands to past
+  rust-analyzer's token limit (biome_wasm's 2271 types). Against `cargo doc`, biome goes from
+  93.5% to 99.0% of the pages, helix from 98.2% to 99.0% of the members and impls; docs/doc.md
+  has all five bench apps.
 - The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
   rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
   1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives
@@ -997,6 +1019,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A patch asks rustc's executable whether it has a function of a name once per name, where
   each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
   where they took 2.2–2.8 s (cargo 2.3 s).
+- On Windows x86-64 (MSVC), `cargo blaze build` and `run` rebuild through the daemon and print
+  `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
+  `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
+  configuration names, and closes an existing directory of its own that others can enter, as
+  on Unix. Live edits of a running program are still macOS and Linux only.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

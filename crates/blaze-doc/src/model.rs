@@ -241,6 +241,9 @@ pub struct ItemRef {
     /// The path a link's title names when it is not the page's: where an item of another crate
     /// is declared, as rustdoc names what the crate linking did not inline.
     pub declared: Option<String>,
+    /// An item of a crate not documented here that says where its docs are
+    /// (`#![doc(html_root_url)]`): that URL, ending in `/`, which `page` is under.
+    pub remote: Option<String>,
 }
 
 impl ItemRef {

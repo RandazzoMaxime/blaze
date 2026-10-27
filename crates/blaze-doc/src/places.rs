@@ -21,7 +21,10 @@ use hir_def::{
 use ide_db::{RootDatabase, base_db::LangCrateOrigin};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::model::{Code, ItemRef, Kind, Target};
+use crate::{
+    TestOnly,
+    model::{Code, ItemRef, Kind, Target},
+};
 
 /// A crate whose documentation is written.
 #[derive(Debug, Clone)]
@@ -66,8 +69,12 @@ pub(crate) struct Places {
     canonical: FxHashMap<ModuleDef, (usize, usize)>,
     /// Each crate's own page of the items it places, inlined ones of other crates included.
     own: Vec<FxHashMap<ModuleDef, usize>>,
-    /// The path of an item of `std`, `core` or `alloc` on doc.rust-lang.org, found once.
-    sysroot: Mutex<FxHashMap<ModuleDef, Option<ItemRef>>>,
+    /// The page of an item of a crate not documented here, found once: on doc.rust-lang.org for
+    /// the sysroot's crates, under its `html_root_url` for a crate that has one.
+    elsewhere: Mutex<FxHashMap<ModuleDef, Option<ItemRef>>>,
+    /// Each crate not documented here: its `html_root_url`.
+    roots: Mutex<FxHashMap<Crate, Option<String>>>,
+    test_only: TestOnly,
 }
 
 impl Places {
@@ -82,6 +89,7 @@ impl Places {
             anchor: None,
             descr: None,
             declared: None,
+            remote: None,
         }
     }
 
@@ -207,12 +215,34 @@ impl<'a> Linking<'a> {
             return Some(found);
         }
         let krate = krate_of(db, def)?;
-        let name = lang_crate_name(db, krate)?;
-        if let Some(found) = self.sysroot.lock().unwrap().get(&def) {
+        if self.crates.iter().any(|it| it.krate == krate) {
+            return None;
+        }
+        if let Some(found) = self.elsewhere.lock().unwrap().get(&def) {
             return found.clone();
         }
-        let found = sysroot_ref(db, def, name);
-        self.sysroot.lock().unwrap().insert(def, found.clone());
+        let found = match lang_crate_name(db, krate) {
+            Some(name) => defined_ref(db, def, name),
+            // rustdoc's `extern_location`: a crate with no docs here is linked where its
+            // `html_root_url` says, else not at all.
+            None => defined_ref(db, def, &crate::crate_name(db, krate)).map(|mut it| {
+                it.remote = self.html_root_url(db, krate);
+                it
+            }),
+        };
+        self.elsewhere.lock().unwrap().insert(def, found.clone());
+        found
+    }
+
+    fn html_root_url(&self, db: &RootDatabase, krate: Crate) -> Option<String> {
+        if let Some(found) = self.roots.lock().unwrap().get(&krate) {
+            return found.clone();
+        }
+        let found = match krate.root_module(db).definition_source(db).value {
+            hir::ModuleSource::SourceFile(file) => crate::attrs::html_root_url(&file),
+            _ => None,
+        };
+        self.roots.lock().unwrap().insert(krate, found.clone());
         found
     }
 }
@@ -226,6 +256,7 @@ pub(crate) fn primitive(name: &str) -> ItemRef {
         anchor: None,
         descr: None,
         declared: None,
+        remote: None,
     }
 }
 
@@ -270,10 +301,10 @@ pub(crate) fn lang_crate_name(db: &RootDatabase, krate: Crate) -> Option<&'stati
     }
 }
 
-/// The page of an item of a sysroot crate where it is defined, as rustdoc links it: under a
-/// private module that is a page doc.rust-lang.org redirects to where it is exported. `None`
-/// for an item the crate does not export, or only hidden.
-fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<ItemRef> {
+/// The page of an item of a crate not documented here where it is defined, as rustdoc links
+/// it: under a private module, a page the crate's docs redirect to where it is exported.
+/// `None` for an item the crate does not export, or only hidden.
+fn defined_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<ItemRef> {
     let kind = kind_of(db, def)?;
     if let ModuleDef::Module(it) = def
         && it.is_crate_root(db)
@@ -287,6 +318,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             anchor: None,
             descr: None,
             declared: None,
+            remote: None,
         });
     }
     let name = def.name(db)?.as_str().to_owned();
@@ -302,6 +334,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             anchor: None,
             descr: None,
             declared: None,
+            remote: None,
         });
     }
     // The module whose scope declares it; a module's parent for a module.
@@ -359,6 +392,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
         anchor: None,
         descr: None,
         declared: None,
+        remote: None,
     })
 }
 
@@ -405,7 +439,7 @@ pub(crate) fn macro_kind(db: &RootDatabase, it: Macro) -> Option<Kind> {
 }
 
 /// Places every item of every crate, in parallel over the crates.
-pub(crate) fn place(db: &RootDatabase, crates: Vec<Documented>) -> Places {
+pub(crate) fn place(db: &RootDatabase, crates: Vec<Documented>, test_only: TestOnly) -> Places {
     use rayon::prelude::*;
     let placed: Vec<Vec<Placed>> = crates
         .par_iter()
@@ -448,7 +482,9 @@ pub(crate) fn place(db: &RootDatabase, crates: Vec<Documented>) -> Places {
         placed,
         canonical: canonical.into_iter().map(|(def, (_, at))| (def, at)).collect(),
         own,
-        sysroot: Mutex::default(),
+        elsewhere: Mutex::default(),
+        roots: Mutex::default(),
+        test_only,
     }
 }
 
@@ -826,50 +862,64 @@ impl UseAttrs {
     }
 }
 
-/// The crates a documented crate's docs may link to and list impls from: itself and every crate
-/// it depends on, directly or not.
-pub(crate) fn upstream(db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
-    let mut seen = FxHashSet::default();
-    let mut stack = vec![krate];
-    while let Some(it) = stack.pop() {
-        if seen.insert(it) {
-            stack.extend(it.dependencies(db).into_iter().map(|dep| dep.krate));
-        }
-    }
-    seen
-}
-
-/// The crates linked into `krate`: its dependencies, transitively. Of the sysroot's crates,
-/// which rust-analyzer makes dependencies of every crate, `core` is linked; `std` and `alloc`
-/// unless the crate is `#![no_std]`, `proc_macro` for a crate of procedural macros, and any of
-/// them the crate names with `extern crate`.
-pub(crate) fn linked(db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
-    let mut seen = FxHashSet::default();
-    let mut stack = vec![krate];
-    while let Some(it) = stack.pop() {
-        if !seen.insert(it) {
-            continue;
-        }
-        let def_map = hir_def::nameres::crate_def_map(db, it.into());
-        let named: Vec<Crate> = it
-            .root_module(db)
-            .extern_crate_decls(db)
-            .into_iter()
-            .filter_map(|it| it.resolved_crate(db))
-            .collect();
-        for dep in it.dependencies(db) {
-            let linked = match lang_crate_name(db, dep.krate) {
-                Some("std" | "alloc") => !def_map.is_no_std(),
-                Some("proc_macro") => def_map.is_proc_macro(),
-                Some("test") => false,
-                _ => true,
-            };
-            if linked || named.contains(&dep.krate) {
-                stack.push(dep.krate);
+impl Places {
+    /// The crates a documented crate's docs may link to and list impls from: itself and every
+    /// crate it depends on, directly or not, but for its tests alone.
+    pub(crate) fn upstream(&self, db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
+        let mut seen = FxHashSet::default();
+        let mut stack = vec![krate];
+        while let Some(it) = stack.pop() {
+            if seen.insert(it) {
+                stack.extend(
+                    it.dependencies(db)
+                        .into_iter()
+                        .map(|dep| dep.krate)
+                        .filter(|dep| !self.test_only.contains(&(it, *dep))),
+                );
             }
         }
+        seen
     }
-    seen
+
+    /// The crates linked into `krate`: its dependencies, transitively, but not those for its
+    /// tests alone nor those of a crate of procedural macros it uses, which rustc loads as the
+    /// compiler's own. Of the sysroot's crates, which rust-analyzer makes dependencies of every
+    /// crate, `core` is linked; `std` and `alloc` unless the crate is `#![no_std]`, `proc_macro`
+    /// for a crate of procedural macros, and any of them the crate names with `extern crate`.
+    pub(crate) fn linked(&self, db: &RootDatabase, krate: Crate) -> FxHashSet<Crate> {
+        let mut seen = FxHashSet::default();
+        let mut stack = vec![krate];
+        while let Some(it) = stack.pop() {
+            if !seen.insert(it) {
+                continue;
+            }
+            let def_map = hir_def::nameres::crate_def_map(db, it.into());
+            if it != krate && def_map.is_proc_macro() {
+                continue;
+            }
+            let named: Vec<Crate> = it
+                .root_module(db)
+                .extern_crate_decls(db)
+                .into_iter()
+                .filter_map(|it| it.resolved_crate(db))
+                .collect();
+            for dep in it.dependencies(db) {
+                if self.test_only.contains(&(it, dep.krate)) {
+                    continue;
+                }
+                let linked = match lang_crate_name(db, dep.krate) {
+                    Some("std" | "alloc") => !def_map.is_no_std(),
+                    Some("proc_macro") => def_map.is_proc_macro(),
+                    Some("test") => false,
+                    _ => true,
+                };
+                if linked || named.contains(&dep.krate) {
+                    stack.push(dep.krate);
+                }
+            }
+        }
+        seen
+    }
 }
 
 /// The crate of what a type is: an ADT's, a `dyn Trait`'s trait's; `None` for a builtin type,
