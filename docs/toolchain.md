@@ -34,9 +34,46 @@ the standard library is part of a compiler.
   `blaze toolchain --path` prints its directory.
 - **Who uses it:** cargo, rustc and the daemon that blaze starts (`CARGO`, `RUSTC`, `RUSTDOC`,
   `PATH` for its own processes). The user's `cargo`, `rustc` and pins are untouched.
-- **Bumps:** on blaze's schedule, deliberately, with `harness/toolchain_bump.py`: it moves the
-  pin, re-vendors `rustc_abi` and the proc-macro server, regenerates the pins and answers, and
-  the corpus difftest (`harness/difftest.py corpus`) and the edit harnesses are the gate.
+- **Bumps:** every day, to the newest nightly, by a workflow, with the merge gate and the
+  release train as the gate ([The daily bump](#the-daily-bump)).
+
+## The daily bump
+
+blaze tracks the latest Rust nightly. `.github/workflows/toolchain-bump.yaml` runs every day at
+05:40 UTC (nightlies are published at about 00:00 to 02:00 UTC), and by hand with a date
+(`gh workflow run toolchain-bump.yaml -f date=2026-11-02`):
+
+1. On the branch `toolchain/bump` (the open bump's with main merged in, or a new one from main),
+   `harness/toolchain_bump.py` pins the newest nightly whose manifest has every component blaze
+   needs on every host it ships for. It writes `harness/toolchain` and `pins.txt`, re-vendors
+   `vendor/rustc_abi` and the proc-macro server from rust-lang/rust at the new commit, and
+   moves the pin in `install.sh`, the server's manifest, `Cargo.toml` and the flake.
+2. `harness/answers.py --write` on Linux x86-64, Linux AArch64 and macOS arm64, since the
+   target specs depend on the host rustc was built for; the three are merged into
+   `answers/rustc.json`.
+3. The pull request `toolchain: pin nightly-YYYY-MM-DD` is opened, or updated when one is open,
+   which runs the merge gate, and the release train is started on the branch. The train is
+   what a bump needs beyond the gate: the corpus difftest with `--layouts` and every other
+   harness on four platforms, rustc's borrow-check UI tests in both modes against the new
+   nightly's own verdicts (at its commit, `--min-pass` as the floor), `fork alone` and
+   `cargo ra-jit` on real projects.
+4. When the train finishes, `harness/stdcount.py` compiles the standard library with the bump's
+   build and with main's, each against its own nightly's `rust-src`, and counts the functions
+   each refuses. The verdict (`.github/scripts/toolchain_bump_ci.py verdict`):
+   - **green**: no job or harness red that is green on main's newest finished train, and no
+     more std refusals than main: `gh pr merge --auto`, so the merge queue lands it once the
+     gate passes, and the next release of blaze carries the new pin. A job red on main too is
+     listed and not counted against the bump; the train's own issue covers it.
+   - **red**: a comment on the pull request with what broke, and the issue
+     "Toolchain bump to <date> is blocked", opened or commented on and retitled to the
+     newest date, with how many days main's pin is behind. The pull request stays open.
+5. A step before the pull request that fails (a vendoring conflict, no usable nightly in two
+   weeks, a conflict merging main into the bump) opens or comments on the same issue with what
+   failed, and so does a bump open for a day without merging. Nothing is skipped quietly.
+
+Fixes for what a nightly breaks (layouts, the ABI, std's source, intrinsics, borrow-check
+verdicts) are pushed to `toolchain/bump`. The next day's run merges main into it and moves it to
+that day's nightly from there, so they are kept, and the train runs again.
 
 ## What it means for a project
 
@@ -66,6 +103,5 @@ part of blaze, and the toolchain is blaze alone.
   upstream download once rustc is gone.
 - [#403](https://github.com/indexable-inc/blaze/issues/403): shrink the download as each
   no-rustc step removes a piece (`cargo`, `rustc`, `rust-std`), down to blaze alone.
-- [#404](https://github.com/indexable-inc/blaze/issues/404): the bump, on blaze's schedule:
-  `harness/toolchain_bump.py` with the corpus difftest and edit harnesses as the gate, the
-  `blaze-<date>` name moving with it.
+- [#404](https://github.com/indexable-inc/blaze/issues/404): the bump, every day
+  ([The daily bump](#the-daily-bump)), the `blaze-<date>` name moving with it.
