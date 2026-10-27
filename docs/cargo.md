@@ -122,9 +122,12 @@ build, which says which and why; nothing is handed to cargo or rustc:
 
 What blaze does not build yet fails the same way, saying what: the targets `--bins`,
 `--examples`, `--tests`, `--benches` and `--all-targets` pick, several `--target`s,
-`--target-dir`, `--message-format`, `-Z`, and `--build-plan` and `--unit-graph`. A build of
-libraries alone (`--lib`, or a workspace with no program) is the daemon's check of them:
-blaze writes no library for cargo, and says what it finds.
+`--target-dir`, `--message-format`, `-Z`, and `--build-plan` and `--unit-graph`, and a
+library whose crate types include `cdylib` or `staticlib` when the build would write that file
+(a plain `build`, or `--lib`): blaze does not link one yet, and says which
+([#262](https://github.com/indexable-inc/blaze/issues/262)). A build of other libraries alone
+(`--lib`, or a workspace with no program) is the daemon's check of them: blaze writes no
+`rlib` for cargo, and says what it finds.
 
 The build is the daemon's: its worker loads the workspace, builds and links the programs, and
 answers once they are linked. The next build asks the same worker, which compiles the
