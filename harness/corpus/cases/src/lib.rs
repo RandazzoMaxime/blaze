@@ -9,16 +9,16 @@
     feature(deref_patterns, c_variadic_int128, portable_simd, core_intrinsics, f16, f128, f16b, unsized_fn_params)
 )]
 #![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
-// The intrinsics `simd_wasm_lowered` calls directly, so that ra-jit compiles them rather than
-// linking `core::arch`'s functions of rustc's.
+// The intrinsics `simd_wasm_lowered` and `x86_lowered` call directly, so that ra-jit compiles
+// them rather than linking `core::arch`'s functions of rustc's.
 #![cfg_attr(
-    all(feature = "nightly", target_arch = "wasm32"),
+    all(feature = "nightly", any(target_arch = "wasm32", target_arch = "x86_64")),
     feature(link_llvm_intrinsics, simd_ffi)
 )]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
 #![cfg_attr(
     all(feature = "nightly", target_arch = "x86_64"),
-    feature(stdarch_x86_avx512vp2intersect)
+    feature(stdarch_x86_avx512vp2intersect, stdarch_x86_avx512_f16, stdarch_x86_avx512_bf16)
 )]
 // The `core::arch::aarch64` functions `neon_intrinsics` calls that are not stable yet.
 #![cfg_attr(
@@ -38,6 +38,10 @@ pub mod stabilized;
 
 #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
 pub mod avx512;
+#[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+pub mod x86_halves;
+#[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+pub mod x86_lowered;
 
 pub mod scalars {
     pub fn wide_mul(a: u128, b: u128, c: i128) -> (u128, bool, Option<i128>, Option<u128>) {
@@ -1579,6 +1583,35 @@ pub mod soft_floats {
         let (a, b) = (core::num::f16b::from_bits(a), core::num::f16b::from_bits(b));
         (b.to_bits(), a == b, a.partial_cmp(&b), f32::from(a).to_bits(), format!("{a:?}"))
     }
+    /// x86-64's LLVM receives an `f16b` parameter as the `f32` it widens to and narrows it
+    /// back by `__truncsfbf2`, which quiets a signalling NaN; one made and moved within a block
+    /// keeps its bits. The `f16b`s are parameters here, or made and used in one block.
+    #[cfg(target_arch = "x86_64")]
+    pub fn brain_received(
+        a: core::num::f16b,
+        b: core::num::f16b,
+    ) -> (u16, bool, Option<core::cmp::Ordering>, u32, String, String, String) {
+        let formatted = (format!("{a:?}"), format!("{a:e}"), format!("{b:E}"));
+        (b.to_bits(), a == b, a.partial_cmp(&b), f32::from(a).to_bits(), formatted.0, formatted.1, formatted.2)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn brain_of(a: u16, b: u16) -> (u16, bool, Option<core::cmp::Ordering>, u32, String, String, String) {
+        brain_received(core::num::f16b::from_bits(a), core::num::f16b::from_bits(b))
+    }
+    #[cfg(target_arch = "x86_64")]
+    fn passed(a: core::num::f16b) -> core::num::f16b {
+        a
+    }
+    /// The bits of an `f16b` made, cloned, defaulted, and passed through a call (a parameter,
+    /// rounded there).
+    #[cfg(target_arch = "x86_64")]
+    pub fn brain_moves(bits: u16) -> [u16; 4] {
+        use core::mem::transmute;
+        let made = core::num::f16b::from_bits(bits);
+        unsafe {
+            [transmute(made), transmute(made.clone()), transmute(core::num::f16b::default()), transmute(passed(made))]
+        }
+    }
     pub fn pair(a: f16, b: f128) -> (f16, f128, Option<f16>) {
         (b as f16, a as f128, if a > 0.0 { Some(-a) } else { None })
     }
@@ -1653,6 +1686,16 @@ pub mod soft_floats {
         #[cfg(target_arch = "aarch64")]
         for (&a, &b) in HALVES.iter().zip(HALVES.iter().rev()) {
             out += &format!("{:?} ", brain(a, b));
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            const BRAINS: [u16; 14] = [
+                0x7f81, 0xff81, 0x7fa0, 0x7fbf, 0x7fc1, 0xffc0, 0x7f80, 0xff80, 0x0001, 0x8000, 0x3f80,
+                0x7f7f, 0x4148, 0x0000,
+            ];
+            for (&a, &b) in BRAINS.iter().chain(&HALVES).zip(BRAINS.iter().chain(&HALVES).rev()) {
+                out += &format!("{:?} {:x?} ", brain_of(a, b), brain_moves(a));
+            }
         }
         for (single, double) in SINGLES.iter().zip(DOUBLES.iter().cycle()) {
             out += &format!("{:x?} ", halves_of(f32::from_bits(*single), f64::from_bits(*double)));

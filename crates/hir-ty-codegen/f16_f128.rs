@@ -7,7 +7,8 @@
 //!   compiler-builtins' `__extendhfsf2`, `__truncsfhf2` and `__truncdfhf2`; its sign bit is
 //!   flipped or cleared in place. In an AArch64 function with the half-precision
 //!   instructions (`fp16`) its arithmetic, square root, rounding and `fma` are those
-//!   instructions, as LLVM selects them there;
+//!   instructions, as LLVM selects them there, and in an x86-64 function with AVX512-FP16 its
+//!   arithmetic is `vaddsh` and the like;
 //! - an `f128` is handed to compiler-builtins (`__addtf3`, `__lttf2`, `__fixtfsi`, ...) and
 //!   to C's functions of it: `long double`'s on AArch64 (`fmodl`, `sqrtl`, ...), `_Float128`'s
 //!   on x86-64 (`fmodf128`, `sqrtf128`, ...), the calls LLVM makes.
@@ -53,6 +54,16 @@ fn quad_floor(max: u128) -> u128 {
     if width <= 113 { max } else { max & !((1 << (width - 113)) - 1) }
 }
 
+/// Refuses `fma` of `f16`s in an x86-64 function with AVX512-FP16: LLVM picks among the
+/// `vfmadd132`, `213` and `231` forms by where its registers are, which decides which NaN of
+/// two comes out, and folds a negated operand into `vfmsub` or `vfnmadd` in some functions and
+/// not others.
+pub(super) fn half_fma_refused() -> CodegenError {
+    CodegenError::Unsupported(
+        "fma of f16 with AVX512-FP16, whose operand order LLVM picks by register allocation".into(),
+    )
+}
+
 const HALF_SIGN: i64 = 0x8000;
 const QUAD_SIGN: u128 = 1 << 127;
 
@@ -77,18 +88,25 @@ impl<'db> FunctionCx<'_, 'db> {
     /// LLVM then works on an `f16` with: in its own register, rounded once, a signalling NaN
     /// of either operand taking precedence over a quiet one.
     pub(super) fn half_precision(&self) -> bool {
-        self.cg.target.arch == Arch::Aarch64
-            && self.body.and_then(|it| it.owner.as_function()).is_some_and(|func| {
-                hir_ty::TargetFeatures::from_fn(self.cg.db, func).enables("fp16")
-            })
+        self.cg.target.arch == Arch::Aarch64 && self.function_enables("fp16")
     }
 
-    /// The half-precision `instruction` of `args`, passed from `h0` up, its result in `h0`.
+    /// Whether the function being compiled enables the target feature `feature`, itself or by
+    /// one that implies it.
+    pub(super) fn function_enables(&self, feature: &str) -> bool {
+        self.body
+            .and_then(|it| it.owner.as_function())
+            .is_some_and(|func| hir_ty::TargetFeatures::from_fn(self.cg.db, func).enables(feature))
+    }
+
+    /// The half-precision `instruction` of `args`, passed from `h0` up (`xmm0` up on x86-64),
+    /// its result in `h0` (`xmm0`).
     fn half_instruction(&mut self, instruction: &str, args: &[Value]) -> Value {
         let mut sig = self.cg.make_signature();
         sig.params.extend(args.iter().map(|_| AbiParam::new(types::F16)));
         sig.returns.push(AbiParam::new(types::F16));
-        let callee = self.cg.assembly(asm::half(instruction), &sig);
+        let text = if self.x86() { asm::x86_half(instruction) } else { asm::half(instruction) };
+        let callee = self.cg.assembly(text, &sig);
         let callee = self.cg.declare_func_in_func(callee, self.builder.func);
         let call = self.builder.ins().call(callee, args);
         self.builder.inst_results(call)[0]
@@ -98,15 +116,17 @@ impl<'db> FunctionCx<'_, 'db> {
         self.cg.target.arch == Arch::X86_64
     }
 
+    /// Whether the function being compiled is x86-64's with AVX512-FP16, whose instructions
+    /// LLVM works on an `f16` with there.
+    fn x86_half_precision(&self) -> bool {
+        self.x86() && self.function_enables("avx512fp16")
+    }
+
     /// Refuses an `f16` converted in a function with F16C (which AVX-512 implies): x86-64's
     /// LLVM converts it there by `vcvtph2ps` and `vcvtps2ph`, and works on it by AVX512-FP16's
     /// instructions where it has those, not by compiler-builtins.
     fn x86_soft_half(&self) -> Result<()> {
-        let converts = self
-            .body
-            .and_then(|it| it.owner.as_function())
-            .is_some_and(|func| hir_ty::TargetFeatures::from_fn(self.cg.db, func).enables("f16c"));
-        if converts {
+        if self.function_enables("f16c") {
             return Err(CodegenError::Unsupported(
                 "f16 in a function with F16C, which LLVM converts by its instructions".into(),
             ));
@@ -217,6 +237,11 @@ impl<'db> FunctionCx<'_, 'db> {
             };
             if let Some(mnemonic) = mnemonic.filter(|_| self.half_precision()) {
                 return Ok(self.half_instruction(&format!("{mnemonic} h0, h0, h1"), &[l, r]));
+            }
+            // AVX512-FP16's, operands in order: the first one's NaN where both are.
+            if let Some(mnemonic) = mnemonic.filter(|_| self.x86_half_precision()) {
+                let op = &mnemonic[1..];
+                return Ok(self.half_instruction(&format!("v{op}sh xmm0, xmm0, xmm1"), &[l, r]));
             }
             let (l, r) = (self.widen_half(l, types::F32)?, self.widen_half(r, types::F32)?);
             let value = self.float_binary_op(op, l, r)?;
@@ -431,6 +456,9 @@ impl<'db> FunctionCx<'_, 'db> {
         if self.half_precision() {
             return Ok(self.half_instruction("fmadd h0, h0, h1, h2", &[a, b, c]));
         }
+        if self.x86_half_precision() {
+            return Err(half_fma_refused());
+        }
         let mut wide = [a, b, c];
         for value in &mut wide {
             *value = self.widen_half(*value, types::F64)?;
@@ -450,6 +478,119 @@ impl<'db> FunctionCx<'_, 'db> {
         let params = [types::F32, types::I32];
         let value = self.builtin("__powisf2", &params, types::F32, &[wide, power])?;
         self.narrow_to_half(value)
+    }
+
+    /// Rounds the `f16b` parameter at `addr` as x86-64's LLVM does on entry: it receives a
+    /// `bfloat` as the `f32` of its bits and narrows that by compiler-builtins'
+    /// `__truncsfbf2`, which keeps every value but quiets a signalling NaN.
+    pub(super) fn receive_bfloat(&mut self, addr: Value) -> Result<()> {
+        let value = self.builder.ins().load(types::F16, MEM, addr, 0);
+        let bits = self.bits_of(value);
+        let wide = self.builder.ins().uextend(types::I32, bits);
+        let wide = self.builder.ins().ishl_imm(wide, 16);
+        let single = self.builder.ins().bitcast(types::F32, MemFlagsData::new(), wide);
+        let rounded = self.builtin("__truncsfbf2", &[types::F32], types::F16, &[single])?;
+        self.builder.ins().store(MEM, rounded, addr, 0);
+        Ok(())
+    }
+
+    /// Refuses an x86-64 body in which LLVM would round an `f16b` where this compilation
+    /// cannot tell. Between its blocks LLVM holds a `bfloat` value as the `f32` it widens to,
+    /// so one kept in a register is narrowed by `__truncsfbf2` (quieting a signalling NaN)
+    /// wherever it is read in another block than the one that made it; in memory, or read in
+    /// its own block, its bits only move. The parameters are rounded on entry
+    /// (`receive_bfloat`); every other local holding an `f16b` must be mentioned in one block
+    /// only, counting a block as part of the one that alone jumps to it or calls with it as
+    /// the return and nothing to unwind to, which rustc emits as one.
+    pub(super) fn check_bfloat_blocks(&self, body: &MirBody<'db>) -> Result<()> {
+        if !self.x86() {
+            return Ok(());
+        }
+        let bfloat = |scalar: &rustc_abi::Scalar| {
+            matches!(scalar.primitive(), Primitive::Float(rustc_abi::Float::F16B))
+        };
+        let mut held = FxHashSet::default();
+        for (local, data) in body.locals.iter() {
+            // A local without a layout is refused where it is compiled, for that.
+            let Ok(layout) = self.layout(data.ty.as_ref()) else {
+                continue;
+            };
+            let (carries, alone) = match &layout.backend_repr {
+                BackendRepr::Scalar(it) => (bfloat(it), true),
+                BackendRepr::ScalarPair { a, b, .. } => (bfloat(a) || bfloat(b), false),
+                BackendRepr::SimdVector { element, .. } => (bfloat(element), false),
+                _ => (false, false),
+            };
+            if !carries {
+                continue;
+            }
+            if !body.param_locals.contains(&local) {
+                held.insert(local);
+            } else if !alone {
+                return Err(CodegenError::Unsupported(
+                    "f16b in a parameter of two values or lanes on x86-64".into(),
+                ));
+            }
+        }
+        if held.is_empty() {
+            return Ok(());
+        }
+        let mut predecessors: FxHashMap<BasicBlockId, usize> = FxHashMap::default();
+        for (_, block) in body.basic_blocks.iter() {
+            if let Some(terminator) = &block.terminator {
+                for to in terminator.kind.successors().into_iter().chain(terminator.kind.unwind()) {
+                    *predecessors.entry(to).or_default() += 1;
+                }
+            }
+        }
+        let mut follows: FxHashMap<BasicBlockId, BasicBlockId> = FxHashMap::default();
+        for (id, block) in body.basic_blocks.iter() {
+            let next = match block.terminator.as_ref().map(|it| &it.kind) {
+                Some(TerminatorKind::Goto { target })
+                | Some(TerminatorKind::Call { target: Some(target), cleanup: None, .. }) => *target,
+                _ => continue,
+            };
+            if next != id && predecessors.get(&next) == Some(&1) {
+                follows.insert(next, id);
+            }
+        }
+        let first = |mut id: BasicBlockId| {
+            for _ in 0..follows.len() {
+                match follows.get(&id) {
+                    Some(&before) => id = before,
+                    None => break,
+                }
+            }
+            id
+        };
+        let mut made_in: FxHashMap<LocalId, BasicBlockId> = FxHashMap::default();
+        for (id, block) in body.basic_blocks.iter() {
+            let mut mentioned = Vec::new();
+            for statement in &block.statements {
+                MirBody::visit_statement_places(&statement.kind, &mut |it| {
+                    mentioned.push(it.local)
+                });
+            }
+            if let Some(terminator) = &block.terminator {
+                MirBody::visit_terminator_places(&terminator.kind, &mut |it| {
+                    mentioned.push(it.local)
+                });
+                if let TerminatorKind::Return = terminator.kind {
+                    mentioned.push(returned_local(body));
+                }
+            }
+            let run = first(id);
+            for local in mentioned.into_iter().filter(|it| held.contains(it)) {
+                if *made_in.entry(local).or_insert(run) != run {
+                    return Err(CodegenError::Unsupported(
+                        "f16b held across blocks on x86-64, which LLVM rounds there by \
+                         __truncsfbf2 where rustc's blocks are"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The `f16` or `f128` of all zero bits.
