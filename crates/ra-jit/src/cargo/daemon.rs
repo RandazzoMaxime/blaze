@@ -528,7 +528,17 @@ impl Worker {
             env.set(name, value);
         }
         env.set(ENDS_WITH_INPUT, "1");
-        let told = spare.and_then(|it| it.told(&args, &checkout.config, &checkout.root, false));
+        // What `env!` reads of the places cargo set, as each request has them: the load
+        // compiles the crates before the first request is read, and an integration test
+        // that names a program (`CARGO_BIN_EXE_<name>`) would not compile without them.
+        let mut started: BTreeMap<String, String> = checkout
+            .env
+            .iter()
+            .filter(|(name, _)| super::wrapper::names_a_place(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        started.extend(config.env.clone());
+        let told = spare.and_then(|it| it.told(&args, &started, &checkout.root, false));
         let child = match told {
             Some(spare) => {
                 log = spare.log;
@@ -543,7 +553,7 @@ impl Worker {
                 };
                 let output =
                     private_file(OpenOptions::new().write(true).create(true).truncate(true), &log)?;
-                command.envs(&config.env).env(ENDS_WITH_INPUT, "1");
+                command.envs(&started).env(ENDS_WITH_INPUT, "1");
                 exact_env(&mut command, &config.env);
                 command.current_dir(&checkout.root);
                 command.stdin(Stdio::piped()).stdout(output.try_clone()?).stderr(output);
@@ -847,22 +857,21 @@ impl Spare {
         Ok(Spare { child, log })
     }
 
-    /// Tells it to be the worker `args` start for `checkout`. `None` when it can't be
-    /// told: it has ended, or a path of the build is not text.
+    /// Tells it to be the worker `args` start, with the variables `env`. `None` when it
+    /// can't be told: it has ended, or a path of the build is not text.
     /// One told a build `ahead` has what cargo has not built yet left out of `args`, and
     /// is told them whole afterwards.
     fn told(
         mut self,
         args: &[OsString],
-        config: &WorkerConfig,
+        env: &BTreeMap<String, String>,
         cwd: &Path,
         ahead: bool,
     ) -> Option<Spare> {
         let told = || {
             let args: Option<Vec<String>> =
                 args.iter().map(|it| it.to_str().map(str::to_owned)).collect();
-            let told =
-                crate::Told { args: args?, env: config.env.clone(), cwd: cwd.to_owned(), ahead };
+            let told = crate::Told { args: args?, env: env.clone(), cwd: cwd.to_owned(), ahead };
             let mut line = serde_json::to_string(&told).ok()?;
             line.push('\n');
             Some(line)
@@ -1529,7 +1538,7 @@ impl Daemon {
         let Some(spare) = waiting.or_else(|| self.new_spare()) else { return };
         let mut args = ahead.config.args(&ahead.root, &ahead.crates);
         args.extend(["--out".into(), "none".into()]);
-        if let Some(spare) = spare.told(&args, &ahead.config, &ahead.root, true)
+        if let Some(spare) = spare.told(&args, &ahead.config.env, &ahead.root, true)
             && let Some(mut other) = lock(&self.ahead).insert(id, spare)
         {
             other.stop();

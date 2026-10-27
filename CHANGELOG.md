@@ -1031,15 +1031,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
-- Git worktrees of a repository share a whole build's worker again, as docs/cargo.md says: the
-  worker was keyed by the absolute directory the build was asked in, so each worktree loaded
-  the workspace in a worker of its own. A worktree read as the loaded checkout now has its
-  program linked into its own executable, with the worker's own link line for that place, and
-  a full build in one checkout links the others' executables again rather than splice its
-  patches into ones linked with the whole object of before. A worktree's build is linked
-  before it answers, as the loaded checkout's is, so a patch its executable does not take is
-  built in full; linked after, it failed the build (`ra_jit::static::21 is not in the
-  executable`) and split the worktree off (`harness/cargo_ra_jit.py`, daemon group).
+- An integration test that names a program (`env!("CARGO_BIN_EXE_app")`) builds when its
+  build starts the daemon's worker: the worker was started with the variables of its build
+  but not the places cargo set, so its load, which compiles before the first request is read,
+  failed `` `env!("CARGO_BIN_EXE_app")` in it names a variable that is not set ``. A cold
+  `cargo ra-jit test --test it` failed every time; under plain cargo after `ra-jit enable`, the
+  `cargo test` after an edit failed when the edit's load won the race (the release train's
+  plain-cargo row "`cargo test`, edited").
 - A daemon that patches what rustc linked no longer stops at the first build that reaches a
   thread-local, or a static written at run time, of a crate edited before any build reached
   it (``static `__RUST_STD_INTERNAL_VAL` of crate `smid` with state, whose first value is not

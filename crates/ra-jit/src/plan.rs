@@ -360,6 +360,7 @@ struct Flags {
     split_debuginfo: Option<String>,
     strip: Option<String>,
     frame_pointers: bool,
+    links_dead_code: bool,
     lints_capped: bool,
     /// What `-C link-arg` and `-C link-args` give the linker, in order: rustc passes them
     /// after the native libraries, and so does ra-jit's own link.
@@ -430,6 +431,7 @@ impl Flags {
                 "force-frame-pointers" => {
                     flags.frame_pointers = on.unwrap_or(matches!(value, "always" | "non-leaf"));
                 }
+                "link-dead-code" => flags.links_dead_code = on != Some(false),
                 _ => {}
             }
         }
@@ -442,6 +444,7 @@ pub(crate) struct Plan {
     packages: FxHashMap<String, Built>,
     lto: bool,
     frame_pointers: bool,
+    links_dead_code: bool,
     lints_capped: bool,
     link_args: Vec<String>,
 }
@@ -453,6 +456,9 @@ pub(crate) struct Whole {
     pub(crate) debug: Described,
     /// Whether rustc links it from bitcode, with `lto`.
     pub(crate) lto: bool,
+    /// Whether rustc keeps every function, `#[inline(always)]` ones too, as one copy in one
+    /// codegen unit (`-C link-dead-code`), where LLVM inlines it only into that unit's code.
+    pub(crate) links_dead_code: bool,
     /// Whether `--cap-lints` or `--force-warn` is among the flags, so that a lint the source
     /// denies may not fail rustc's build.
     pub(crate) lints_capped: bool,
@@ -488,7 +494,13 @@ impl Plan {
     pub(crate) fn whole(&self) -> anyhow::Result<Whole> {
         let debug = Described { frame_pointers: self.frame_pointers, ..self.described()? };
         let link_args = self.link_args.clone();
-        Ok(Whole { debug, lto: self.lto, lints_capped: self.lints_capped, link_args })
+        Ok(Whole {
+            debug,
+            lto: self.lto,
+            links_dead_code: self.links_dead_code,
+            lints_capped: self.lints_capped,
+            link_args,
+        })
     }
 
     /// How the package cargo calls `id` is built, when the build has it.
@@ -699,6 +711,7 @@ impl UnitGraph {
             packages,
             lto,
             frame_pointers: flags.frame_pointers,
+            links_dead_code: flags.links_dead_code,
             lints_capped: flags.lints_capped,
             link_args: flags.link_args.clone(),
         })
@@ -718,6 +731,15 @@ mod tests {
         assert!(kept("-Cforce-frame-pointers=non-leaf"));
         assert!(!kept("-Cforce-frame-pointers=yes -Cforce-frame-pointers=no"));
         assert!(!kept("-C link-dead-code"));
+    }
+
+    #[test]
+    fn link_dead_code_is_read_in_each_spelling() {
+        let kept = |flags: &str| Flags::parse(flags.split_whitespace()).unwrap().links_dead_code;
+        assert!(kept("-C link-dead-code"));
+        assert!(kept("-Clink_dead_code=yes"));
+        assert!(!kept("-C link-dead-code -C link-dead-code=no"));
+        assert!(!kept("-C force-frame-pointers"));
     }
 
     #[test]
