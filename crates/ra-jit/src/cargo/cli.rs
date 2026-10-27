@@ -92,6 +92,8 @@ const BUILD_ENV: &[&str] = &[
 const WORKER_ENV: &[&str] = &[
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTDOCFLAGS",
     "CARGO_BUILD_",
     "CARGO_PROFILE_",
     "RUSTUP_TOOLCHAIN",
@@ -112,8 +114,36 @@ const WORKER_ENV: &[&str] = &[
 /// The variables of [`WORKER_ENV`] a worker has only as its build has them: unset there, they
 /// are unset for the worker too, and not the daemon's. Which proc-macro server a load uses
 /// ([`super::own_macro::SERVER`]) is the build's, read when it asks, never the one the daemon
-/// was started with (#460).
-pub(crate) const WORKER_ENV_EXACT: &[&str] = &[super::own_macro::SERVER];
+/// was started with (#460). So are the flags and profiles cargo reads from the environment: a
+/// build without `RUSTFLAGS` is not built with those of whoever started the daemon.
+const WORKER_ENV_EXACT: &[&str] = &[
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTDOCFLAGS",
+    "CARGO_BUILD_",
+    "CARGO_PROFILE_",
+    super::own_macro::SERVER,
+];
+
+/// `CARGO_TARGET_<triple>_RUSTFLAGS`, which cargo reads as `[target.<triple>] rustflags`.
+fn target_rustflags(name: &str) -> bool {
+    name.strip_prefix("CARGO_TARGET_").is_some_and(|it| it.ends_with("_RUSTFLAGS"))
+}
+
+fn is_named(names: &[&str], name: &str) -> bool {
+    names.iter().any(|it| if it.ends_with('_') { name.starts_with(it) } else { name == *it })
+}
+
+/// The variables of this process of [`WORKER_ENV_EXACT`] that a worker of the build whose
+/// variables are `env` does not have: to be taken away from what it inherits.
+pub(crate) fn not_the_builds(env: &BTreeMap<String, String>) -> Vec<String> {
+    std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| is_named(WORKER_ENV_EXACT, name) || target_rustflags(name))
+        .filter(|name| !env.contains_key(name))
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Subcommand {
@@ -497,14 +527,13 @@ pub(crate) fn build_env() -> BTreeMap<String, String> {
 
 /// The variables of this process that a worker for its builds runs with.
 pub(crate) fn worker_env() -> BTreeMap<String, String> {
-    env_named(WORKER_ENV)
+    let mut env = env_named(WORKER_ENV);
+    env.extend(std::env::vars().filter(|(name, _)| target_rustflags(name)));
+    env
 }
 
 fn env_named(names: &[&str]) -> BTreeMap<String, String> {
-    let named = |name: &str| {
-        names.iter().any(|it| if it.ends_with('_') { name.starts_with(it) } else { name == *it })
-    };
-    std::env::vars().filter(|(name, _)| named(name)).collect()
+    std::env::vars().filter(|(name, _)| is_named(names, name)).collect()
 }
 
 #[cfg(test)]
@@ -517,6 +546,15 @@ mod tests {
             Asked::Build(invocation) => *invocation,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn flags_are_the_builds() {
+        let exact = |name| is_named(WORKER_ENV_EXACT, name) || target_rustflags(name);
+        assert!(exact("RUSTFLAGS") && exact("CARGO_ENCODED_RUSTDOCFLAGS"));
+        assert!(exact("CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS") && exact("CARGO_BUILD_RUSTFLAGS"));
+        assert!(exact("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"));
+        assert!(!exact("CARGO_TARGET_DIR") && !exact("PATH") && !exact("RUSTUP_TOOLCHAIN"));
     }
 
     #[test]

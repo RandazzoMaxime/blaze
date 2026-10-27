@@ -8669,7 +8669,7 @@ fn spare(dir: &Path) -> anyhow::Result<()> {
         unsafe { std::env::set_var(name, value) };
     }
     // The spare was started with the daemon's variables: one the build leaves unset is unset.
-    for name in cargo::cli::WORKER_ENV_EXACT.iter().filter(|it| !told.env.contains_key(**it)) {
+    for name in cargo::cli::not_the_builds(&told.env) {
         // SAFETY: as above.
         unsafe { std::env::remove_var(name) };
     }
