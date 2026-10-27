@@ -671,7 +671,8 @@ mod tests {
 
     #[test]
     fn link_args_are_read_in_order_in_each_spelling() {
-        let words = ["-C", "link-arg=-Wl,-no_compact_unwind", "-Clink-args=-a -b", "-C", "link_arg=-c"];
+        let words =
+            ["-C", "link-arg=-Wl,-no_compact_unwind", "-Clink-args=-a -b", "-C", "link_arg=-c"];
         let args = Flags::parse(words.into_iter());
         assert_eq!(args.unwrap().link_args, ["-Wl,-no_compact_unwind", "-a", "-b", "-c"]);
     }
