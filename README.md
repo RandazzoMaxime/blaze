@@ -19,9 +19,8 @@
 
 ## Install
 
-<!-- Once https://ix.dev/blaze/install.sh serves install.sh, it is the line to show here. -->
 ```sh
-curl -fsSL https://raw.githubusercontent.com/indexable-inc/blaze/main/install.sh | sh
+curl -fsSL https://ix.dev/blaze/install.sh | sh
 ```
 
 For macOS on Apple silicon and Linux, with or without Rust installed: blaze downloads the Rust it
