@@ -9,6 +9,8 @@ mod affected;
 mod ancestor;
 pub(crate) mod cli;
 mod client;
+#[cfg(unix)]
+pub(crate) mod closure;
 mod directives;
 pub(crate) mod layout;
 mod messages;
