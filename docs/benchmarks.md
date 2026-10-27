@@ -455,7 +455,7 @@ builds it in a few minutes on the same machine. Its build needs `nix develop .#b
 - Same machine, same source, same moment: the two builds alternate after every edit.
 - Same toolchain on both sides: the pinned nightly (`harness/toolchain`, `nightly-2026-10-25`;
   the runs dated before 2026-10-25 were on Rust 1.99.0), from the flake's
-  `devShells.bench`, which also pins LLVM 20 for the LLVM tier.
+  `devShells.bench`, which also pins LLVM 23 for the LLVM tier.
 - Cargo is warm and incremental: the dev profile's default (`CARGO_INCREMENTAL` unset).
 - Same linker: the toolchain's default (`cc`, which runs GNU ld on the benchmark machine). No mold,
   no lld, no sccache or other `RUSTC_WRAPPER` on either side (bench.py removes it).
@@ -651,7 +651,7 @@ machine; the band widens with the spread its own history shows.
 
 ## Run it yourself
 
-On any of the platforms with Nix (or with the pinned nightly of `harness/toolchain`, rust-src, LLVM 20 and Python 3 installed):
+On any of the platforms with Nix (or with the pinned nightly of `harness/toolchain`, rust-src, the pinned LLVM 23 and Python 3 installed):
 
 ```
 nix develop .#bench

@@ -6,10 +6,11 @@
 //! ([`Build`]), whose features are a build's and not unified over every member
 //! (docs/self-contained.md, "Resolution and fetching").
 //!
-//! What it does not do yet is an error the caller can take to cargo: a lock file that is
-//! missing or that the manifests no longer agree with (choosing versions needs the index,
-//! #321), `[replace]`, a registry with a git index, and a dependency of a registry package
-//! whose `.crate` cannot be fetched.
+//! A lock file that is missing or that the manifests no longer agree with is written again,
+//! as cargo writes it, when the resolve needs no version the lock file does not have. What
+//! it does not do yet is an error: a registry package at a version the lock file does not
+//! name (choosing versions needs the index, #321), `[replace]`, a registry with a git
+//! index, and a dependency of a registry package whose `.crate` cannot be fetched.
 
 mod graph;
 mod summary;
@@ -100,7 +101,8 @@ pub fn workspace_root(
     Ok(ws.root_manifest().to_owned())
 }
 
-/// A program a `cargo build` links: a binary or an example of a member it builds.
+/// A program a `cargo build` or `cargo test` links: a binary or an example of a member it
+/// builds, or a test of one.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Program {
     /// The id of its package, as `cargo metadata` spells it.
@@ -108,27 +110,86 @@ pub struct Program {
     pub name: String,
     /// The root file of its crate.
     pub root: PathBuf,
-    pub example: bool,
+    pub kind: Kind,
+    /// Built as a test, which `cargo test` runs: a library's or a binary's unit tests, with
+    /// `cfg(test)`, or an integration test.
+    pub test: bool,
+    /// Whether a test starts in libtest's harness: not with `harness = false`.
+    pub harness: bool,
 }
 
-/// The program a build names with `--bin` or `--example`, or none for every binary.
+/// What kind of target a program is built of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum Kind {
+    Lib,
+    Bin,
+    Example,
+    Test,
+}
+
+/// The programs a build names with `--bin` or `--example`, or none for every binary; of
+/// `cargo test` (`test`), also the targets `--lib` and `--test` name.
 #[derive(Clone, Copy, Default)]
 pub struct Targets<'a> {
     pub bin: Option<&'a str>,
     pub example: Option<&'a str>,
+    pub test: Option<Tests<'a>>,
+}
+
+/// The targets of `cargo test` that `--lib` and `--test` name.
+#[derive(Clone, Copy, Default)]
+pub struct Tests<'a> {
+    pub lib: bool,
+    pub test: Option<&'a str>,
+}
+
+impl Targets<'_> {
+    fn named(&self) -> bool {
+        let test = self.test.is_some_and(|it| it.lib || it.test.is_some());
+        self.bin.is_some() || self.example.is_some() || test
+    }
+
+    /// Whether the target `name` of `kind`, which `cargo test` tests when `tested`, is built,
+    /// and whether as a test.
+    fn picks(&self, kind: Kind, name: &str, tested: bool) -> Option<bool> {
+        let Some(tests) = self.test else {
+            let named = match self {
+                Targets { bin: Some(asked), .. } => kind == Kind::Bin && name == *asked,
+                Targets { example: Some(asked), .. } => kind == Kind::Example && name == *asked,
+                _ => kind == Kind::Bin,
+            };
+            return named.then_some(false);
+        };
+        if !self.named() {
+            // cargo's default: what is tested, and the examples built to see that they compile.
+            return match kind {
+                Kind::Example if !tested => Some(false),
+                _ => tested.then_some(true),
+            };
+        }
+        let named = match kind {
+            Kind::Lib => tests.lib,
+            Kind::Bin => self.bin == Some(name),
+            Kind::Example => self.example == Some(name),
+            Kind::Test => tests.test == Some(name),
+        };
+        named.then_some(kind != Kind::Example || tested)
+    }
 }
 
 /// The JSON `cargo metadata --format-version 1` prints for `asked`.
 pub fn metadata(asked: &Asked<'_>) -> Result<String> {
-    Ok(made(asked)?.0)
+    Ok(made(asked)?.json)
 }
 
 /// The metadata of `asked`'s build, and the programs it links of `targets`, as cargo's unit
 /// graph has them: of each member the build selects, the binaries whose `required-features`
-/// it is built with, or the one target named.
+/// it is built with, or the one target named; of `cargo test`'s, the targets it tests and
+/// the examples it builds, or those named. A test of a member's integration tests links its
+/// binaries too, which the tests may run.
 pub fn programs(asked: &Asked<'_>, targets: Targets<'_>) -> Result<(String, Vec<Program>)> {
     anyhow::ensure!(asked.build.is_some(), "the programs are of a build");
-    let (json, roots) = made(asked)?;
+    let Made { json, roots, unharnessed } = made(asked)?;
     let metadata: serde_json::Value = serde_json::from_str(&json)?;
     let nodes = metadata["resolve"]["nodes"].as_array().into_iter().flatten();
     let features: FxHashMap<&str, Vec<&str>> = nodes
@@ -144,29 +205,35 @@ pub fn programs(asked: &Asked<'_>, targets: Targets<'_>) -> Result<(String, Vec<
             continue;
         };
         let on = features.get(id).map(Vec::as_slice).unwrap_or_default();
+        let mut integration = false;
+        let mut bins = Vec::new();
         for target in package["targets"].as_array().into_iter().flatten() {
             let of = |key: &str, it: &str| {
                 target[key].as_array().is_some_and(|all| all.iter().any(|kind| kind == it))
             };
             let only_bin = target["crate_types"].as_array().is_some_and(|it| it == &["bin"]);
-            let (bin, example) = (of("kind", "bin") && only_bin, of("kind", "example") && only_bin);
-            let name = target["name"].as_str().unwrap_or_default();
-            let named = match targets {
-                Targets { bin: Some(asked), .. } => bin && name == asked,
-                Targets { example: Some(asked), .. } => example && name == asked,
-                Targets { bin: None, example: None } => bin,
+            let kind = match () {
+                _ if of("kind", "bin") && only_bin => Kind::Bin,
+                _ if of("kind", "example") && only_bin => Kind::Example,
+                _ if of("kind", "test") => Kind::Test,
+                _ if of("kind", "bench") || of("kind", "example") => continue,
+                _ if of("kind", "custom-build") => continue,
+                _ => Kind::Lib,
             };
-            if !named {
-                continue;
-            }
+            let name = target["name"].as_str().unwrap_or_default();
+            let tested = target["test"].as_bool().unwrap_or(false);
+            let root = PathBuf::from(target["src_path"].as_str().unwrap_or_default());
             let required = target["required-features"].as_array().into_iter().flatten();
             // A feature of a dependency (`dep/feature`) is taken to be on.
             let missing: Vec<&str> = required
                 .filter_map(|it| it.as_str())
                 .filter(|it| !it.contains('/') && !on.contains(it))
                 .collect();
-            let asked_for = targets.bin.is_some() || targets.example.is_some();
-            if !missing.is_empty() && asked_for {
+            if kind == Kind::Bin && missing.is_empty() {
+                bins.push((name, root.clone()));
+            }
+            let Some(test) = targets.picks(kind, name, tested) else { continue };
+            if !missing.is_empty() && targets.named() {
                 let listed: Vec<String> = missing.iter().map(|it| format!("`{it}`")).collect();
                 bail!(
                     "target `{name}` in package `{}` requires the features: {}\nConsider enabling them by passing, e.g., `--features=\"{}\"`",
@@ -176,13 +243,16 @@ pub fn programs(asked: &Asked<'_>, targets: Targets<'_>) -> Result<(String, Vec<
                 );
             }
             if missing.is_empty() {
-                programs.push(Program {
-                    package: id.to_owned(),
-                    name: name.to_owned(),
-                    root: PathBuf::from(target["src_path"].as_str().unwrap_or_default()),
-                    example,
-                });
+                integration |= kind == Kind::Test;
+                let harness = test && !unharnessed.contains(&root);
+                let (package, name) = (id.to_owned(), name.to_owned());
+                programs.push(Program { package, name, root, kind, test, harness });
             }
+        }
+        for (name, root) in bins.into_iter().filter(|_| integration) {
+            let (package, name) = (id.to_owned(), name.to_owned());
+            let (kind, test, harness) = (Kind::Bin, false, false);
+            programs.push(Program { package, name, root, kind, test, harness });
         }
     }
     Ok((json, programs))
@@ -275,8 +345,8 @@ fn with_lock<R>(
     then(&ctx, &ws, &lock).map(Some)
 }
 
-/// The metadata of `asked`, and the ids of the members its build selects.
-fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
+/// The metadata of `asked`, and what of it a build of its members reads ([`Made`]).
+fn made(asked: &Asked<'_>) -> Result<Made> {
     resolving(asked, None, |resolved, serialized, ids| described(asked, &resolved, serialized, ids))
 }
 
@@ -322,8 +392,11 @@ fn resolving_with<R>(
         bail!("`[replace]` is not read by blaze yet");
     }
     let lock_path = root.join("Cargo.lock");
-    let lock_text = std::fs::read_to_string(&lock_path)
-        .with_context(|| format!("no lock file at {}", lock_path.display()))?;
+    let lock_text = match std::fs::read_to_string(&lock_path) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err).with_context(|| format!("reading {}", lock_path.display())),
+    };
 
     let path_packages = path_packages(&ws, &root, &ctx)?;
     let mut path_deps = PathDeps::default();
@@ -333,9 +406,15 @@ fn resolving_with<R>(
         let entry = path_deps.entry(m.package_id.name.clone()).or_default();
         entry.insert(m.package_id.version.clone(), SourceId::for_path(&dir)?);
     }
-    let lock = lockfile::into_resolve(lockfile::parse(&lock_text)?, &lock_text, &path_deps)?;
+    let lock = match &lock_text {
+        Some(text) => Some(lockfile::into_resolve(lockfile::parse(text)?, text, &path_deps)?),
+        None => None,
+    };
     let respect = relock.is_none_or(|it| it.respect_source_config);
-    let fetched = fetch(&lock, &ctx, offline, asked.store.clone(), respect)?;
+    let fetched = match &lock {
+        Some(lock) => fetch(lock, &ctx, offline, asked.store.clone(), respect)?,
+        None => Vec::new(),
+    };
 
     let mut serialized: Vec<SerializedPackage<'_>> =
         ws.members().map(|(path, m)| export_package(path, m)).collect();
@@ -352,7 +431,7 @@ fn resolving_with<R>(
     for package in &serialized {
         let mut read = summary::read(&serde_json::to_value(package)?)?;
         let id = read.summary.package_id();
-        if let Some(Some(checksum)) = lock.checksums().get(&id) {
+        if let Some(Some(checksum)) = lock.as_ref().and_then(|it| it.checksums().get(&id)) {
             read.summary.set_checksum(checksum.clone());
         }
         ids.push(id);
@@ -407,18 +486,23 @@ fn resolving_with<R>(
     let (mut whole, targeted) = resolve_ws(
         &mut PackageRegistry::new(registry),
         &resolving,
-        Some(&lock),
+        lock.as_ref(),
         &cli_features,
         &specs,
         has_dev_units,
-    )?;
+    )
+    .context("blaze picks a registry package only at the version Cargo.lock has (#321)")?;
+    if let Some(lock) = &lock {
+        whole.merge_from(lock)?;
+    }
     match relock {
         None => {
-            if lockfile::lockfile_to_write(&mut whole, Some(&lock_text), None, None)?.is_some() {
-                bail!(
-                    "{} would change: the manifests no longer agree with it",
-                    lock_path.display()
-                );
+            // A new lock file has the newest encoding, whatever the members' `rust-version`.
+            if let Some(text) =
+                lockfile::lockfile_to_write(&mut whole, lock_text.as_deref(), None, None)?
+            {
+                std::fs::write(&lock_path, text)
+                    .with_context(|| format!("writing {}", lock_path.display()))?;
             }
         }
         Some(relock) => {
@@ -432,9 +516,12 @@ fn resolving_with<R>(
                 path: &lock_path,
                 path_deps: &path_deps,
             });
-            if let Some(text) =
-                lockfile::lockfile_to_write(&mut whole, Some(&lock_text), lowest.as_ref(), locked)?
-            {
+            if let Some(text) = lockfile::lockfile_to_write(
+                &mut whole,
+                lock_text.as_deref(),
+                lowest.as_ref(),
+                locked,
+            )? {
                 std::fs::write(&lock_path, text)
                     .with_context(|| format!("failed to write {}", lock_path.display()))?;
             }
@@ -455,14 +542,13 @@ fn resolving_with<R>(
     then(resolved, serialized, &ids, &unused_patches)
 }
 
-/// The JSON `cargo metadata` prints of `resolved`, and the ids of the members its build
-/// selects.
+/// What `cargo metadata` prints of `resolved`, and what of it a build of its members reads.
 fn described(
     asked: &Asked<'_>,
     resolved: &Resolved<'_>,
     serialized: Vec<SerializedPackage<'_>>,
     ids: &[PackageId],
-) -> Result<(String, Vec<String>)> {
+) -> Result<Made> {
     let Resolved {
         ws,
         resolve: targeted,
@@ -518,7 +604,19 @@ fn described(
     let packages: Vec<SerializedPackage<'_>> =
         listed.iter().filter_map(|(_, at)| slots[*at].take()).collect();
     let json = serde_json::to_string(&export(ws, packages, Some(resolve)))?;
-    Ok((json, roots.iter().map(|it| it.to_spec().to_string()).collect()))
+    let targets = ws.members().flat_map(|(_, it)| &it.targets);
+    let unharnessed = targets.filter(|it| !it.harness).filter_map(|it| it.src_path.clone());
+    let roots = roots.iter().map(|it| it.to_spec().to_string()).collect();
+    Ok(Made { json, roots, unharnessed: unharnessed.collect() })
+}
+
+/// The metadata of a workspace, as JSON, the ids of the members its build selects, and the
+/// root files of the members' targets built without libtest's harness (`harness = false`),
+/// which the metadata does not say.
+struct Made {
+    json: String,
+    roots: Vec<String>,
+    unharnessed: Vec<PathBuf>,
 }
 
 /// What the resolve graph and the feature resolver read of the packages.

@@ -542,6 +542,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- The LLVM backend is on LLVM 23.1.4 (was 20.1.8), our fork's `ix/23.x` at the commit
+  wasm-host's ix-aot pins, so both run one LLVM: inkwell 0.11 and llvm-sys 231. Blaze
+  builds that LLVM itself for each target (`.github/workflows/llvm.yaml`) and pins the
+  archives by sha256 in `crates/hir-ty-codegen/llvm.json`; the flake, CI and Windows fetch
+  them. It is linked in statically, with libstdc++ on Linux, so a binary built with
+  `--features llvm` loads no libLLVM. llvm-sys links it (`vendor/llvm-sys`), so GNU ld sees the
+  archives after inkwell, which calls them. LLVM 21 removed `nocapture`: an `sret` parameter is
+  `captures(none)`, and an attribute name the linked LLVM does not know now panics naming it
+  rather than crashing LLVM's verifier.
 - The site moved to [ix.dev/blaze](https://ix.dev/blaze/). https://ra-jit.ix.dev and
   https://blaze.ix.dev answer every path with a 301 to the same path and query under
   https://ix.dev/blaze, so old links (the README's updates button, `/bench`, RFCs) keep
@@ -561,6 +570,42 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   done, and a command cargo does not have is `no such command` rather than a cargo plugin run.
   `cargo blaze --list` and the table in docs/cargo.md ("Every subcommand") say which is which;
   flags typed before the command are read after it.
+- `cargo blaze test` is built whole by blaze too, with no first build by cargo and no rustc:
+  blaze's resolution plans what cargo would test (each member's library, binaries and
+  integration tests with `test = true`, the examples built beside them, and the binaries an
+  integration test runs, `CARGO_BIN_EXE_<name>`), or what `--lib`, `--bin`, `--example` and
+  one `--test` name. The unit tests are built by a worker that loads each tested crate twice,
+  its copy of tests alone with `cfg(test)` as rustc's `--test` has it, the rest by a worker
+  that loads it once, and each test runs as before, in its package's
+  directory and in the sandbox. A program of tests compiles libtest (`test`, and what only it
+  links) with its own crates, as the library built apart leaves it out and no rlib of the
+  toolchain is linked. A unit test with `harness = false`, several `--test`s and the
+  other target flags fail the build and say so. The tests run in cargo's order, a package's
+  library first, and each run asks for what each test reaches, so `RA_JIT_TESTS=affected`
+  picks as before. The doc tests (and `--doc` alone) are run by blaze with no cargo, rustdoc
+  or rustc: blaze writes down for each library the run of rustdoc cargo would make, and one
+  run loads the workspace and builds every example. An example blaze cannot build (one
+  rust-analyzer finds an error in, one that mixes copies of the library, one that calls what
+  blaze cannot compile) fails, saying why, where rustc built it before; a `compile_fail` one
+  passes when rust-analyzer finds an error in it, and fails, saying so, when it finds none.
+  `harness/doctests.py` counts those apart from the examples that end otherwise than
+  cargo's, and ra-jit is no longer cargo's `RUSTDOC`.
+- `cargo blaze build` and `run` have one path, and it runs no rustc: each program is built
+  whole by blaze, as `RA_JIT_WHOLE_BUILD=1` had it, and the setting is gone. No first build
+  by cargo, no rustc base under the first edits, and no fallback: what blaze cannot compile,
+  plan (`RA_JIT_OWN_RESOLVE=0` no longer asks cargo for the programs) or build yet fails the
+  build and says what (the targets `--bins`, `--tests` and their kin pick, several
+  `--target`s, `--target-dir`, `--message-format`, `-Z`, `--build-plan`). A build of
+  libraries alone is the daemon's check of them. The cold build is slower than cargo's for
+  now (docs/self-contained.md has the figures). blaze's link gives the program a GNU build ID on Linux, by which it takes live edits. On macOS a program finds the statics and functions of the standard library blaze built once by their names without Mach-O's leading underscore, as it asks for them, so std's `GLOBAL_PANIC_COUNT` is no longer refused as having no symbol. A patch compiles its own copy of a function of the program the link left out, as LLVM does one it inlined into every caller, instead of asking for it by name and restarting the program. A
+  patch the splice declines (one that calls what the link left out as unreached) has the
+  program built in full and linked, where the link of the object alone left the edit out. A
+  workspace with no lock file, or one its manifests no longer agree with, has it written by
+  blaze's resolver as cargo would, when no registry package is needed at a version the lock
+  file lacks (#321). `harness/live_fallback.py`, `harness/aheadready.py` and
+  `harness/renamedstatics.py`, of cargo's first build, are gone; `harness/unreached.py` and
+  `harness/storetracked.py` take a program built in full where its edit calls what the link
+  left out.
 - A whole build's cold compile no longer waits on itself where a hundred threads meet. What
   the store is given of a function names each function and static it reaches by a name its
   crate is listed to find again: each crate is listed once, by the first thread to ask and
@@ -945,6 +990,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   and takes 12.6 s (12.5 to 12.7) with the entry above, against main's 15.6 s.
 
 ### Fixed
+
+- The LLVM backend: an error LLVM diagnoses while it writes an object is an error naming
+  what LLVM said, not an object with an instruction left out. LLVM 23's assembler printed
+  "can't encode 'ah'" for `mov ah, sil` in an `asm!` block and wrote the object without it
+  (LLVM 20 ended the process). A `reg_byte` in a block that names a high byte register is one
+  of a, b, c and d, which always encodes (corpus case `inline_asm::high_of`).
+- The LLVM backend's store: a function's key has the `asm!` blocks LLVM puts in place of its
+  calls of their wrappers. Two functions that each pass a `u64` through a block of their own
+  were one key, and the second got the first's code.
 
 - On macOS the doctests are ra-jit's, as on Linux
   ([#255](https://github.com/indexable-inc/blaze/issues/255)). Every example was left to rustc

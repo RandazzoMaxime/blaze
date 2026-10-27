@@ -69,9 +69,11 @@ features and edges `cargo build` with the load's `-p`, `--workspace`, `--exclude
 `--features` would build, for the load's target, and the packages it reaches. `cargo metadata`
 unifies features over every member, so a load of one member used to have edges to crates only
 another member's features reach (axum's examples to `mime_guess` through `tower-http/fs`) whose
-build scripts the build never ran, and `env!` of their variables failed. What it does not read
-yet goes to cargo's `cargo metadata` with the reason printed: no lock file, or one the
-manifests no longer agree with (#321), `[replace]`, a registry with a git index.
+build scripts the build never ran, and `env!` of their variables failed. A lock file that is
+missing or that the manifests no longer agree with is written as cargo writes it (2026-10-26)
+when the resolve needs no registry version it does not have. What it does not read yet goes to
+cargo's `cargo metadata` with the reason printed: a registry version the lock file lacks
+(#321), `[replace]`, a registry with a git index.
 `RA_JIT_OWN_RESOLVE=0` sends every load to cargo.
 
 Not yet: the unit graph itself (the `profiles` example walks cargo's),

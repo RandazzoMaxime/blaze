@@ -243,12 +243,13 @@ impl StoredCode {
         func: &cranelift_codegen::ir::Function,
         named: impl Iterator<Item = cranelift_codegen::ir::StackSlot>,
         constants: impl Iterator<Item = (u32, &'a [u8])>,
+        asm: impl Iterator<Item = (u32, &'a str)>,
         pointees: &[(u32, super::fragment::Pointee)],
     ) -> Option<[u8; KEY]> {
         let isa = super::target().ok()?;
         let ir = cranelift_codegen::incremental_cache::compute_cache_key(&**isa, func);
         let mut hasher = Sha256::new();
-        hasher.update(b"ra-jit llvm 7");
+        hasher.update(b"ra-jit llvm 8");
         // Nor what the types of the parameters say of the memory they point to.
         for (at, pointee) in pointees {
             let super::fragment::Pointee { unique, frozen, size, align } = *pointee;
@@ -282,6 +283,15 @@ impl StoredCode {
             hasher.update(index.to_le_bytes());
             hasher.update((bytes.len() as u64).to_le_bytes());
             hasher.update(bytes);
+        }
+        hasher.update(u32::MAX.to_le_bytes());
+        // Nor which `asm!` block a call of a wrapper runs, which LLVM's code has in place of
+        // the call: two functions that each pass a `u64` through a block of their own are one
+        // IR (the corpus's `att`, `addq $7`, was the code of asmedits.py's `scale`, a `lea`).
+        for (index, text) in asm {
+            hasher.update(index.to_le_bytes());
+            hasher.update((text.len() as u64).to_le_bytes());
+            hasher.update(text);
         }
         Some(hasher.finalize().into())
     }
