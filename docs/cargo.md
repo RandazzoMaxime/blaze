@@ -85,6 +85,10 @@ set, the `BLAZE_` one wins.
 `blaze <command>` is the same as `cargo blaze <command>`, for a machine where blaze brought
 its own Rust and there is no `cargo` on the path.
 
+A plain `cargo blaze check` checks libraries and binaries. Tests, examples and benchmarks
+are checked with their dev-dependencies when dev targets are selected (`--tests`,
+`--all-targets`, and the other dev-target flags).
+
 `build`, `run` and `test` take the flags cargo takes and leave the same files in the same
 places under `target/`. `check` is what the daemon says of the source as it builds the
 programs of the build with the same flags, when it has that build loaded: the errors a build
