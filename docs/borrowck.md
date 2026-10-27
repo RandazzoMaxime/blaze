@@ -218,7 +218,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   whose type is a subtype of what it matches, as rustc ascribes it, so it matches a
   `&'static u32` only if `'a: 'static`), casts (the type written, its `_`s holes: `ptr as _`
   relates no lifetime, though inference makes it `'static` from where the value goes), turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
-  literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
+  literal and variant paths, in closures too. A `_` inside an associated type in any of these
+  annotations (a `let`'s, a turbofish's, a closure's parameter or return) is what equating the
+  annotation with the inferred type makes it, as rustc solves its user type annotation, so
+  the impl the associated type selects has its where clauses proven, and the value has the
+  annotation normalized: `let _: <(_,) as Tr>::Ty = a` with `impl<T: 'static> Tr for (T,)`
+  needs `A: 'static`, and `Some::<<(u8, _) as Tr>::Ty>(&temp())` needs the borrow to be
+  `'static` (E0716). `Self { .. }` and `Self(..)` in an impl have the
   impl's self type, with its anonymous lifetimes (`impl Foo<'_>`) as the impl's own. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
   variable's type, and the variable is used where it is called (a captured constructor too).

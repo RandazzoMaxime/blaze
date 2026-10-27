@@ -1262,6 +1262,25 @@ impl Shared {
         }
     }
 
+    /// The remote `spec` names, for the project `project` of the store in `store`, with its
+    /// packs left there until a key of theirs is asked for: what takes a part of a project
+    /// shared by all, as `ra-jit closure materialize` takes the store paths it is asked for.
+    /// A remote that cannot be opened is an error; one that fails later is said, and what
+    /// it would have brought is missing from the store.
+    pub(crate) fn lazily(store: &Path, spec: &str, project: &str) -> anyhow::Result<Shared> {
+        let runtime = runtime()?;
+        let remote = Arc::new(runtime.block_on(Remote::open(spec, store))?);
+        Ok(Shared {
+            store: store.to_owned(),
+            remote,
+            project: project_name(Some(project.to_owned()))?,
+            runtime: Arc::new(runtime),
+            lazy: true,
+            push_every: None,
+            asked: Arc::default(),
+        })
+    }
+
     /// Fetches what the project's manifest lists, or with `RA_JIT_REMOTE_LAZY` only what
     /// tells which pack holds which key, leaving each pack to the first build that asks.
     /// From here on the store asks this remote for the keys it lacks. An error only when
