@@ -228,11 +228,13 @@ pub fn moved(path: &str, from: &str, to: &str) -> Option<String> {
 }
 
 /// `path` as rustc spells it in a location or in debug info. For a file of the installed
-/// standard library rustc joins `lib/rustlib/src/rust` to the sysroot as one piece, so on
-/// Windows it reads `<sysroot>\lib/rustlib/src/rust\library\..` where the file system
+/// standard library rustc joins `lib/rustlib/src/rust` to the sysroot as one piece, and then
+/// the path the library was built from, whose crate's directory the build named as
+/// `library/core`: on Windows it reads `<sysroot>\lib/rustlib/src/rust\library/core\src\..`
+/// (nightly-2026-10-25, harness/breakers.py `library_panic_location`) where the file system
 /// names it with backslashes throughout. Elsewhere the two are already the same.
 fn as_rustc_spells(path: &str) -> String {
-    path.replacen(r"\lib\rustlib\src\rust\", r"\lib/rustlib/src/rust\", 1)
+    path.replacen(r"\lib\rustlib\src\rust\library\", r"\lib/rustlib/src/rust\library/", 1)
 }
 
 /// The sources of the standard library: rustc names them where they are on this machine, and

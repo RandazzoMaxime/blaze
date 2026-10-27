@@ -275,7 +275,9 @@ pub(super) fn refused(err: &anyhow::Error, cwd: &Path) {
     }
 }
 
-#[cfg(test)]
+// `expected.json` is what cargo printed on Linux, Linux paths put in a JSON text as they are,
+// which a Windows path's `\` is not (blaze-manifest's `tests/fixtures.rs`).
+#[cfg(all(test, unix))]
 mod tests {
     use std::path::{Path, PathBuf};
 

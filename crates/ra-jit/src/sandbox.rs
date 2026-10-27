@@ -477,6 +477,8 @@ mod tests {
         assert!(!with(&[("RA_JIT_SANDBOX", "on"), ("BLAZE_SANDBOX", "off")]));
     }
 
+    // The paths a sandbox records are a Unix machine's: there is one on Linux and macOS alone.
+    #[cfg(unix)]
     #[test]
     fn a_record_is_its_lines_in_order_once() {
         let spec = Spec {
