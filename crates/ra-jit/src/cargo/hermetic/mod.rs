@@ -487,8 +487,8 @@ pub(crate) fn failed_note(
     if looked.is_empty() && !unset.is_empty() {
         return format!(
             "{failed}, and cargo's variables alone: it read one it is not given ({}); a variable \
-             the workspace sets for build scripts is given by naming it in `build-script-env` under \
-             [workspace.metadata.blaze.sandbox] in {root}",
+             the workspace sets for build scripts is given by naming it in `build-script-env` \
+             under [workspace.metadata.blaze.sandbox] in {root}",
             unset.join("; ")
         );
     }
