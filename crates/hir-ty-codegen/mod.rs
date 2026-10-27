@@ -6717,6 +6717,17 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
         let ours = !shared
             && (base_owns || self.own_statics.replaces(db, id))
             && compiled_static(db, id).is_ok();
+        // rustc's copy started from the old first value, and ours can't stand in for it.
+        if stateful_linked && !shared && !ours && compiled_static(db, id).is_ok() {
+            let name = StaticSignature::of(db, id).name.as_str();
+            let krate = fncache::crate_name(db, id.krate(db));
+            refused!(
+                "static `{name}` of crate `{krate}` with state, whose first value is not the one \
+                 rustc built it with (or an edit reached it before that was known): rustc's copy \
+                 has the old value, and rustc's code, or its `#[no_mangle]` or `#[export_name]` \
+                 symbol, keeps a copy of ours from standing in for it"
+            );
+        }
         let rustcs = symbol.filter(|_| !ours);
         // One the linker left out of what rustc linked is used by none of rustc's code there.
         let unlinked = rustcs.as_ref().is_some_and(|it| !self.symbols.linked(it));
