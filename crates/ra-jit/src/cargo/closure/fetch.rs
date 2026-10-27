@@ -128,8 +128,10 @@ impl Read for Reading<'_> {
             Body::Web(web) => web,
         };
         while self.at == self.piece.len() {
-            let next =
-                self.runtime.block_on(tokio::time::timeout(PATIENCE, remote::https_next(web)));
+            // The timer needs the runtime when it is made, so it is made inside `block_on`.
+            let next = self
+                .runtime
+                .block_on(async { tokio::time::timeout(PATIENCE, remote::https_next(web)).await });
             match next {
                 Err(_) => return Err(io::Error::other(format!("no bytes for {PATIENCE:?}"))),
                 Ok(Err(e)) => return Err(io::Error::other(e)),
