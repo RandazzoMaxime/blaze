@@ -698,8 +698,16 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
             object::File::parse(bytes).with_context(|| format!("parsing {}", path.display()))?;
         // A hidden one stands in for a function ra-jit could not compile, which a program
         // compiles itself to be told why. A thread-local is not a "definition" to `object`.
-        let defined =
-            file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
+        // A COFF external symbol is `SymbolScope::Linkage` in `object` (`Dynamic` is for a DLL's
+        // exports), and COFF has no hidden symbols to tell apart: all of them count, or the
+        // prebuilt standard library defines nothing on Windows and a program compiles std's
+        // startup itself, up to the first writable static (`CLEANUP`).
+        let coff = matches!(file.format(), object::BinaryFormat::Coff | object::BinaryFormat::Pe);
+        let defined = file.symbols().filter(|it| {
+            !it.is_undefined()
+                && (it.scope() == SymbolScope::Dynamic
+                    || coff && it.scope() == SymbolScope::Linkage)
+        });
         // Mach-O spells every name with an underscore in front, which the names looked up
         // ([`Resolver::in_prebuilt`]) don't have: with it kept, no function or static of the
         // prebuilt std was found on macOS, a build script compiled std's itself and stopped
@@ -11216,6 +11224,42 @@ fn main() {}
             assert_eq!(crates_of(&within(&[app]), shared), [app]);
             assert_eq!(crates_of(&within(&[example]), main), [app]);
         });
+    }
+
+    /// A COFF object has no hidden symbols to tell apart from the others, and `object` calls
+    /// the external ones `Linkage`, not `Dynamic`: they are what the object defines for others
+    /// to link to, as an ELF object's default ones are.
+    #[test]
+    fn the_external_symbols_of_a_coff_object_are_the_ones_it_defines() {
+        use object::write::{Object, Symbol, SymbolSection};
+        let mut object = Object::new(
+            object::BinaryFormat::Coff,
+            object::Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let section = object.section_id(object::write::StandardSection::Text);
+        for (name, scope) in [
+            ("external", object::SymbolScope::Linkage),
+            ("local", object::SymbolScope::Compilation),
+        ] {
+            object.add_symbol(Symbol {
+                name: name.as_bytes().to_vec(),
+                value: 0,
+                size: 0,
+                kind: object::SymbolKind::Text,
+                scope,
+                weak: false,
+                section: SymbolSection::Section(section),
+                flags: object::SymbolFlags::None,
+            });
+        }
+        object.append_section_data(section, &[0x90], 1);
+        let path = std::env::temp_dir().join(format!("ra-jit-coff-{}.obj", std::process::id()));
+        std::fs::write(&path, object.write().unwrap()).unwrap();
+        let defined = defined_symbols(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(defined.contains("external"));
+        assert!(!defined.contains("local"));
     }
 
     #[test]
