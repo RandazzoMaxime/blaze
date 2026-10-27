@@ -95,7 +95,13 @@ fn wrapped(server: Command) -> std::io::Result<Command> {
 mod tests {
     #[test]
     fn a_server_is_given_the_toolchain_s_variables_and_no_secret() {
-        for name in ["PATH", "HOME", "RUSTUP_TOOLCHAIN", "RA_JIT_CACHE", "RUST_ANALYZER_INTERNALS_DO_NOT_USE"] {
+        for name in [
+            "PATH",
+            "HOME",
+            "RUSTUP_TOOLCHAIN",
+            "RA_JIT_CACHE",
+            "RUST_ANALYZER_INTERNALS_DO_NOT_USE",
+        ] {
             assert!(super::given_to_server(name), "{name}");
         }
         for name in ["GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK", "OPENSSL_DIR"] {
@@ -110,7 +116,9 @@ mod tests {
 /// `std::env::var` is its crate's environment (`CARGO_*`, `OUT_DIR`, a build script's
 /// `rustc-env`), which each expansion is sent with.
 fn given_to_server(name: &str) -> bool {
-    sandboxed::KEPT.contains(&name) || name.starts_with("RA_JIT_") || name.starts_with("RUST_ANALYZER_")
+    sandboxed::KEPT.contains(&name)
+        || name.starts_with("RA_JIT_")
+        || name.starts_with("RUST_ANALYZER_")
 }
 
 /// The file of the spec `server` runs in, written where only this user reads it: the

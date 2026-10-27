@@ -284,7 +284,8 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         read.push(script.scratch.join(OWN_RUSTC));
         read.extend(std::fs::canonicalize(&exe).ok().and_then(|it| Some(it.parent()?.to_owned())));
         let toolchain = env.iter().find(|it| it.0 == crate::as_rustc::TOOLCHAIN);
-        let toolchain = toolchain.and_then(|it| Some(Path::new(&it.1).parent()?.parent()?.to_owned()));
+        let toolchain =
+            toolchain.and_then(|it| Some(Path::new(&it.1).parent()?.parent()?.to_owned()));
         read.extend(toolchain.and_then(|it| std::fs::canonicalize(it).ok()));
         let (view, hidden) =
             hermetic::view(script.cwd, script.out_dir, &read, &closure, script.scratch)?;

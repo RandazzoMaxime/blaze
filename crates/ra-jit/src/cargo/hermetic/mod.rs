@@ -85,7 +85,10 @@ pub(crate) fn closure_for(
     overrides: &BTreeMap<String, Vec<String>>,
 ) -> anyhow::Result<Closure> {
     let host = closure::host().with_context(|| {
-        format!("a build script runs in its closure on Linux alone, not on {}", std::env::consts::OS)
+        format!(
+            "a build script runs in its closure on Linux alone, not on {}",
+            std::env::consts::OS
+        )
     })?;
     let pinned = closure::roots(host);
     let libs = libs_for(name, version, overrides)?;
@@ -200,11 +203,8 @@ pub(crate) fn env_in(
     also: &std::collections::BTreeSet<String>,
     closure: &Closure,
 ) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = env
-        .iter()
-        .filter(|(name, _)| kept_in_view(name) || also.contains(name))
-        .cloned()
-        .collect();
+    let mut out: Vec<(String, String)> =
+        env.iter().filter(|(name, _)| kept_in_view(name) || also.contains(name)).cloned().collect();
     let laid = |path: &str| closure.paths.iter().find(|it| it.0.path == path).map(|it| &it.1);
     let below = |path: &str, rest: &str| laid(path).is_some_and(|it| it.join(rest).is_dir());
     let mut bin = Vec::new();
@@ -437,7 +437,12 @@ pub(crate) fn for_cargo(stdout: &[u8]) -> Vec<u8> {
 
 /// What a run in its closure that failed with `stderr` is told: what it ran with, what it
 /// looked for that was not there, as its tools said, and where to give it more.
-pub(crate) fn failed_note(name: &str, closure: &Closure, stderr: &[u8], root: Option<&Path>) -> String {
+pub(crate) fn failed_note(
+    name: &str,
+    closure: &Closure,
+    stderr: &[u8],
+    root: Option<&Path>,
+) -> String {
     let text = String::from_utf8_lossy(stderr);
     let looked: Vec<&str> = text
         .lines()
@@ -459,7 +464,8 @@ pub(crate) fn failed_note(name: &str, closure: &Closure, stderr: &[u8], root: Op
         true => String::new(),
         false => format!(", and looked for what is not there: {}", looked.join("; ")),
     };
-    let root = root.map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
+    let root =
+        root.map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
     let failed = format!("the build script of `{name}` failed in its closure, which has {given}");
     if text.contains("Read-only file system") {
         return format!(
@@ -598,7 +604,8 @@ fn tree_digest(
         } else {
             let metadata = entry.metadata()?;
             field(if super::script::is_executable(&metadata) { b"exe" } else { b"file" });
-            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
             field(&Sha256::digest(&bytes));
         }
     }
@@ -673,11 +680,19 @@ mod tests {
     fn a_failed_run_is_told_what_it_lacked() {
         let closure = Closure { roots: Vec::new(), libs: Vec::new(), paths: Vec::new() };
         let note = |stderr: &str| failed_note("x-sys", &closure, stderr.as_bytes(), None);
-        let lib = note("The system library `libudev` required by crate `x-sys` was not found in the pkg-config search path.");
-        assert!(lib.contains("[workspace.metadata.blaze.system-deps]") && lib.contains("libudev"), "{lib}");
-        let wrote = note("Error: Os { code: 30, kind: ReadOnlyFilesystem, message: \"Read-only file system\" }");
+        let lib = note(
+            "The system library `libudev` required by crate `x-sys` was not found in the pkg-config search path.",
+        );
+        assert!(
+            lib.contains("[workspace.metadata.blaze.system-deps]") && lib.contains("libudev"),
+            "{lib}"
+        );
+        let wrote = note(
+            "Error: Os { code: 30, kind: ReadOnlyFilesystem, message: \"Read-only file system\" }",
+        );
         assert!(wrote.contains("unsandboxed-build-scripts = [\"x-sys\"]"), "{wrote}");
-        let unset = note("panicked at src/input.rs:1:1:\ncargo environment variable `FOO` is missing");
+        let unset =
+            note("panicked at src/input.rs:1:1:\ncargo environment variable `FOO` is missing");
         assert!(unset.contains("build-script-env") && unset.contains("`FOO`"), "{unset}");
     }
 
@@ -728,7 +743,8 @@ mod tests {
 
     #[test]
     fn a_view_hides_the_target_directory_and_git_but_what_is_bound_in_them() {
-        let root = std::env::temp_dir().join(format!("ra-jit-hermetic-view-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("ra-jit-hermetic-view-{}", std::process::id()));
         _ = std::fs::remove_dir_all(&root);
         let package = root.join("ws");
         let out_dir = package.join("target/debug/build/ws-1/out");
