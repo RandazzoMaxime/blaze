@@ -1,32 +1,25 @@
-//! `units build|check|test|bench [FLAGS]`: the unit graph blaze makes for the cargo command of
-//! those flags, as `cargo <command> --unit-graph -Zunstable-options` prints it, from the
-//! current directory. `harness/resolve.py units` compares the two. The host's triple and cfg
-//! are rustc's (`RUSTC`, else `rustc` on the PATH), as cargo asks them.
+//! `units build|check|test|bench --host TRIPLE --host-cfg-file FILE [--target TRIPLE
+//! --target-cfg-file FILE] [FLAGS]`: the unit graph blaze makes for the cargo command of those
+//! flags, as `cargo <command> --unit-graph -Zunstable-options` prints it, from the current
+//! directory. `harness/resolve.py units` compares the two. Each cfg file is what
+//! `rustc --print cfg --target TRIPLE` prints, which the harness asks.
 
 #![allow(
     clippy::print_stderr,
     clippy::print_stdout,
-    clippy::disallowed_methods,
-    reason = "a command line program that asks rustc where it is run"
+    reason = "a command line program"
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 
 use anyhow::{Context as _, bail};
 use blaze_units::{Filter, Intent, Platformed};
 
-fn rustc_says(args: &[&str]) -> anyhow::Result<String> {
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
-    let output =
-        Command::new(&rustc).args(args).output().with_context(|| format!("running {rustc}"))?;
-    anyhow::ensure!(output.status.success(), "`{rustc} {}` failed", args.join(" "));
-    Ok(String::from_utf8(output.stdout)?)
-}
-
-fn platformed(triple: &str) -> anyhow::Result<Platformed> {
-    let printed = rustc_says(&["--print", "cfg", "--target", triple])?;
+fn platformed(triple: &str, cfg_file: Option<&Path>) -> anyhow::Result<Platformed> {
+    let cfg_file = cfg_file.with_context(|| format!("no cfg file for {triple}"))?;
+    let printed = std::fs::read_to_string(cfg_file)
+        .with_context(|| format!("reading {}", cfg_file.display()))?;
     let cfg = printed
         .lines()
         .filter(|it| !it.is_empty())
@@ -39,7 +32,10 @@ fn platformed(triple: &str) -> anyhow::Result<Platformed> {
 struct Flags {
     release: bool,
     profile: Option<String>,
+    host: Option<String>,
+    host_cfg_file: Option<PathBuf>,
     target: Option<String>,
+    target_cfg_file: Option<PathBuf>,
     packages: Vec<String>,
     workspace: bool,
     excludes: Vec<String>,
@@ -77,7 +73,10 @@ fn parse(args: &[String]) -> anyhow::Result<(String, Flags)> {
         match flag.as_str() {
             "--release" | "-r" => flags.release = true,
             "--profile" => flags.profile = Some(value()?),
+            "--host" => flags.host = Some(value()?),
+            "--host-cfg-file" => flags.host_cfg_file = Some(PathBuf::from(value()?)),
             "--target" => flags.target = Some(value()?),
+            "--target-cfg-file" => flags.target_cfg_file = Some(PathBuf::from(value()?)),
             "-p" | "--package" => flags.packages.push(value()?),
             "--workspace" | "--all" => flags.workspace = true,
             "--exclude" => flags.excludes.push(value()?),
@@ -134,11 +133,13 @@ fn run() -> anyhow::Result<()> {
         flags.all_benches,
         flags.all_targets,
     );
-    let told = rustc_says(&["-vV"])?;
-    let host =
-        told.lines().find_map(|it| it.strip_prefix("host: ")).context("rustc names no host")?;
-    let host = platformed(host)?;
-    let target = flags.target.as_deref().map(platformed).transpose()?;
+    let host = flags.host.as_deref().context("no --host given")?;
+    let host = platformed(host, flags.host_cfg_file.as_deref())?;
+    let target = flags
+        .target
+        .as_deref()
+        .map(|it| platformed(it, flags.target_cfg_file.as_deref()))
+        .transpose()?;
     let cwd = std::env::current_dir()?;
     let asked = blaze_metadata::Asked {
         cwd: &cwd,

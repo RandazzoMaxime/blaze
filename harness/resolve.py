@@ -506,10 +506,18 @@ def compare_sysroot(case, blaze, cargo_home):
     return result
 
 
-def unit_runs(root, units, cargo_home):
-    """Each run on the tree at root: (args, cargo's, blaze's), both as {code, graph or error}."""
+def unit_runs(root, units, cargo_home, work):
+    """Each run on the tree at root: (args, cargo's, blaze's), both as {code, graph or error}.
+    blaze's is told the host's triple and cfg as rustc prints them, written under work."""
     env = {k: v for k, v in clean_env(cargo_home).items() if k != "CARGO_ORACLE"}
     env["RUSTC_BOOTSTRAP"] = "1"
+    rustc = ["rustc", CARGO[1]] if len(CARGO) > 1 and CARGO[1].startswith("+") else ["rustc"]
+    told = subprocess.run(rustc + ["-vV"], capture_output=True, text=True, check=True).stdout
+    host = next(line[len("host: "):] for line in told.splitlines() if line.startswith("host: "))
+    host_cfg = os.path.join(work, "host-cfg")
+    with open(host_cfg, "w") as f:
+        f.write(subprocess.run(rustc + ["--print", "cfg", "--target", host], capture_output=True, text=True, check=True).stdout)
+    told_host = ["--host", host, "--host-cfg-file", host_cfg]
 
     def norm(text):
         for path, name in ((os.path.realpath(cargo_home), "$CARGO_HOME"), (cargo_home, "$CARGO_HOME"), (os.path.realpath(root), "$ROOT"), (root, "$ROOT")):
@@ -523,7 +531,7 @@ def unit_runs(root, units, cargo_home):
 
     for args in UNIT_RUNS:
         cargo = outcome(*run(CARGO + args + ["--unit-graph", "-Zunstable-options"], root, env))
-        yield args, cargo, outcome(*run([units, *args], root, env))
+        yield args, cargo, outcome(*run([units, *args, *told_host], root, env))
 
 
 def unit_named(graph, i):
@@ -591,7 +599,7 @@ def compare_units(case, units, cargo_home):
             shutil.copytree(case["dir"], root, ignore=shutil.ignore_patterns("target"))
         else:
             root = case["dir"]
-        runs = list(unit_runs(root, units, cargo_home))
+        runs = list(unit_runs(root, units, cargo_home, work))
     finally:
         shutil.rmtree(work)
     count = refused = 0
