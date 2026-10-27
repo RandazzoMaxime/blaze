@@ -195,6 +195,11 @@ pub struct Squares;
 impl Each for Squares {
     type Item = shapes::Square;
 }
+/// Yields squares too, over a parameter with a bound of the impl's own.
+pub struct Finds<A>(A);
+impl<A: Clone> Each for Finds<A> {
+    type Item = shapes::Square;
+}
 /// Yields helpers, not `Copy` either, though their crate could make them so.
 pub struct Helpers;
 impl Each for Helpers {
@@ -219,6 +224,7 @@ mod corner {
 pub use corner::Corner;
 
 //- /dep.rs crate:dep@1.2.0,https://example.com/dep.git
+#![doc(html_root_url = "https://docs.rs/dep/1.2.0")]
 /// Helps.
 pub struct Helper;
 
@@ -237,12 +243,17 @@ pub use deep::Deep;
 "#;
 
 fn load() -> (RootDatabase, Model) {
+    load_with(false)
+}
+
+fn load_with(no_deps: bool) -> (RootDatabase, Model) {
     let mut db = RootDatabase::with_files(FIXTURE);
     let fixture = Crate::all(&db)
         .into_iter()
         .find(|it| crate::crate_name(&db, *it) == "fixture")
         .expect("the fixture crate");
-    let crates = crate::crates_to_document(&db, &[Asked { krate: fixture, private: false }], false);
+    let asked = [Asked { krate: fixture, private: false }];
+    let crates = crate::crates_to_document(&db, &asked, no_deps);
     crate::set_cfg_doc(&mut db, &crates);
     let model = crate::model(&db, crates);
     (db, model)
@@ -481,6 +492,7 @@ fn provided_methods_that_cannot_apply_are_left_out() {
         each.expect("impl Each").items.iter().map(|it| it.name.clone()).collect()
     };
     assert_eq!(members("fixture::Squares"), ["Item", "borrowed"], "a square is not Copy");
+    assert_eq!(members("fixture::Finds"), ["Item", "borrowed"], "nor through `A: Clone`");
     assert_eq!(
         members("fixture::Helpers"),
         ["Item", "copied", "borrowed"],
@@ -569,6 +581,23 @@ fn writes_pages_sources_and_search() {
     let index = text(&std::fs::read_to_string(out.join("fixture/index.html")).unwrap());
     assert!(index.contains("let thing = fixture::Thing::new(1);"), "the example is there: {index}");
     assert!(!index.contains("let hidden"), "hidden example lines are not");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_crate_not_documented_is_linked_at_its_html_root_url() {
+    let (_db, model) = load_with(true);
+    let out = std::env::temp_dir().join(format!("blaze-doc-test-remote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    crate::html::write(&model, &out).expect("written");
+    assert!(!out.join("dep").exists(), "--no-deps");
+    let thing = std::fs::read_to_string(out.join("fixture/struct.Thing.html")).unwrap();
+    assert!(
+        thing.contains(
+            "href=\"https://docs.rs/dep/1.2.0/dep/deep/struct.Deep.html\" title=\"struct dep::deep::Deep\""
+        ),
+        "where it is declared, which its docs redirect from"
+    );
     let _ = std::fs::remove_dir_all(&out);
 }
 

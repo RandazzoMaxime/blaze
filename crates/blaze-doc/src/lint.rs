@@ -87,11 +87,15 @@ fn active(meta: ast::Meta, cfg: &CfgOptions) -> Vec<ast::Meta> {
 }
 
 fn names_the_lint(tt: &ast::TokenTree) -> bool {
-    let text: String = tt.syntax().text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+    let text: String =
+        tt.syntax().text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
     text.trim_start_matches('(').trim_end_matches(')').split(',').any(|lint| {
         matches!(
             lint,
-            "rustdoc::broken_intra_doc_links" | "broken_intra_doc_links" | "rustdoc::all" | "warnings"
+            "rustdoc::broken_intra_doc_links"
+                | "broken_intra_doc_links"
+                | "rustdoc::all"
+                | "warnings"
         )
     })
 }

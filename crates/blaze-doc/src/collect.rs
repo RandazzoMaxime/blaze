@@ -129,7 +129,8 @@ fn fundamental(db: &RootDatabase, adt: hir::Adt) -> bool {
 }
 
 /// What every crate's impls need from `core`: the auto traits, a type that is not each, and
-/// the blanket impls of the sysroot and the crates documented.
+/// the blanket impls of the sysroot and of every crate a crate documented links, documented
+/// or not.
 struct StdItems {
     auto: Vec<AutoTrait>,
     blankets: Vec<Impl>,
@@ -184,13 +185,14 @@ impl StdItems {
                     auto.push(AutoTrait { trait_, not });
                 }
             }
-            let mut crates: Vec<Crate> = Crate::all(db)
-                .into_iter()
-                .filter(|it| {
-                    matches!(places::lang_crate_name(db, *it), Some("core" | "alloc" | "std"))
-                })
-                .collect();
-            crates.extend(places.crates.iter().map(|it| it.krate));
+            let mut upstream = FxHashSet::default();
+            for documented in &places.crates {
+                upstream.extend(places::upstream(db, documented.krate));
+            }
+            let crates = Crate::all(db).into_iter().filter(|it| {
+                upstream.contains(it)
+                    || matches!(places::lang_crate_name(db, *it), Some("core" | "alloc" | "std"))
+            });
             for krate in crates {
                 for imp in Impl::all_in_crate(db, krate) {
                     if imp.trait_(db).is_some()

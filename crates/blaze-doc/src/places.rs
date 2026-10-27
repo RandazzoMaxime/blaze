@@ -66,8 +66,11 @@ pub(crate) struct Places {
     canonical: FxHashMap<ModuleDef, (usize, usize)>,
     /// Each crate's own page of the items it places, inlined ones of other crates included.
     own: Vec<FxHashMap<ModuleDef, usize>>,
-    /// The path of an item of `std`, `core` or `alloc` on doc.rust-lang.org, found once.
-    sysroot: Mutex<FxHashMap<ModuleDef, Option<ItemRef>>>,
+    /// The page of an item of a crate not documented here, found once: on doc.rust-lang.org for
+    /// the sysroot's crates, under its `html_root_url` for a crate that has one.
+    elsewhere: Mutex<FxHashMap<ModuleDef, Option<ItemRef>>>,
+    /// Each crate not documented here: its `html_root_url`.
+    roots: Mutex<FxHashMap<Crate, Option<String>>>,
 }
 
 impl Places {
@@ -82,6 +85,7 @@ impl Places {
             anchor: None,
             descr: None,
             declared: None,
+            remote: None,
         }
     }
 
@@ -207,12 +211,34 @@ impl<'a> Linking<'a> {
             return Some(found);
         }
         let krate = krate_of(db, def)?;
-        let name = lang_crate_name(db, krate)?;
-        if let Some(found) = self.sysroot.lock().unwrap().get(&def) {
+        if self.crates.iter().any(|it| it.krate == krate) {
+            return None;
+        }
+        if let Some(found) = self.elsewhere.lock().unwrap().get(&def) {
             return found.clone();
         }
-        let found = sysroot_ref(db, def, name);
-        self.sysroot.lock().unwrap().insert(def, found.clone());
+        let found = match lang_crate_name(db, krate) {
+            Some(name) => defined_ref(db, def, name),
+            // rustdoc's `extern_location`: a crate with no docs here is linked where its
+            // `html_root_url` says, else not at all.
+            None => defined_ref(db, def, &crate::crate_name(db, krate)).map(|mut it| {
+                it.remote = self.html_root_url(db, krate);
+                it
+            }),
+        };
+        self.elsewhere.lock().unwrap().insert(def, found.clone());
+        found
+    }
+
+    fn html_root_url(&self, db: &RootDatabase, krate: Crate) -> Option<String> {
+        if let Some(found) = self.roots.lock().unwrap().get(&krate) {
+            return found.clone();
+        }
+        let found = match krate.root_module(db).definition_source(db).value {
+            hir::ModuleSource::SourceFile(file) => crate::attrs::html_root_url(&file),
+            _ => None,
+        };
+        self.roots.lock().unwrap().insert(krate, found.clone());
         found
     }
 }
@@ -226,6 +252,7 @@ pub(crate) fn primitive(name: &str) -> ItemRef {
         anchor: None,
         descr: None,
         declared: None,
+        remote: None,
     }
 }
 
@@ -270,10 +297,10 @@ pub(crate) fn lang_crate_name(db: &RootDatabase, krate: Crate) -> Option<&'stati
     }
 }
 
-/// The page of an item of a sysroot crate where it is defined, as rustdoc links it: under a
-/// private module that is a page doc.rust-lang.org redirects to where it is exported. `None`
-/// for an item the crate does not export, or only hidden.
-fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<ItemRef> {
+/// The page of an item of a crate not documented here where it is defined, as rustdoc links
+/// it: under a private module, a page the crate's docs redirect to where it is exported.
+/// `None` for an item the crate does not export, or only hidden.
+fn defined_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<ItemRef> {
     let kind = kind_of(db, def)?;
     if let ModuleDef::Module(it) = def
         && it.is_crate_root(db)
@@ -287,6 +314,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             anchor: None,
             descr: None,
             declared: None,
+            remote: None,
         });
     }
     let name = def.name(db)?.as_str().to_owned();
@@ -302,6 +330,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
             anchor: None,
             descr: None,
             declared: None,
+            remote: None,
         });
     }
     // The module whose scope declares it; a module's parent for a module.
@@ -359,6 +388,7 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
         anchor: None,
         descr: None,
         declared: None,
+        remote: None,
     })
 }
 
@@ -448,7 +478,8 @@ pub(crate) fn place(db: &RootDatabase, crates: Vec<Documented>) -> Places {
         placed,
         canonical: canonical.into_iter().map(|(def, (_, at))| (def, at)).collect(),
         own,
-        sysroot: Mutex::default(),
+        elsewhere: Mutex::default(),
+        roots: Mutex::default(),
     }
 }
 
