@@ -269,6 +269,14 @@ fn target_of(executable: &Path) -> Option<&Path> {
     executable.ancestors().skip(1).find(|it| it.join("CACHEDIR.TAG").is_file())
 }
 
+/// Cargo's home in the environment `env`, as cargo finds it: `CARGO_HOME`, else `.cargo` in
+/// the home directory.
+fn cargo_home(env: &[(String, String)]) -> Option<PathBuf> {
+    let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| PathBuf::from(&it.1));
+    let home = var("CARGO_HOME").or_else(|| Some(var("HOME")?.join(".cargo")))?;
+    Some(std::fs::canonicalize(&home).unwrap_or(home))
+}
+
 /// Where this command keeps the specs and records of its sandboxes, removed when it is done.
 pub(crate) struct Scratch {
     dir: PathBuf,
@@ -299,6 +307,13 @@ impl Scratch {
         if let Some(target) = target_of(&test.executable).filter(|it| !it.starts_with(&state.root))
         {
             overlays.push(target.to_owned());
+        }
+        // Every cargo takes its locks in its home and records there what it used, so a test
+        // that runs cargo (trybuild's, a cargo plugin's) writes it, for itself alone.
+        if let Some(home) = cargo_home(&env).filter(|it| it.is_dir())
+            && !overlays.iter().any(|it| home.starts_with(it))
+        {
+            overlays.push(home);
         }
         let mut not_inputs = vec![test.executable.clone()];
         not_inputs.extend(std::fs::canonicalize(&test.executable).ok());

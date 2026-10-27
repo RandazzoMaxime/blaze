@@ -171,8 +171,10 @@ in a sandbox.
 "Everything should by default be in sandbox and yea it should have sandbox support macos"
 (Andrew, 2026-10-26). Every test executable `cargo ra-jit test` runs, under `all` and
 `affected` alike, runs in a sandbox of its own, with libtest's threads inside it as cargo would
-run them. In it the machine's files are read-only; the workspace and the target directory are
-as they are, but what a test writes there is kept to the run and gone when it ends; `/tmp`,
+run them. In it the machine's files are read-only; the workspace, the target directory and
+cargo's home (`CARGO_HOME`, `~/.cargo`) are as they are, but what a test writes there is kept
+to the run and gone when it ends (every cargo takes its locks in its home and records there
+what it used, so a test that runs cargo, as trybuild's do, writes it); `/tmp`,
 `/var/tmp` and `/dev/shm` (on macOS the temporary directory) start empty; there is no network
 but the sandbox's own loopback, and no Unix socket but those the run makes itself; and the
 environment is fixed. A write outside gets the error a read-only file system gives, and a

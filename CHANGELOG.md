@@ -1016,6 +1016,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A test that runs cargo runs in the sandbox: every cargo takes its locks in its home and
+  records there what it used (`.package-cache`, `.global-cache`), which the read-only machine
+  refused, so trybuild's tests and a cargo plugin's own failed. Cargo's home (`CARGO_HOME`, else
+  `~/.cargo`) is now an overlay, as the workspace and target directory are: the test writes it
+  for itself alone, and nothing of it is kept (docs/cargo.md, "Every test runs in a sandbox").
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
