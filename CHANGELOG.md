@@ -1016,6 +1016,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- Git worktrees of a repository share a whole build's worker again, as docs/cargo.md says: the
+  worker was keyed by the absolute directory the build was asked in, so each worktree loaded
+  the workspace in a worker of its own. A worktree read as the loaded checkout now has its
+  program linked into its own executable, with the worker's own link line for that place, and
+  a full build in one checkout links the others' executables again rather than splice its
+  patches into ones linked with the whole object of before.
 - The daemon's own link passes the linker what `-C link-arg` and `-C link-args` say in
   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or the configuration's `rustflags`, after the native
   libraries as rustc does; it left them out. A program linked with
