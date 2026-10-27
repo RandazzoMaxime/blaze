@@ -18,7 +18,13 @@
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
 #![cfg_attr(
     all(feature = "nightly", target_arch = "x86_64"),
-    feature(stdarch_x86_avx512vp2intersect, stdarch_x86_avx512_f16, stdarch_x86_avx512_bf16)
+    feature(
+        stdarch_x86_avx512vp2intersect,
+        stdarch_x86_avx512_f16,
+        stdarch_x86_avx512_bf16,
+        simd_x86_clflushopt,
+        clflushopt_target_feature
+    )
 )]
 // The `core::arch::aarch64` functions `neon_intrinsics` calls that are not stable yet.
 #![cfg_attr(
@@ -2547,17 +2553,19 @@ pub mod packed_drop {
     }
 }
 
-/// `offset_of!` of a field of a packed struct takes no reference to it.
+/// `offset_of!` of a field of a packed struct takes no reference to it. The struct is never laid
+/// out by ra-jit, and --layouts compares types by their names without paths: named `Header`, it
+/// was compared with std's Windows allocator `Header(*mut u8)`, which ra-jit lays out.
 pub mod packed_offset_of {
     #[repr(C, packed)]
-    pub struct Header {
+    pub struct PackedHeader {
         pub magic: u16,
         pub version: u8,
         pub checksum: u32,
     }
 
     pub fn run(base: usize) -> usize {
-        base + core::mem::offset_of!(Header, checksum)
+        base + core::mem::offset_of!(PackedHeader, checksum)
     }
 }
 
@@ -5118,6 +5126,22 @@ pub mod promoted_slices {
     }
 }
 
+/// `&mut [][..]` borrows an empty array mutably to index it, and rustc promotes a mutable
+/// borrow of an empty array, so the slice outlives the function (bun's `copies!`).
+pub mod promoted_empty_mut {
+    fn pick(v: &mut [u32], all: bool) -> &mut [u32] {
+        match all {
+            true => v,
+            false => &mut [][..],
+        }
+    }
+
+    pub fn run() -> (usize, usize) {
+        let mut v = [1, 2, 3];
+        (pick(&mut v, true).len(), pick(&mut v, false).len())
+    }
+}
+
 pub mod reified {
     #[derive(Debug)]
     pub struct W(u8, String);
@@ -5651,6 +5675,495 @@ pub mod simd_x86 {
         if is_x86_feature_detected!("avx512f") { out += &format!(" {:?}", unsafe { blend(a, b) }); }
         if is_x86_feature_detected!("avx512bw") { out += &format!(" {:?}", unsafe { permute16(a, b) }); }
         if is_x86_feature_detected!("avx512vbmi") { out += &format!(" {:?}", unsafe { permute8(a, b) }); }
+        out
+    }
+}
+
+/// x86's intrinsics that LLVM selects one instruction for, at the edges of their inputs: NaN
+/// and both zeros for the minimum and maximum, halves and values past the integer's range for
+/// the conversions (in two rounding modes of MXCSR), counts past the lane's width for the
+/// shifts, the least integer for the rounded high product, flags that hold, that do not and
+/// that are unordered; the crypto instructions; and those on the machine's state, whose
+/// values are not the same twice (random numbers, the time stamp counter, what XSAVE saves),
+/// checked by their shape: the flag and the value agreeing, the counter not going back, the
+/// saved MXCSR being the one `stmxcsr` reads.
+#[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
+pub mod x86_instructions {
+    use core::arch::x86_64::*;
+    use std::mem::transmute;
+
+    fn ps(v: __m128) -> [u32; 4] { unsafe { transmute(v) } }
+    fn pd(v: __m128d) -> [u64; 2] { unsafe { transmute(v) } }
+    fn epi(v: __m128i) -> [u16; 8] { unsafe { transmute(v) } }
+
+    pub fn min_max() -> Vec<[u32; 4]> {
+        unsafe {
+            let a = _mm_set_ps(f32::NAN, -0.0, 0.0, 1.0);
+            let b = _mm_set_ps(1.0, 0.0, -0.0, f32::NAN);
+            vec![
+                ps(_mm_max_ps(a, b)), ps(_mm_max_ps(b, a)), ps(_mm_min_ps(a, b)), ps(_mm_min_ps(b, a)),
+                ps(_mm_max_ss(a, b)), ps(_mm_min_ss(b, a)),
+            ]
+        }
+    }
+    pub fn min_max_double() -> Vec<[u64; 2]> {
+        unsafe {
+            let a = _mm_set_pd(f64::NAN, -0.0);
+            let b = _mm_set_pd(1.0, 0.0);
+            let c = _mm_set_pd(3.0, f64::NAN);
+            vec![
+                pd(_mm_max_pd(a, b)), pd(_mm_max_pd(b, a)), pd(_mm_min_pd(a, b)), pd(_mm_min_pd(b, a)),
+                pd(_mm_max_sd(b, c)), pd(_mm_min_sd(c, b)), pd(_mm_max_sd(a, b)), pd(_mm_min_sd(a, b)),
+            ]
+        }
+    }
+    /// The estimates, whose bits only the hardware's tables say.
+    pub fn estimates() -> Vec<[u32; 4]> {
+        unsafe {
+            let a = _mm_set_ps(4.0, -0.0, f32::INFINITY, 3.0e-39);
+            let b = _mm_set_ps(9.0, 7.0, 1.0e-3, 0.0);
+            vec![ps(_mm_rcp_ps(a)), ps(_mm_rsqrt_ps(b)), ps(_mm_rcp_ss(b)), ps(_mm_rsqrt_ss(a))]
+        }
+    }
+    /// The conversions, which round as MXCSR says unless they truncate.
+    fn conversions() -> (Vec<i64>, Vec<[u32; 4]>) {
+        unsafe {
+            let mut ints = Vec::new();
+            let mut vectors = Vec::new();
+            for x in [2.5f32, -2.5, 3.5, -0.0, 1.0e10, -3.0e9, f32::NAN, f32::INFINITY] {
+                let s = _mm_set_ss(x);
+                let d = _mm_set_sd(f64::from(x) * 1e9);
+                ints.extend([
+                    i64::from(_mm_cvtss_si32(s)), i64::from(_mm_cvttss_si32(s)), _mm_cvtss_si64(s), _mm_cvttss_si64(s),
+                    i64::from(_mm_cvtsd_si32(d)), i64::from(_mm_cvttsd_si32(d)), _mm_cvtsd_si64(d), _mm_cvttsd_si64(d),
+                ]);
+            }
+            let singles = _mm_set_ps(2.5, -1.5, 3.0e9, f32::NAN);
+            let doubles = _mm_set_pd(-2.5, 2147483647.5);
+            vectors.extend([
+                ps(transmute(_mm_cvtps_epi32(singles))), ps(transmute(_mm_cvttps_epi32(singles))),
+                ps(transmute(_mm_cvtpd_epi32(doubles))), ps(transmute(_mm_cvttpd_epi32(doubles))),
+                ps(_mm_cvtsd_ss(singles, _mm_set_sd(1.0 + f64::EPSILON * 3.0))),
+                ps(_mm_cvtsd_ss(singles, _mm_set_sd(1.0e300))),
+            ]);
+            (ints, vectors)
+        }
+    }
+    /// The conversions as MXCSR rounds by default, then rounding down, then back.
+    pub fn rounding_modes() -> (u32, (Vec<i64>, Vec<[u32; 4]>), u32, (Vec<i64>, Vec<[u32; 4]>), u32) {
+        let csr = unsafe { _mm_getcsr() };
+        let nearest = conversions();
+        unsafe { _mm_setcsr((csr & !_MM_ROUND_MASK) | _MM_ROUND_DOWN) };
+        let down_csr = unsafe { _mm_getcsr() };
+        let down = conversions();
+        unsafe { _mm_setcsr(csr) };
+        (csr, nearest, down_csr, down, unsafe { _mm_getcsr() })
+    }
+    pub fn comparisons() -> Vec<i32> {
+        unsafe {
+            let mut out = Vec::new();
+            for (l, r) in [(1.0, 2.0), (2.0, 1.0), (1.0, 1.0), (-0.0, 0.0), (f32::NAN, 1.0), (1.0, f32::NAN)] {
+                let (a, b) = (_mm_set_ss(l), _mm_set_ss(r));
+                out.extend([
+                    _mm_comieq_ss(a, b), _mm_comineq_ss(a, b), _mm_comilt_ss(a, b), _mm_comile_ss(a, b),
+                    _mm_comigt_ss(a, b), _mm_comige_ss(a, b), _mm_ucomieq_ss(a, b), _mm_ucomineq_ss(a, b),
+                    _mm_ucomilt_ss(a, b), _mm_ucomile_ss(a, b), _mm_ucomigt_ss(a, b), _mm_ucomige_ss(a, b),
+                ]);
+                let (a, b) = (_mm_set_sd(f64::from(l)), _mm_set_sd(f64::from(r)));
+                out.extend([
+                    _mm_comieq_sd(a, b), _mm_comineq_sd(a, b), _mm_comilt_sd(a, b), _mm_comile_sd(a, b),
+                    _mm_comigt_sd(a, b), _mm_comige_sd(a, b), _mm_ucomieq_sd(a, b), _mm_ucomineq_sd(a, b),
+                    _mm_ucomilt_sd(a, b), _mm_ucomile_sd(a, b), _mm_ucomigt_sd(a, b), _mm_ucomige_sd(a, b),
+                ]);
+            }
+            out
+        }
+    }
+    /// The shifts by the count in the low 64 bits of a vector: 0, within the lane, its width
+    /// less one, its width, and past 32 bits.
+    pub fn shifts() -> Vec<[u16; 8]> {
+        unsafe {
+            let v = _mm_set_epi16(i16::MIN, -1, 0x1234, 1, -0x5678, 0x7fff, 2, -3);
+            let mut out = Vec::new();
+            for count in [0i64, 3, 15, 16, 31, 63, 64, 1 << 40] {
+                let c = _mm_set_epi64x(-1, count);
+                out.extend([
+                    epi(_mm_sll_epi16(v, c)), epi(_mm_srl_epi16(v, c)), epi(_mm_sra_epi16(v, c)),
+                    epi(_mm_sll_epi32(v, c)), epi(_mm_srl_epi32(v, c)), epi(_mm_sra_epi32(v, c)),
+                    epi(_mm_sll_epi64(v, c)), epi(_mm_srl_epi64(v, c)),
+                ]);
+            }
+            out
+        }
+    }
+    /// The fences, the flush of a line, and the store of the bytes a mask selects.
+    pub fn memory() -> [u8; 16] {
+        unsafe {
+            let mut bytes = [0xeeu8; 16];
+            _mm_sfence();
+            _mm_lfence();
+            _mm_mfence();
+            _mm_clflush(bytes.as_ptr());
+            let v = _mm_set_epi8(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+            let mask = _mm_set_epi8(-1, 0, 0x7f, -128, 1, -2, 0, 0, -1, -1, 0, 0, 0x40, -64, 0, -1);
+            _mm_maskmoveu_si128(v, mask, bytes.as_mut_ptr().cast());
+            _mm_sfence();
+            bytes
+        }
+    }
+    #[cfg(feature = "nightly")]
+    #[target_feature(enable = "clflushopt")]
+    pub unsafe fn flushed(x: &u64) -> u64 {
+        unsafe { _mm_clflushopt((x as *const u64).cast()) };
+        *x
+    }
+    #[target_feature(enable = "ssse3")]
+    pub unsafe fn signs() -> Vec<[u16; 8]> {
+        unsafe {
+            let a = _mm_set_epi16(i16::MIN, -1, 0x1234, 1, -0x5678, 0x7fff, 0, -3);
+            let b = _mm_set_epi16(-1, 0, 1, i16::MIN, 0x7fff, -2, 5, 0);
+            let c = _mm_set_epi16(i16::MIN, i16::MIN, 0x4000, -0x4000, 0x7fff, 1, -1, 0x2000);
+            vec![
+                epi(_mm_sign_epi8(a, b)), epi(_mm_sign_epi16(a, b)), epi(_mm_sign_epi32(a, b)),
+                epi(_mm_mulhrs_epi16(a, c)), epi(_mm_mulhrs_epi16(c, c)),
+            ]
+        }
+    }
+    #[target_feature(enable = "sse4.1")]
+    pub unsafe fn rounds() -> (Vec<i32>, Vec<[u32; 4]>, Vec<[u64; 2]>) {
+        unsafe {
+            let ones = _mm_set1_epi8(-1);
+            let v = _mm_set_epi64x(0x00ff, 0x0f00);
+            let tests = vec![
+                _mm_testnzc_si128(v, ones), _mm_testnzc_si128(v, v), _mm_testnzc_si128(v, _mm_setzero_si128()),
+                _mm_testnzc_si128(ones, v),
+            ];
+            let a = _mm_set_ps(9.0, 8.0, 7.0, 6.0);
+            let singles = [-2.5f32, 2.5, -0.4, f32::NAN].map(|x| {
+                let b = _mm_set_ss(x);
+                ps(_mm_floor_ss(a, b))[0] as u64 | (ps(_mm_ceil_ss(a, b))[0] as u64) << 32
+            });
+            let floors = vec![
+                ps(_mm_floor_ss(a, _mm_set_ss(-2.5))), ps(_mm_ceil_ss(a, _mm_set_ss(-0.4))),
+                ps(_mm_round_ss::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(a, _mm_set_ss(2.5))),
+                [singles[0] as u32, singles[1] as u32, singles[2] as u32, singles[3] as u32],
+            ];
+            let d = _mm_set_pd(5.0, 4.0);
+            let doubles = vec![
+                pd(_mm_floor_sd(d, _mm_set_sd(-2.5))), pd(_mm_ceil_sd(d, _mm_set_sd(-0.5))),
+                pd(_mm_floor_sd(d, _mm_set_sd(f64::NAN))), pd(_mm_ceil_sd(d, _mm_set_sd(1e300))),
+                pd(_mm_round_sd::<{ _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC }>(d, _mm_set_sd(-7.75))),
+            ];
+            (tests, floors, doubles)
+        }
+    }
+    /// AMD's bit field extraction and insertion: the field's length and place from the low
+    /// bytes of the second operand, a length of 0 being 64.
+    #[target_feature(enable = "sse4a")]
+    pub unsafe fn fields() -> Vec<[u64; 2]> {
+        unsafe {
+            let x = _mm_set_epi64x(0x1111_2222_3333_4444, 0x0123_4567_89ab_cdef);
+            let y = _mm_set_epi64x(0x5555_6666_7777_8888, 0x7edc_ba98_7654_3210);
+            let mut out = Vec::new();
+            for (length, index) in [(8i64, 4i64), (0, 0), (16, 48), (63, 1), (4, 60)] {
+                let control = _mm_set_epi64x(0, length | index << 8);
+                out.push(transmute(_mm_extract_si64(x, control)));
+                let inserted = _mm_set_epi64x(length | index << 8, _mm_cvtsi128_si64(y));
+                out.push(transmute(_mm_insert_si64(x, inserted)));
+            }
+            out
+        }
+    }
+    #[target_feature(enable = "avx")]
+    pub unsafe fn avx() -> (Vec<[u32; 8]>, Vec<[u32; 4]>, Vec<i32>) {
+        unsafe {
+            let wide = |v: __m256| transmute::<_, [u32; 8]>(v);
+            let a = _mm256_set_ps(f32::NAN, -0.0, 0.0, 1.0, 2.5, -2.5, 3.0e9, 4.0);
+            let b = _mm256_set_ps(1.0, 0.0, -0.0, f32::NAN, -1.5, 0.5, 2.0, f32::INFINITY);
+            let c = _mm256_set_pd(f64::NAN, -0.0, 2.5, -3.5);
+            let d = _mm256_set_pd(1.0, 0.0, f64::NAN, 1e300);
+            let indices = _mm256_set_epi32(3, 2, 1, 0, -1, 6, 5, 0x7fff_fffd);
+            let selectors = _mm256_set_epi64x(2, 0, -1, 3);
+            let vectors = vec![
+                wide(_mm256_max_ps(a, b)), wide(_mm256_min_ps(a, b)), wide(transmute(_mm256_max_pd(c, d))),
+                wide(transmute(_mm256_min_pd(d, c))), wide(transmute(_mm256_cvtps_epi32(a))),
+                wide(transmute(_mm256_cvttps_epi32(a))), wide(_mm256_rcp_ps(a)), wide(_mm256_rsqrt_ps(b)),
+                wide(_mm256_permutevar_ps(a, indices)), wide(transmute(_mm256_permutevar_pd(c, selectors))),
+            ];
+            let halves = vec![
+                ps(transmute(_mm256_cvtpd_epi32(c))), ps(transmute(_mm256_cvttpd_epi32(d))),
+                ps(_mm_permutevar_ps(_mm256_castps256_ps128(a), _mm256_castsi256_si128(indices))),
+                ps(transmute(_mm_permutevar_pd(_mm256_castpd256_pd128(c), _mm_set_epi64x(0, 2)))),
+            ];
+            let neg = _mm256_set_ps(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
+            let pos = _mm256_set1_ps(1.0);
+            let negd = _mm256_set_pd(-1.0, 1.0, -1.0, 1.0);
+            let ones = _mm256_set1_epi8(-1);
+            let some = _mm256_set_epi64x(0, 1, 0, 0);
+            let mut tests = Vec::new();
+            for (x, y) in [(neg, neg), (neg, pos), (pos, neg), (neg, _mm256_set1_ps(-1.0))] {
+                tests.extend([_mm256_testz_ps(x, y), _mm256_testc_ps(x, y), _mm256_testnzc_ps(x, y)]);
+                let (x, y) = (_mm256_castps256_ps128(x), _mm256_castps256_ps128(y));
+                tests.push(_mm_testnzc_ps(x, y));
+            }
+            for (x, y) in [(negd, negd), (negd, c), (c, negd)] {
+                tests.extend([_mm256_testz_pd(x, y), _mm256_testc_pd(x, y), _mm256_testnzc_pd(x, y)]);
+                tests.push(_mm_testnzc_pd(_mm256_castpd256_pd128(x), _mm256_castpd256_pd128(y)));
+            }
+            tests.extend([_mm256_testnzc_si256(some, ones), _mm256_testnzc_si256(ones, ones)]);
+            _mm256_zeroall();
+            (vectors, halves, tests)
+        }
+    }
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn avx2() -> Vec<[u16; 16]> {
+        unsafe {
+            let wide = |v: __m256i| transmute::<_, [u16; 16]>(v);
+            let a = _mm256_set_epi16(i16::MIN, -1, 0x1234, 1, -0x5678, 0x7fff, 0, -3, 5, 6, 7, -8, 9, 10, i16::MIN, 12);
+            let b = _mm256_set_epi16(-1, 0, 1, i16::MIN, 0x7fff, -2, 5, 0, i16::MIN, 1, 0, -1, 0x4000, -0x4000, i16::MIN, 3);
+            let mut out = vec![
+                wide(_mm256_sign_epi8(a, b)), wide(_mm256_sign_epi16(a, b)), wide(_mm256_sign_epi32(a, b)),
+                wide(_mm256_mulhrs_epi16(a, b)), wide(_mm256_mulhrs_epi16(b, b)),
+            ];
+            for count in [0i64, 7, 15, 16, 33, 64, 1 << 40] {
+                let c = _mm_set_epi64x(0x7fff, count);
+                out.extend([
+                    wide(_mm256_sll_epi16(a, c)), wide(_mm256_srl_epi16(a, c)), wide(_mm256_sra_epi16(a, c)),
+                    wide(_mm256_sll_epi32(a, c)), wide(_mm256_srl_epi32(a, c)), wide(_mm256_sra_epi32(a, c)),
+                    wide(_mm256_sll_epi64(a, c)), wide(_mm256_srl_epi64(a, c)),
+                ]);
+            }
+            out
+        }
+    }
+    fn blocks() -> (__m128i, __m128i) {
+        unsafe {
+            (
+                _mm_set_epi64x(0x0011_2233_4455_6677, -0x7766_5544_3322_1101),
+                _mm_set_epi64x(0x0f0e_0d0c_0b0a_0908, 0x0706_0504_0302_0100),
+            )
+        }
+    }
+    #[target_feature(enable = "aes")]
+    pub unsafe fn aes() -> Vec<[u16; 8]> {
+        let (a, k) = blocks();
+        unsafe {
+            vec![
+                epi(_mm_aesenc_si128(a, k)), epi(_mm_aesenclast_si128(a, k)), epi(_mm_aesdec_si128(a, k)),
+                epi(_mm_aesdeclast_si128(a, k)), epi(_mm_aesimc_si128(a)),
+            ]
+        }
+    }
+    #[target_feature(enable = "vaes,avx2")]
+    pub unsafe fn vaes() -> Vec<[u16; 16]> {
+        unsafe {
+            let (a, k) = blocks();
+            let (a, k) = (_mm256_set_m128i(k, a), _mm256_set_m128i(a, k));
+            let wide = |v: __m256i| transmute::<_, [u16; 16]>(v);
+            vec![
+                wide(_mm256_aesenc_epi128(a, k)), wide(_mm256_aesenclast_epi128(a, k)),
+                wide(_mm256_aesdec_epi128(a, k)), wide(_mm256_aesdeclast_epi128(a, k)),
+            ]
+        }
+    }
+    #[target_feature(enable = "vaes,avx512f")]
+    pub unsafe fn vaes_512() -> Vec<[u64; 8]> {
+        unsafe {
+            let (x, y) = blocks();
+            let a = _mm512_inserti64x4::<1>(_mm512_castsi256_si512(_mm256_set_m128i(y, x)), _mm256_set_m128i(x, x));
+            let k = _mm512_inserti64x4::<1>(_mm512_castsi256_si512(_mm256_set_m128i(x, y)), _mm256_set_m128i(y, y));
+            let wide = |v: __m512i| transmute::<_, [u64; 8]>(v);
+            vec![
+                wide(_mm512_aesenc_epi128(a, k)), wide(_mm512_aesenclast_epi128(a, k)),
+                wide(_mm512_aesdec_epi128(a, k)), wide(_mm512_aesdeclast_epi128(a, k)),
+            ]
+        }
+    }
+    fn bytes_of(seed: u8) -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        for (i, byte) in bytes.iter_mut().enumerate() { *byte = (i as u8).wrapping_mul(seed).wrapping_add(seed ^ 0x35); }
+        bytes
+    }
+    #[target_feature(enable = "gfni")]
+    pub unsafe fn gfni() -> [u8; 16] {
+        unsafe {
+            let (a, b) = (bytes_of(7), bytes_of(29));
+            transmute(_mm_gf2p8mul_epi8(transmute::<[u8; 16], _>(a[..16].try_into().unwrap()), transmute::<[u8; 16], _>(b[..16].try_into().unwrap())))
+        }
+    }
+    #[target_feature(enable = "gfni,avx")]
+    pub unsafe fn gfni_256() -> [u8; 32] {
+        unsafe {
+            let (a, b) = (bytes_of(11), bytes_of(3));
+            transmute(_mm256_gf2p8mul_epi8(transmute::<[u8; 32], _>(a[..32].try_into().unwrap()), transmute::<[u8; 32], _>(b[..32].try_into().unwrap())))
+        }
+    }
+    #[target_feature(enable = "gfni,avx512bw")]
+    pub unsafe fn gfni_512() -> ([u8; 64], [u8; 64]) {
+        unsafe {
+            let (a, b): (__m512i, __m512i) = (transmute(bytes_of(13)), transmute(bytes_of(255)));
+            (transmute(_mm512_gf2p8mul_epi8(a, b)), transmute(_mm512_maskz_gf2p8mul_epi8(0x5555_0f0f_ffff_0001, a, b)))
+        }
+    }
+    /// BMI's: a field past the integer's width, of length 0 and past it.
+    #[target_feature(enable = "bmi1,bmi2")]
+    pub unsafe fn bits() -> Vec<u64> {
+        let x = 0xdead_beef_0123_4567u64;
+        let mut out = Vec::new();
+        for (start, length) in [(4u32, 8u32), (0, 0), (60, 8), (31, 33), (64, 1), (200, 255), (8, 64)] {
+            out.extend(unsafe { [
+                u64::from(_bextr_u32(x as u32, start, length)), _bextr_u64(x, start, length),
+                u64::from(_bextr2_u32(x as u32, start | length << 8 | 0xff00_0000)),
+                _bextr2_u64(x, u64::from(start | length << 8) | 0xffff_0000_0000_0000),
+                u64::from(_bzhi_u32(x as u32, start)), _bzhi_u64(x, start),
+            ] });
+        }
+        for mask in [0u64, u64::MAX, 0xf0f0_0f0f_8000_0001, 0x5555_5555_5555_5555] {
+            out.extend(unsafe { [
+                u64::from(_pdep_u32(x as u32, mask as u32)), _pdep_u64(x, mask),
+                u64::from(_pext_u32(x as u32, mask as u32)), _pext_u64(x, mask),
+            ] });
+        }
+        out
+    }
+    /// A carry (borrow) in of 0, of 1, and of another value, which is as 1.
+    pub fn carries() -> Vec<(u8, u64)> {
+        let mut out = Vec::new();
+        for c in [0u8, 1, 0x80] {
+            for (a, b) in [(1u64, 2u64), (u64::MAX, 1), (u64::MAX, u64::MAX), (0, u64::MAX), (0x8000_0000, 0x7fff_ffff)] {
+                let mut wide = 0;
+                let mut narrow = 0;
+                unsafe {
+                    out.push((_addcarry_u64(c, a, b, &mut wide), wide));
+                    out.push((_addcarry_u32(c, a as u32, b as u32, &mut narrow), u64::from(narrow)));
+                    out.push((_subborrow_u64(c, a, b, &mut wide), wide));
+                    out.push((_subborrow_u32(c, a as u32, b as u32, &mut narrow), u64::from(narrow)));
+                }
+            }
+        }
+        out
+    }
+    /// Whether each step's flag says 1 or says 0 with the value 0, as it has to.
+    #[target_feature(enable = "rdrand")]
+    pub unsafe fn random() -> Vec<bool> {
+        let (mut a, mut b, mut c) = (0u16, 0u32, 0u64);
+        let steps = unsafe { [_rdrand16_step(&mut a), _rdrand32_step(&mut b), _rdrand64_step(&mut c)] };
+        let values = [u64::from(a), u64::from(b), c];
+        steps.iter().zip(values).map(|(&step, value)| step == 1 || (step == 0 && value == 0)).collect()
+    }
+    #[target_feature(enable = "rdseed")]
+    pub unsafe fn seeds() -> Vec<bool> {
+        let (mut a, mut b, mut c) = (0u16, 0u32, 0u64);
+        let steps = unsafe { [_rdseed16_step(&mut a), _rdseed32_step(&mut b), _rdseed64_step(&mut c)] };
+        let values = [u64::from(a), u64::from(b), c];
+        steps.iter().zip(values).map(|(&step, value)| step == 1 || (step == 0 && value == 0)).collect()
+    }
+    /// The time stamp counter does not go back, and `rdtscp`'s is read after `rdtsc`'s.
+    pub fn counter() -> (bool, bool) {
+        unsafe {
+            let first = _rdtsc();
+            let mut processor = 0;
+            let second = __rdtscp(&mut processor);
+            let third = _rdtsc();
+            (first <= second && second <= third, first != 0)
+        }
+    }
+    #[repr(C, align(64))]
+    struct Area([u8; 4096]);
+    /// The MXCSR that each save wrote (at byte 24 of its legacy region) is the one `stmxcsr`
+    /// reads, and a restore keeps it.
+    fn saved_csr(area: &Area) -> u32 {
+        u32::from_le_bytes(area.0[24..28].try_into().unwrap())
+    }
+    pub fn fxsave() -> (bool, bool) {
+        let mut area = Area([0; 4096]);
+        let csr = unsafe { _mm_getcsr() };
+        unsafe {
+            _fxsave(area.0.as_mut_ptr());
+            let first = saved_csr(&area) == csr;
+            _fxrstor(area.0.as_ptr());
+            area.0[24..28].fill(0);
+            _fxsave64(area.0.as_mut_ptr());
+            let second = saved_csr(&area) == csr;
+            _fxrstor64(area.0.as_ptr());
+            (first, second && _mm_getcsr() == csr)
+        }
+    }
+    #[target_feature(enable = "xsave")]
+    pub unsafe fn xsave() -> Vec<bool> {
+        const X87_SSE: u64 = 3;
+        let mut area = Area([0; 4096]);
+        let csr = unsafe { _mm_getcsr() };
+        let mut out = Vec::new();
+        unsafe {
+            _xsave(area.0.as_mut_ptr(), X87_SSE);
+            out.push(saved_csr(&area) == csr);
+            _xrstor(area.0.as_ptr(), X87_SSE);
+            area = Area([0; 4096]);
+            _xsave64(area.0.as_mut_ptr(), X87_SSE);
+            out.push(saved_csr(&area) == csr);
+            _xrstor64(area.0.as_ptr(), X87_SSE);
+            out.push(_mm_getcsr() == csr);
+        }
+        out
+    }
+    #[target_feature(enable = "xsave,xsaveopt")]
+    pub unsafe fn xsaveopt() -> Vec<bool> {
+        let mut area = Area([0; 4096]);
+        let csr = unsafe { _mm_getcsr() };
+        unsafe {
+            _xsaveopt(area.0.as_mut_ptr(), 3);
+            let first = saved_csr(&area) == csr;
+            area = Area([0; 4096]);
+            _xsaveopt64(area.0.as_mut_ptr(), 3);
+            vec![first, saved_csr(&area) == csr]
+        }
+    }
+    /// The compacted form, which sets the top bit of the header's XCOMP_BV.
+    #[target_feature(enable = "xsave,xsavec")]
+    pub unsafe fn xsavec() -> Vec<bool> {
+        let mut area = Area([0; 4096]);
+        let csr = unsafe { _mm_getcsr() };
+        let compacted = |area: &Area| u64::from_le_bytes(area.0[520..528].try_into().unwrap()) >> 63 == 1;
+        unsafe {
+            _xsavec(area.0.as_mut_ptr(), 3);
+            let first = (saved_csr(&area) == csr, compacted(&area));
+            area = Area([0; 4096]);
+            _xsavec64(area.0.as_mut_ptr(), 3);
+            vec![first.0, first.1, saved_csr(&area) == csr, compacted(&area)]
+        }
+    }
+    pub fn run() -> String {
+        let absent = "absent".to_owned();
+        let mut out = format!(
+            "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            min_max(), min_max_double(), estimates(), rounding_modes(), comparisons(), shifts(), memory(),
+            carries(), counter(), fxsave(),
+        );
+        let mut add = |detected: bool, it: &dyn Fn() -> String| {
+            out += " ";
+            out += &if detected { it() } else { absent.clone() };
+        };
+        #[cfg(feature = "nightly")]
+        add(is_x86_feature_detected!("clflushopt"), &|| format!("{:?}", unsafe { flushed(&7) }));
+        add(is_x86_feature_detected!("ssse3"), &|| format!("{:?}", unsafe { signs() }));
+        add(is_x86_feature_detected!("sse4.1"), &|| format!("{:?}", unsafe { rounds() }));
+        add(is_x86_feature_detected!("sse4a"), &|| format!("{:?}", unsafe { fields() }));
+        add(is_x86_feature_detected!("avx"), &|| format!("{:?}", unsafe { avx() }));
+        add(is_x86_feature_detected!("avx2"), &|| format!("{:?}", unsafe { avx2() }));
+        add(is_x86_feature_detected!("aes"), &|| format!("{:?}", unsafe { aes() }));
+        add(is_x86_feature_detected!("vaes") && is_x86_feature_detected!("avx2"), &|| format!("{:?}", unsafe { vaes() }));
+        add(is_x86_feature_detected!("vaes") && is_x86_feature_detected!("avx512f"), &|| format!("{:?}", unsafe { vaes_512() }));
+        add(is_x86_feature_detected!("gfni"), &|| format!("{:?}", unsafe { gfni() }));
+        add(is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx"), &|| format!("{:?}", unsafe { gfni_256() }));
+        add(is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx512bw"), &|| format!("{:?}", unsafe { gfni_512() }));
+        add(is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("bmi2"), &|| format!("{:?}", unsafe { bits() }));
+        add(is_x86_feature_detected!("rdrand"), &|| format!("{:?}", unsafe { random() }));
+        add(is_x86_feature_detected!("rdseed"), &|| format!("{:?}", unsafe { seeds() }));
+        add(is_x86_feature_detected!("xsave"), &|| format!("{:?}", unsafe { xsave() }));
+        add(is_x86_feature_detected!("xsaveopt"), &|| format!("{:?}", unsafe { xsaveopt() }));
+        add(is_x86_feature_detected!("xsavec"), &|| format!("{:?}", unsafe { xsavec() }));
         out
     }
 }

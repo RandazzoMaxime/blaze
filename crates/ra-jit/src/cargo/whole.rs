@@ -365,7 +365,7 @@ fn compiling(asked: &Invocation, programs: &[Program]) {
 /// Says the build of `profile` is done.
 fn finished(asked: &Invocation, profile: &str, started: Instant) {
     let took = started.elapsed().as_secs_f64();
-    let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", super::ra_jit_tag());
+    let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", super::blaze_tag());
     say::status(asked.flags.quiet, "Finished", &finished);
 }
 
@@ -478,7 +478,11 @@ fn checkout(
         env: worker_env(),
         whole: true,
     };
-    let plans = programs.iter().map(|program| {
+    // A worker links its programs where it was started to and builds again only what was
+    // edited: another worker's build, of other features or flags, is not in its files.
+    let worker = config.id();
+    let dirs: Vec<PathBuf> = programs.iter().map(|it| it.dir.join(&worker)).collect();
+    let plans = programs.iter().zip(&dirs).map(|(program, dir)| {
         // A `cdylib` is linked under the name of its file, which a binary of the same name
         // beside it does not have.
         let shared = program.kind == Kind::Cdylib;
@@ -488,9 +492,9 @@ fn checkout(
         };
         Linked {
             crates: vec![program.root.clone()],
-            object: program.dir.join(format!("{name}.o")),
-            patch: program.dir.join(format!("{name}.patch.o")),
-            binary: program.dir.join(&name),
+            object: dir.join(format!("{name}.o")),
+            patch: dir.join(format!("{name}.patch.o")),
+            binary: dir.join(&name),
             rustc_binary: None,
             link_cmd: String::new(),
             symbol_files: Vec::new(),
@@ -503,8 +507,8 @@ fn checkout(
             shared,
         }
     });
-    for program in programs {
-        _ = std::fs::create_dir_all(&program.dir);
+    for dir in &dirs {
+        _ = std::fs::create_dir_all(dir);
     }
     let members = metadata.workspace_packages();
     let manifests = members.iter().map(|it| it.manifest_path.as_std_path().to_owned());

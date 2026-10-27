@@ -598,6 +598,7 @@ fn main() {
     println!("repeated statics in_async {:?}", cases::repeated_statics::in_async());
     println!("type_ids downcasts {:?}", cases::type_id_hashes::downcasts());
     println!("promoted_slices {:?}", cases::promoted_slices::run());
+    println!("promoted_empty_mut {:?}", cases::promoted_empty_mut::run());
     println!("reified {:?}", cases::reified::run());
     println!("overloaded_unary {}", cases::overloaded_unary::run());
     println!("closure_layout {}", cases::closure_layout::run());
@@ -624,6 +625,8 @@ fn main() {
     println!("soft_floats {}", cases::soft_floats::run());
     #[cfg(target_arch = "x86_64")]
     println!("simd_x86 {}", cases::simd_x86::run());
+    #[cfg(target_arch = "x86_64")]
+    println!("x86_instructions {}", cases::x86_instructions::run());
     #[cfg(all(feature = "nightly", target_arch = "x86_64"))]
     print!("avx512\n{}", cases::avx512::run());
     #[cfg(all(feature = "nightly", target_arch = "x86_64"))]

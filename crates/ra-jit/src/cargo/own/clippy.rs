@@ -86,7 +86,7 @@ pub(crate) fn command(rest: &[String]) -> anyhow::Result<i32> {
     let failed = written(&plan, &answer, format, clippy_args);
     if !failed {
         let took = started.elapsed().as_secs_f64();
-        let tag = crate::cargo::ra_jit_tag();
+        let tag = crate::cargo::blaze_tag();
         let finished = format!("`{}` profile [{tag}] target(s) in {took:.2}s", asked.profile());
         say::status(asked.flags.quiet, "Finished", &finished);
     }

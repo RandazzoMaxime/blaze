@@ -6,6 +6,7 @@
 import { identify, lookupTenant, type TenantRecord } from "./auth";
 import * as cas from "./cas";
 import { contentAddressed, HEX64, multipartAllowed, parseName, validTenant, type Name } from "./names";
+import * as tindex from "./tindex";
 
 export interface Env {
   BUCKET: R2Bucket;
@@ -35,9 +36,13 @@ export type Op =
   | "blob"
   | "blob_head"
   | "put_blobs"
+  | tindex.IndexOp
   | "other";
 
-const READS: ReadonlySet<Op> = new Set(["get", "head", "has", "get_blobs", "blob", "blob_head"]);
+const READS: ReadonlySet<Op> = new Set(["get", "head", "has", "get_blobs", "blob", "blob_head", "trust_get", "heads", "seg_get"]);
+const INDEX_OPS: ReadonlySet<Op> = new Set(["trust_get", "trust_put", "heads", "seg_get", "seg_put", "head_put"]);
+/** Writes that also delete a bounded number of expired location rows (cas.ts `sweep`). */
+const SWEEPING: ReadonlySet<Op> = new Set(["put_blobs", "seg_put", "head_put"]);
 
 interface Route {
   op: Op;
@@ -67,6 +72,11 @@ export async function handle(request: Request, env: Env, ctx?: ExecutionContext)
   try {
     out = await serve(request, env, url, route, meter);
     if (out.pump) ctx?.waitUntil(out.pump);
+    if (SWEEPING.has(route.op) && out.response.status < 300) {
+      const swept = cas.sweep(env);
+      if (ctx) ctx.waitUntil(swept);
+      else await swept;
+    }
   } catch (e) {
     out = done(text(500, `internal error: ${firstLine(e)}`));
   }
@@ -84,6 +94,8 @@ function classify(method: string, url: URL): Route {
   for (const [path, op] of [["/has", "has"], ["/get", "get_blobs"], ["/put", "put_blobs"]] as const) {
     if (url.pathname === path) return { op: method === "POST" ? op : "other", tenant: null, name: null };
   }
+  const index = tindex.classifyIndex(method, url.pathname);
+  if (index) return { op: index.op, tenant: index.tenant, name: index.arg };
   const m = /^\/t\/([^/]+)\/v3\/(.*)$/.exec(url.pathname);
   const q = url.searchParams;
   let op: Op = "other";
@@ -124,6 +136,11 @@ async function serve(request: Request, env: Env, url: URL, route: Route, meter: 
     if (op === "put_blobs") return cas.put(env, request, acc);
     if (!/^[0-9a-f]{64}$/.test(route.name ?? "")) return done(notFound(op));
     return cas.blob(env, request, acc, route.name!, op === "blob_head", () => notFound(op));
+  }
+
+  if (INDEX_OPS.has(op)) {
+    if (caller.kind === "token") meter.tenant = caller.tenant;
+    return tindex.serve(env, request, op as tindex.IndexOp, route.tenant!, route.name, caller);
   }
 
   // Everything below is decided from KV only; R2 is not touched until access is granted.

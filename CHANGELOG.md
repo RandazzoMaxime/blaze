@@ -10,6 +10,17 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `blaze lock --fetches [--target <triple>]...` pins what build scripts download, as Nix pins a
+  fixed-output derivation: each download by its sha256 in `Cargo.fetches.lock` beside
+  `Cargo.lock`, kept by the package's name, version and `Cargo.lock` checksum, the bytes in
+  blaze's store (so a remote cache carries them). A build, which has no network, hands each to
+  its build script through the crate's own variable (`RUSTY_V8_ARCHIVE` for `v8`,
+  `ORT_CACHE_DIR` for `ort-sys`, `LK_CUSTOM_WEBRTC` for `webrtc-sys`;
+  `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` for `helix-term`, which then downloads nothing), and a
+  missing or stale entry fails naming the command. A script refused the network that blaze has
+  no override for is told which variable an override would set
+  (`bench/results/2026-10-27-bscache/fetches.md`).
+
 - `cargo blaze build` links a library's `cdylib` (#262): a package whose crate types include
   `cdylib`, such as a napi-rs Node addon or a pyo3 extension, gets its shared library at
   cargo's path (`target/debug/lib<name>.so`, `.dylib` on macOS), exporting its
@@ -549,6 +560,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- The programs print `blaze`, not `ra-jit` (#270, "What the programs print"): the `blaze:`
+  prefix of their notes, `Finished ... profile [blaze]`, `blaze is enabled`, `plain cargo:
+  through blaze`, `blaze could not compile`, `blaze cache gc` and the other errors and notes.
+  The harnesses that read these lines read the new ones. The binaries, crates, directories,
+  `RA_JIT_*` variables and symbol names keep their names for now.
 - A build script's `RUSTC` is blaze, so its probes run no rustc: `rustc -vV` and `--print`
   are blaze's answers, and a probe compile (`autocfg`, `anyhow`, `thiserror`, `rustix`,
   `proc-macro2`) gets `cargo blaze check`'s verdict, or an error naming the command where blaze
@@ -1016,6 +1032,19 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A whole build of other features or flags no longer leaks into the next: every worker linked
+  its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
+  loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
+  the loud program (`HELLO WORLD`). Each worker now links in a directory of its own, named by
+  what it is loaded with (`harness/cargo_ra_jit.py`, flags group).
+- Three programs that ran differently from rustc now run the same (#73): a diverging type
+  variable falls back to `!` in every edition, as rustc at the pinned nightly does, not to `()`
+  before 2024; `if let` in a closure captures only the places its pattern moves, as `let` and
+  `match` do, not its whole scrutinee; and a value assigned through `*(&mut x)` after a `match`
+  that ruled `x` out is dropped, since a place borrowed `&mut` may hold a value from then on
+  (rust-lang/rust#90752). `tests/ui` `editions/never-type-fallback.rs`,
+  `closures/2229_closure_analysis/run_pass/if-let-capture.rs` and `drop/issue-90752.rs` are
+  pinned.
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the
