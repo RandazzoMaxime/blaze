@@ -1012,6 +1012,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   `ZalsaDatabase: Any`), and the types in its arguments imply what they do
   (`&dyn Fn() -> &'a G<'db>` that `'db: 'a`), as rustc's well-formedness walks into them.
   The last 2 false errors in blaze's own tree (`module_for_assoc_item_loc`, `path_to_const`).
+- On macOS an edit is spliced into the program the daemon linked itself, not built in full.
+  That link (`link.rs`, the one with nothing of rustc's) asked for neither fixups in tables nor
+  room after the load commands, so `cc` linked for the Mac it runs on (macOS 26) with fixups
+  in chains, and the splice refused every edit ("an executable whose addresses are fixed up in
+  chains", then "the header has no room for two more segments"); each edit compiled the whole
+  crate again. It now asks for both as rustc's line does, the room through the same
+  `.headerpad` file. A one-function edit of a 13,000-line `main.rs` of no dependencies takes
+  0.17 s, from 0.36 s.
 - The LLVM backend: an error LLVM diagnoses while it writes an object is an error naming
   what LLVM said, not an object with an instruction left out. LLVM 23's assembler printed
   "can't encode 'ah'" for `mov ah, sil` in an `asm!` block and wrote the object without it
