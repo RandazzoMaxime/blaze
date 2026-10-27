@@ -15270,7 +15270,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             (
-                "x86.sse42.crc32.32.8" | "x86.sse42.crc32.32.16" | "x86.sse42.crc32.32.32"
+                "x86.sse42.crc32.32.8"
+                | "x86.sse42.crc32.32.16"
+                | "x86.sse42.crc32.32.32"
                 | "x86.sse42.crc32.64.64",
                 [crc, data],
             ) => {
