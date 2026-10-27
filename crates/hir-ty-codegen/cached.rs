@@ -260,6 +260,12 @@ impl StoredCode {
         }
         hasher.update(u32::MAX.to_le_bytes());
         hasher.update(super::Backend::Llvm(optimization).to_string());
+        // Nor the inliner's threshold, when one is set (nothing is hashed for the default, so
+        // its keys stay what they were).
+        if let Some(threshold) = super::llvm::inline_threshold() {
+            hasher.update(b"inline-threshold");
+            hasher.update(threshold.to_le_bytes());
+        }
         hasher.update(ir.to_string());
         // Nor does it tell which statement an instruction is of, which the code's lines do.
         for block in func.layout.blocks() {

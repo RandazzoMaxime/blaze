@@ -817,6 +817,15 @@ pub(super) fn assemble(text: &str) -> Result<Vec<u8>, String> {
 /// does not reload a value it has put in a live-in register: after optimization, which keeps
 /// values in registers across an unwind edge, a landing pad then reads the selector where it
 /// wants a drop flag (`breakers/cases/src/unwind_many_flags.rs`).
+/// `RA_JIT_LLVM_INLINE_THRESHOLD=N`: LLVM's inliner at threshold N rather than the one of the
+/// level (225 at -O2, 250 at -O3), to measure another. The store's key has it, as code inlined
+/// at another threshold is other code.
+pub(super) fn inline_threshold() -> Option<u32> {
+    std::env::var("RA_JIT_LLVM_INLINE_THRESHOLD").ok().map(|it| {
+        it.parse().unwrap_or_else(|_| panic!("RA_JIT_LLVM_INLINE_THRESHOLD={it} is not a number"))
+    })
+}
+
 fn set_options(arch: Arch) {
     static SET: Once = Once::new();
     SET.call_once(|| {
@@ -824,12 +833,7 @@ fn set_options(arch: Arch) {
         if arch == Arch::Aarch64 {
             arguments.push(c"-aarch64-enable-global-isel-at-O=-1".as_ptr());
         }
-        // `RA_JIT_LLVM_INLINE_THRESHOLD=N`: LLVM's inliner at threshold N rather than the one
-        // of the level (225 at -O2, 250 at -O3), to measure another.
-        let threshold = std::env::var("RA_JIT_LLVM_INLINE_THRESHOLD").ok().map(|it| {
-            let n: u32 = it
-                .parse()
-                .unwrap_or_else(|_| panic!("RA_JIT_LLVM_INLINE_THRESHOLD={it} is not a number"));
+        let threshold = inline_threshold().map(|n| {
             std::ffi::CString::new(format!("-inline-threshold={n}")).expect("no NUL")
         });
         if let Some(threshold) = &threshold {
