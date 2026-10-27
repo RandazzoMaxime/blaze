@@ -303,7 +303,7 @@ pub(super) fn region_liveness<'db>(
         |it| &it.drops,
         // Dropping a local makes it live back to where it may be initialized only, as
         // rustc's `compute_drop_live_points_for` has it.
-        |block, successor, live| live.intersect(init_at_exit.at(block, successor)),
+        |block, successor, live| init_at_exit.restrict(block, successor, live),
     );
     // Where a local is use live, what dropping it uses is live already.
     let mut dropped = Vec::new();
@@ -344,11 +344,11 @@ pub(super) fn region_liveness<'db>(
 /// For each drop, the locals it drops that may be initialized there; and for each edge
 /// between blocks, the locals that may be initialized, if partly, leaving the first for the
 /// second.
-fn maybe_initialized_at_drops(
+fn maybe_initialized_at_drops<'m>(
     body: &MirBody<'_>,
     cfg: &Cfg,
-    moves: &MoveData,
-) -> (FxHashMap<usize, Vec<LocalId>>, InitAtExit) {
+    moves: &'m MoveData,
+) -> (FxHashMap<usize, Vec<LocalId>>, InitAtExit<'m>) {
     let paths = moves.paths.len();
     let blocks = body.basic_blocks.len();
     let mut entry: Vec<Option<BitSet>> = vec![None; blocks];
@@ -406,21 +406,10 @@ fn maybe_initialized_at_drops(
             }
         }
     }
-    let locals = body.locals.len();
-    // Every path of a local is below the local's own, so a local is initialized in part where
-    // one of its paths is.
-    let initialized = |state: &BitSet| {
-        let mut out = BitSet::new(locals);
-        for path in state.iter() {
-            out.insert(moves.paths[path].local.into_raw().into_u32() as usize);
-        }
-        out
-    };
-    let empty = BitSet::new(locals);
     let mut exits: Vec<Option<(BitSet, Option<(BasicBlockId, BitSet)>)>> = vec![None; blocks];
     let mut found: FxHashMap<usize, Vec<LocalId>> = FxHashMap::default();
     for &block in &cfg.order {
-        let Some(mut state) = entry[index(block)].clone() else { continue };
+        let Some(mut state) = entry[index(block)].take() else { continue };
         let data = &body.basic_blocks[block];
         for statement in 0..data.statements.len() {
             apply(Location { block, statement }, &mut state, false);
@@ -431,11 +420,11 @@ fn maybe_initialized_at_drops(
             Some(TerminatorKind::Call { target: Some(target), .. }) => {
                 let mut returned = exit.clone();
                 apply(Location { block, statement: data.statements.len() }, &mut returned, true);
-                Some((*target, initialized(&returned)))
+                Some((*target, returned))
             }
             _ => None,
         };
-        exits[index(block)] = Some((initialized(&exit), returned));
+        exits[index(block)] = Some((exit, returned));
         if let Some(TerminatorKind::Drop { place, .. }) =
             data.terminator.as_ref().map(|it| &it.kind)
             && place.projection.is_empty()
@@ -447,21 +436,38 @@ fn maybe_initialized_at_drops(
             }
         }
     }
-    (found, InitAtExit { exits, empty })
+    (found, InitAtExit { moves, exits })
 }
 
-/// The locals that may be initialized, if partly, leaving a block for a successor.
-struct InitAtExit {
+/// The paths that may be initialized leaving each block, and leaving a call's block for the
+/// call's return.
+struct InitAtExit<'m> {
+    moves: &'m MoveData,
     exits: Vec<Option<(BitSet, Option<(BasicBlockId, BitSet)>)>>,
-    empty: BitSet,
 }
 
-impl InitAtExit {
-    fn at(&self, block: BasicBlockId, successor: BasicBlockId) -> &BitSet {
-        match &self.exits[index(block)] {
+impl InitAtExit<'_> {
+    /// Keeps of `live` the locals that may be initialized, if partly, leaving `block` for
+    /// `successor`: every path of a local is below the local's own, so where one of its paths
+    /// is. Asked of the few locals live there rather than of every path that is initialized.
+    fn restrict(&self, block: BasicBlockId, successor: BasicBlockId, live: &mut BitSet) {
+        let state = match &self.exits[index(block)] {
             Some((_, Some((target, returned)))) if *target == successor => returned,
             Some((exit, _)) => exit,
-            None => &self.empty,
+            None => {
+                live.clear();
+                return;
+            }
+        };
+        let gone: SmallVec<[usize; 8]> = live
+            .iter()
+            .filter(|&local| {
+                let path = self.moves.local_path(LocalId::from_raw(la_arena::RawIdx::from_u32(local as u32)));
+                self.moves.find_in_descendants(path, &|it| state.contains(it)).is_none()
+            })
+            .collect();
+        for local in gone {
+            live.remove(local);
         }
     }
 }
