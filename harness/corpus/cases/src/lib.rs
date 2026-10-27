@@ -4046,6 +4046,64 @@ pub mod promoted_assoc_const {
     }
 }
 
+pub mod promoted_value_qualifs {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// rustc promotes a constant by what its value holds, not its type: no variant built here
+    /// has a cell or anything to drop, as ruff's printer's `&[OPEN_PAREN, INDENT]` and
+    /// nushell's `&Signals::EMPTY`.
+    pub enum Element {
+        Token(&'static str),
+        Group(Cell<u8>),
+        Text(Box<str>),
+    }
+    pub struct Queue<'a>(Vec<&'a [Element]>);
+    impl<'a> Queue<'a> {
+        fn extend(&mut self, it: &'a [Element]) {
+            self.0.push(it)
+        }
+    }
+    pub struct Signals(Option<std::sync::Arc<AtomicBool>>);
+    impl Signals {
+        const EMPTY: Self = Signals(None);
+    }
+    fn empty() -> &'static Signals {
+        &Signals::EMPTY
+    }
+
+    /// In a static's value a static is borrowed in a promoted constant, as nushell's test
+    /// harness lists its experimental options.
+    pub struct Opt(AtomicBool);
+    pub static ON: Opt = Opt(AtomicBool::new(true));
+    pub struct Meta {
+        opts: &'static [(&'static Opt, bool)],
+    }
+    impl Meta {
+        const fn new(opts: &'static [(&'static Opt, bool)]) -> Self {
+            Meta { opts }
+        }
+    }
+    static META: Meta = Meta::new(&[(&ON, true)]);
+
+    pub fn run() -> (usize, usize, bool, bool) {
+        const OPEN: Element = Element::Token("(");
+        const CLOSE: Element = Element::Token(")");
+        let mut queue = Queue(Vec::new());
+        queue.extend(&[OPEN, CLOSE]);
+        let tokens = queue.0[0]
+            .iter()
+            .map(|it| match it {
+                Element::Token(text) => text.len(),
+                Element::Group(cell) => cell.get() as usize,
+                Element::Text(text) => text.len(),
+            })
+            .sum();
+        let (opt, on) = META.opts[0];
+        (tokens, META.opts.len(), empty().0.is_none(), opt.0.load(Ordering::Relaxed) && on)
+    }
+}
+
 pub mod offsets {
     use std::mem::offset_of;
 

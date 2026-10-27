@@ -169,8 +169,17 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   hold for them, in code that is never reached too. A constant or function named through a
   type that spells out lifetimes, `A::<'a>::C` or `<A<'a>>::new`, has its impl's self type (or
   for a trait's item, `Self`) equal to `A<'a>`, in a range pattern's bounds too.
-- Promotion: a borrowed function item, and a named `const` whose type has no interior
-  mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
+- Promotion: a borrowed function item, and a value whose qualifs are empty, asked of the value
+  rather than its type as rustc's `check_consts::qualifs` (`NeedsDrop`, `HasMutInterior`;
+  `hir-ty-borrowck/src/qualifs.rs`): an aggregate has its parts' qualifs unless it is a union or
+  its type has a `Drop` impl or is `UnsafeCell`, a named inherent or free `const` what its own
+  value has (`mir_const_qualif`), a borrow what the place it borrows has (`&STATIC` none; an
+  autoref too, so `Droppy.get_ref()` does not promote a `Droppy` with a `Drop` impl), and
+  anything else (a call, a literal) what any value of its type has. So `&[OPEN_PAREN, INDENT]`
+  is promoted though another variant of their enum holds a `Cell` or a `Box` (ruff's printer),
+  and `&Signals::EMPTY` though `Signals` holds an `Arc`. In a `static`'s value a static that is
+  neither `extern` nor thread-local may be borrowed in a promoted constant
+  (`static M: Meta = Meta::new(&[(&OPT, true)])`, nushell's `#[exp(..)]` tests).
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
   call and a block of items and a tail included: tracing's `fieldset!` names a field
