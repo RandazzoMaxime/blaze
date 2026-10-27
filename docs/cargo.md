@@ -329,6 +329,19 @@ run does, and a proc-macro server does not start and the load says why: nothing 
 outside instead, nor goes to cargo or rustc. Windows has no sandbox yet, so there a build with
 build scripts or proc macros needs `RA_JIT_SANDBOX=off`.
 
+In a container the sandbox's user namespace may be refused: Docker's default seccomp profile
+refuses `unshare(CLONE_NEWUSER)` to a process without `CAP_SYS_ADMIN`, so in a plain `docker
+run` every build script and proc macro fails with
+`a user namespace (unshare): Operation not permitted`
+([#420](https://github.com/indexable-inc/blaze/issues/420)). Where the process can tell it is
+in a container (`/.dockerenv`, `/run/.containerenv`, the `container` variable, or
+`/proc/1/cgroup` naming docker, kubepods, containerd, libpod or lxc), the error says so and
+names the ways on: run the container with `--security-opt seccomp=unconfined` (or a seccomp
+profile that allows user namespaces; on Kubernetes `securityContext.seccompProfile.type:
+Unconfined`), which keeps the sandbox, or set `BLAZE_SANDBOX=off`, which runs build scripts,
+proc macros and tests outside it, as cargo does. blaze does not make a weaker sandbox there on
+its own.
+
 What a script read is recorded, and decides one thing only. Cargo runs a script again when a
 file of its `rerun-if-changed` changed, when a variable of `rerun-if-env-changed` did, and,
 when it named neither, when any file of its package did. In that last case a run whose record
