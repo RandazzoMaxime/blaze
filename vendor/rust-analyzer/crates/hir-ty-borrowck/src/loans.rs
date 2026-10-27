@@ -24,6 +24,7 @@ use super::{
     Ctx,
     bitset::BitSet,
     cfg::{Cfg, Location, index},
+    intervals::IntervalSet,
     regions::{RegionValues, Regions, Rv},
 };
 
@@ -708,12 +709,18 @@ impl Loans {
         &mut self,
         body: &MirBody<'_>,
         cfg: &Cfg,
-        live: &[BitSet],
+        live: &[IntervalSet],
     ) {
         for id in 0..self.loans.len() {
             let issued = cfg.point(self.loans[id].location);
+            // The loan is in scope where it is made, live there or not.
             let ends = out_of_scope(body, cfg, self.loans[id].location, |start, end| {
-                (start..=end).find(|&it| it != issued && !live[id].contains(it))
+                match live[id].first_absent_in(start, end) {
+                    Some(point) if point == issued => {
+                        (point < end).then(|| live[id].first_absent_in(point + 1, end)).flatten()
+                    }
+                    other => other,
+                }
             });
             for point in ends {
                 self.out_of_scope.entry(point).or_default().push(id);
