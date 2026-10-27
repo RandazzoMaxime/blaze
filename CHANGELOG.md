@@ -548,6 +548,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   can't give one. cargo's `-Clinker-features=-lld` no longer sends a question to rustc
   (docs/no-rustc.md, step I).
 
+- The check of an edited file asks rust-analyzer only for the bodies of the functions written
+  otherwise since its last check, when that check found nothing wrong and the file is the same
+  but for bodies nothing else sees into (`outline::skeleton`): a body's errors are its own.
+  Every body is asked for otherwise. On a 13,000-line `main.rs` of 2,200 functions the check
+  of a one-function edit takes 32 ms, from 123 to 165 ms (1 of 2,201 bodies asked), and the
+  edit 90 ms, from 183 to 221 ms; a type error in the edited body is still refused. On a
+  19,000-line `main.rs` of a real program (clap, serde) the whole-file check was 2.5 to 3 s
+  of each 3 s edit.
 - LLVM's inliner runs at threshold 500 (was the level's 225 or 250): the runtime set's
   geomean goes from 1.091 to 1.080 of rustc's (tokei 1.28 to 1.26, ripgrep 1.14 to 1.11) for
   2 to 5% more code and no more compile time; docs/tiers.md has the sweep (225, 500, 1000, and
