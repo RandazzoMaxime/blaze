@@ -64,7 +64,8 @@ pub(crate) fn build(db: &RootDatabase, places: &Places) -> Model {
 /// Which members an impl's docs list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Members {
-    None,
+    /// The associated types the impl writes, with no docs: an implementor on a trait's page.
+    AssocTypes,
     /// The items the impl writes.
     Written,
     /// Those and the trait's provided items it leaves as they are.
@@ -849,61 +850,68 @@ impl Builder<'_> {
         let trait_ = imp.trait_(db);
         let private = self.documented().private;
         let mut items = vec![];
-        if members != Members::None {
-            let own = imp.items(db);
-            match trait_ {
-                None => {
-                    for assoc in own {
-                        let shown = (private || assoc_visibility(db, assoc) == Visibility::Public)
-                            && !assoc_hidden(db, assoc);
-                        if shown && let Some(member) = self.assoc_member(assoc, FnContext::Free, None, false) {
-                            items.push(member);
-                        }
+        let own = imp.items(db);
+        match trait_ {
+            None => {
+                for assoc in own {
+                    let shown = (private || assoc_visibility(db, assoc) == Visibility::Public)
+                        && !assoc_hidden(db, assoc);
+                    if shown && let Some(member) = self.assoc_member(assoc, FnContext::Free, None, false) {
+                        items.push(member);
                     }
                 }
-                Some(trait_) => {
-                    let trait_items = trait_.items(db);
-                    let mut implemented = FxHashSet::default();
-                    for assoc in own {
-                        let name = assoc.name(db);
-                        let trait_item = trait_items.iter().copied().find(|it| it.name(db) == name && same_kind(*it, assoc));
-                        if let Some(name) = name {
-                            implemented.insert(name);
-                        }
-                        if assoc_hidden(db, assoc) {
-                            continue;
-                        }
-                        if let Some(member) = self.assoc_member(assoc, FnContext::Trait, trait_item, false) {
-                            items.push(member);
-                        }
+            }
+            Some(trait_) => {
+                let trait_items = trait_.items(db);
+                let mut implemented = FxHashSet::default();
+                for assoc in own {
+                    let name = assoc.name(db);
+                    let trait_item = trait_items.iter().copied().find(|it| it.name(db) == name && same_kind(*it, assoc));
+                    if let Some(name) = name {
+                        implemented.insert(name);
                     }
-                    // The trait's provided items the impl leaves as they are.
-                    for assoc in trait_items {
-                        if members != Members::WithProvided {
-                            break;
-                        }
-                        let Some(name) = assoc.name(db) else { continue };
-                        if implemented.contains(&name) || assoc_hidden(db, assoc) {
-                            continue;
-                        }
-                        if let AssocItem::Function(f) = assoc
-                            && !self.possible(imp, f)
+                    if assoc_hidden(db, assoc) {
+                        continue;
+                    }
+                    if members == Members::AssocTypes {
+                        if let AssocItem::TypeAlias(_) = assoc
+                            && let Some(mut member) = self.assoc_member(assoc, FnContext::Trait, None, false)
                         {
-                            continue;
-                        }
-                        let provided = match assoc {
-                            AssocItem::Function(f) => f.has_body(db),
-                            AssocItem::Const(c) => c.has_body(db),
-                            AssocItem::TypeAlias(t) => t.has_type(db),
-                        };
-                        if !provided {
-                            continue;
-                        }
-                        if let Some(mut member) = self.assoc_member(assoc, FnContext::Trait, None, false) {
-                            member.docs_from_trait = true;
-                            member.provided = true;
+                            member.docs = Doc::default();
                             items.push(member);
                         }
+                        continue;
+                    }
+                    if let Some(member) = self.assoc_member(assoc, FnContext::Trait, trait_item, false) {
+                        items.push(member);
+                    }
+                }
+                // The trait's provided items the impl leaves as they are.
+                for assoc in trait_items {
+                    if members != Members::WithProvided {
+                        break;
+                    }
+                    let Some(name) = assoc.name(db) else { continue };
+                    if implemented.contains(&name) || assoc_hidden(db, assoc) {
+                        continue;
+                    }
+                    if let AssocItem::Function(f) = assoc
+                        && !self.possible(imp, f)
+                    {
+                        continue;
+                    }
+                    let provided = match assoc {
+                        AssocItem::Function(f) => f.has_body(db),
+                        AssocItem::Const(c) => c.has_body(db),
+                        AssocItem::TypeAlias(t) => t.has_type(db),
+                    };
+                    if !provided {
+                        continue;
+                    }
+                    if let Some(mut member) = self.assoc_member(assoc, FnContext::Trait, None, false) {
+                        member.docs_from_trait = true;
+                        member.provided = true;
+                        items.push(member);
                     }
                 }
             }
@@ -912,12 +920,7 @@ impl Builder<'_> {
             Ok(_) => imp.source(db).and_then(|src| self.files.span(db, src.as_ref().map(|it| it.syntax()))),
             Err(_) => None,
         };
-        let docs = match hir_def::ImplId::try_from(imp) {
-            Ok(id) => hir_def::attrs::AttrFlags::docs(db, id.into())
-                .map(|it| Doc { markdown: it.docs().to_owned(), ..Doc::default() })
-                .unwrap_or_default(),
-            Err(_) => Doc::default(),
-        };
+        let docs = self.doc(imp, None);
         let anchor = impl_anchor(&header);
         ImplDoc {
             header,
@@ -1183,11 +1186,11 @@ impl Builder<'_> {
                 continue;
             }
             if imp.self_ty(db).as_type_param(db).is_some() {
-                out.blanket_implementors.push(self.impl_doc(imp, Members::None));
+                out.blanket_implementors.push(self.impl_doc(imp, Members::AssocTypes));
             } else if self.on_foreign_type(imp, trait_) {
                 out.foreign.push(self.impl_doc(imp, Members::Written));
             } else {
-                out.implementors.push(self.impl_doc(imp, Members::None));
+                out.implementors.push(self.impl_doc(imp, Members::AssocTypes));
             }
         }
         out.implementors.sort_by_key(|it| it.header.plain());
@@ -1195,15 +1198,11 @@ impl Builder<'_> {
         out
     }
 
-    /// Whether the impl's type can meet the bounds a provided method `f` puts on `Self`; rustdoc
-    /// leaves out a method it cannot, such as `rev` in the `Iterator` impl of a type that is not
-    /// a `DoubleEndedIterator`.
+    /// Whether the impl can meet the where-clauses a provided method `f` puts on the trait's
+    /// parameters; rustdoc leaves out a method it cannot, such as `rev` in the `Iterator` impl
+    /// of a type that is not a `DoubleEndedIterator`, or `cmp` of one whose items are not `Ord`.
     fn possible(&self, imp: Impl, f: hir::Function) -> bool {
-        let db = self.db;
-        let self_ty = imp.self_ty(db);
-        f.self_trait_bounds(db)
-            .into_iter()
-            .all(|trait_| trait_.type_or_const_param_count(db, false) > 0 || self_ty.impls_trait(db, trait_, &[]))
+        !f.is_impossible_in(self.db, imp)
     }
 
     /// Whether the impl is for a type of a documented crate that the docs leave out, or a type

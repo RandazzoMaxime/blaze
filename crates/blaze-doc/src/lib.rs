@@ -36,7 +36,7 @@ pub struct Asked {
 
 /// The crates `cargo doc` documents for `asked`: those, and unless `no_deps` every library
 /// they depend on, directly or not, but none of the sysroot's. Two crates of one name keep the
-/// one asked for, else the one met first.
+/// one asked for, else the newest version.
 pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> Vec<Documented> {
     let mut out: Vec<Documented> = vec![];
     let mut names = FxHashSet::default();

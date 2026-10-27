@@ -1529,23 +1529,17 @@ impl Function {
         }
     }
 
-    /// The traits the where clauses of a trait's function bound `Self` by: `DoubleEndedIterator`
-    /// for `Iterator::rev`. Empty for a function outside a trait.
-    pub fn self_trait_bounds(self, db: &dyn HirDatabase) -> Vec<Trait> {
-        let AnyFunctionId::FunctionId(id) = self.id else { return Vec::new() };
+    /// Whether this function of a trait cannot be used through `impl_`: one of its where-clauses
+    /// that names only the trait's parameters cannot hold there, as `Self: DoubleEndedIterator`
+    /// of `Iterator::rev` for an iterator that is not.
+    pub fn is_impossible_in(self, db: &dyn HirDatabase, impl_: Impl) -> bool {
+        let (AnyFunctionId::FunctionId(id), Ok(impl_id)) = (self.id, ImplId::try_from(impl_)) else {
+            return false;
+        };
         if !matches!(id.lookup(db).container, ItemContainerId::TraitId(_)) {
-            return Vec::new();
+            return false;
         }
-        GenericPredicates::query_explicit(db, id.into())
-            .iter_identity()
-            .filter_map(|pred| match &pred.kind().skip_binder() {
-                ClauseKind::Trait(trait_ref) => match trait_ref.self_ty().kind() {
-                    TyKind::Param(param) if param.index == 0 => Some(Trait::from(trait_ref.def_id().0)),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect()
+        traits::is_impossible_associated_item(db, impl_id, id.into())
     }
 
     pub fn module(self, db: &dyn HirDatabase) -> Module {

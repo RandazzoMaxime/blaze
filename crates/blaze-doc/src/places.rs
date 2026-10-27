@@ -282,6 +282,12 @@ fn sysroot_ref(db: &RootDatabase, def: ModuleDef, krate_name: &str) -> Option<It
         return Some(ItemRef { krate, modules: vec![], kind, name: String::new(), anchor: None, descr: None, declared: None });
     }
     let name = def.name(db)?.as_str().to_owned();
+    if let ModuleDef::Macro(it) = def
+        && is_macro_export(db, it)
+    {
+        let krate = krate_name.to_owned();
+        return Some(ItemRef { krate, modules: vec![], kind, name, anchor: None, descr: None, declared: None });
+    }
     // The module whose scope declares it; a module's parent for a module.
     let module = def.module(db)?;
     let mut modules = vec![];
@@ -362,13 +368,11 @@ pub(crate) fn trait_is_alias(db: &RootDatabase, it: hir::Trait) -> bool {
 }
 
 pub(crate) fn macro_kind(db: &RootDatabase, it: Macro) -> Option<Kind> {
+    // The built-in ones are `core`'s, which documents them as it does any other.
     Some(match it.kind(db) {
-        MacroKind::Declarative | MacroKind::ProcMacro => Kind::Macro,
-        MacroKind::Derive => Kind::ProcDerive,
-        MacroKind::Attr => Kind::ProcAttribute,
-        MacroKind::DeclarativeBuiltIn | MacroKind::DeriveBuiltIn | MacroKind::AttrBuiltIn => {
-            return None;
-        }
+        MacroKind::Declarative | MacroKind::ProcMacro | MacroKind::DeclarativeBuiltIn => Kind::Macro,
+        MacroKind::Derive | MacroKind::DeriveBuiltIn => Kind::ProcDerive,
+        MacroKind::Attr | MacroKind::AttrBuiltIn => Kind::ProcAttribute,
     })
 }
 
@@ -564,7 +568,7 @@ impl<'a> Walker<'a> {
                 }
                 _ => def.module(db) == Some(module),
             };
-            if !declared_here {
+            if !declared_here || from_builtin_attr(db, def) {
                 return;
             }
             let shown = if local {
@@ -733,6 +737,16 @@ impl<'a> Walker<'a> {
             self.module(module, index, inner, local);
         }
     }
+}
+
+/// Whether a built-in attribute macro wrote the function: rust-analyzer's `#[global_allocator]`
+/// writes functions beside the `static` where rustc's writes nothing rustdoc shows.
+fn from_builtin_attr(db: &RootDatabase, def: ModuleDef) -> bool {
+    use hir::HasSource;
+    let ModuleDef::Function(it) = def else { return false };
+    it.source(db)
+        .and_then(|it| it.file_id.macro_file())
+        .is_some_and(|call| call.kind(db) == hir_expand::MacroKind::AttrBuiltIn)
 }
 
 /// An item of another crate that rustdoc can inline: public there, not hidden.

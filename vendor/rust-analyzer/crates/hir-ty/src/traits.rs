@@ -202,6 +202,57 @@ pub fn impl_may_apply<'db>(
         && may_hold(Obligation::new(interner, ObligationCause::dummy(), ParamEnv::empty(), trait_ref))
 }
 
+/// Whether the trait's item `item` cannot be used through `impl_`: one of its own where-clauses
+/// that names only the trait's parameters (`Self::Item: Ord` of `Iterator::cmp`) cannot hold
+/// there. rustc's `is_impossible_associated_item`, which rustdoc asks before it lists an item
+/// the impl leaves as the trait provides it.
+pub fn is_impossible_associated_item(db: &dyn HirDatabase, impl_: ImplId, item: GenericDefId) -> bool {
+    use std::ops::ControlFlow;
+
+    use rustc_type_ir::{TypeSuperVisitable, TypeVisitable, TypeVisitor};
+
+    use crate::next_solver::{Const, ConstKind, EarlyBinder, Region, RegionKind};
+
+    /// Breaks at a parameter of the item's own, numbered after the trait's.
+    struct OwnParam(u32);
+    impl<'db> TypeVisitor<DbInterner<'db>> for OwnParam {
+        type Result = ControlFlow<()>;
+        fn visit_ty(&mut self, ty: Ty<'db>) -> ControlFlow<()> {
+            match ty.kind() {
+                TyKind::Param(param) if param.index >= self.0 => ControlFlow::Break(()),
+                _ => ty.super_visit_with(self),
+            }
+        }
+        fn visit_region(&mut self, region: Region<'db>) -> ControlFlow<()> {
+            match region.kind() {
+                RegionKind::ReEarlyParam(param) if param.index >= self.0 => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+        fn visit_const(&mut self, konst: Const<'db>) -> ControlFlow<()> {
+            match konst.kind() {
+                ConstKind::Param(param) if param.index >= self.0 => ControlFlow::Break(()),
+                _ => konst.super_visit_with(self),
+            }
+        }
+    }
+
+    let Some(trait_ref) = db.impl_trait(impl_) else { return false };
+    let interner = DbInterner::new_with(db, impl_.krate(db));
+    let args = trait_ref.instantiate_identity().skip_norm_wip().args;
+    let param_env = db.trait_environment(impl_.into());
+    let parent = crate::generics::generics(db, item).len_parent() as u32;
+    let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
+    crate::lower::GenericPredicates::query_own_explicit(db, item)
+        .skip_binder()
+        .filter(|clause| clause.visit_with(&mut OwnParam(parent)).is_continue())
+        .any(|clause| {
+            let clause = EarlyBinder::bind(clause).instantiate(interner, args).skip_norm_wip();
+            let obligation = Obligation::new(interner, ObligationCause::dummy(), param_env, clause);
+            !infcx.predicate_may_hold(&obligation)
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WherePredicateEvaluation {
     Holds,
