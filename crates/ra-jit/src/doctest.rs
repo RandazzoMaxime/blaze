@@ -1151,7 +1151,7 @@ fn compile(
             anyhow::bail!(why);
         }
         let example = crate::crates_named(db, name, &args)?;
-        crate::link::Line::of(db, &example, building.sysroot, false)
+        crate::link::Line::of(db, &example, building.sysroot, false, &[])
     };
     match built() {
         Ok(line) => {

@@ -122,6 +122,9 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<i32> {
         return Ok(FAILED);
     }
     finished(asked, asked.profile(), started);
+    if let Some(failed) = super::remote_failed_it() {
+        return Ok(failed);
+    }
     if asked.subcommand != Subcommand::Run {
         return Ok(0);
     }
@@ -241,6 +244,9 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
         }
     }
     finished(asked, profile, started);
+    if let Some(failed) = super::remote_failed_it() {
+        return Ok(failed);
+    }
     if asked.flags.no_run {
         return Ok(0);
     }
@@ -353,7 +359,7 @@ fn compiling(asked: &Invocation, programs: &[Program]) {
 /// Says the build of `profile` is done.
 fn finished(asked: &Invocation, profile: &str, started: Instant) {
     let took = started.elapsed().as_secs_f64();
-    let finished = format!("`{profile}` profile [ra-jit] target(s) in {took:.2}s");
+    let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", super::ra_jit_tag());
     say::status(asked.flags.quiet, "Finished", &finished);
 }
 

@@ -275,12 +275,13 @@ pub(super) fn from_elf(
                 .ok_or_else(|| format!("wasm object: `{name}` out of range"))?;
             std::borrow::Cow::Borrowed(bytes)
         };
-        // The symbol is where its own alignment and its section's allow, and no type is
-        // aligned to more than a power of two its size is a multiple of.
-        let align = [symbol.address(), size as u64]
-            .into_iter()
-            .filter(|&it| it != 0)
-            .fold(section.align().max(1), |align, it| align.min(1 << it.trailing_zeros()));
+        // Each piece of data is in a section of its own (`per_data_object_section`), which is
+        // aligned as the code generator asked. Its size says nothing: four bytes of a field of
+        // a value aligned to 64 are aligned to 64.
+        if section.address() != symbol.address() || section.size() > symbol.size() {
+            return Err(format!("wasm object: `{name}` shares its section"));
+        }
+        let align = section.align().max(1);
         address = address.next_multiple_of(align as u32);
         // An active segment of memory 0, at a constant address.
         0u32.encode(&mut writer.data);

@@ -332,12 +332,14 @@ def wired(work, root, meta, units, server):
         if got != expected:
             raise SystemExit(f"FAIL: the package ({how}) printed otherwise than cargo's:\n"
                              f"cargo:  {expected}\nra-jit: {got}")
-        ours, theirs = built_macros(os.path.join(root, "target", "rust-analyzer"))
+        # A load without ra-jit's proc macros has a directory of its own (#460).
+        own = os.path.join(root, "target", "rust-analyzer" if named else "rust-analyzer-rustc")
+        ours, theirs = built_macros(own)
         if (ours, theirs) != ((wanted, []) if named else ([], wanted)):
             raise SystemExit(f"FAIL: the load ({how}) built the proc macros {ours} by ra-jit and "
                              f"{theirs} by rustc, not each of {wanted} by "
                              f"{'ra-jit' if named else 'rustc'}:\n{ran.stderr[-8000:]}")
-        bare = without_libc(os.path.join(root, "target", "rust-analyzer"))
+        bare = without_libc(own)
         if sys.platform == "linux" and bare:
             raise SystemExit(f"FAIL: ra-jit linked the proc macros {bare} without libc")
         lines.append(f"the package whole, its proc macros by {'ra-jit' if named else 'rustc'}: "
@@ -360,12 +362,13 @@ def app(name, work, server):
     run(["git", "clone", "-q", "--filter=blob:none", f"https://github.com/{spec['repo']}", root],
         work, f"git clone of {name}")
     run(["git", "-C", root, "checkout", "-q", "--detach", spec["rev"]], work, f"checkout of {name}")
-    own = os.path.join(root, "target", "rust-analyzer")
     libs = os.path.join(work, f"{name}-libs")
     os.makedirs(libs)
     lines, printed, counts = [], [], None
     for build in ("ours", "again", "theirs"):
         named = build != "theirs"
+        # A load without ra-jit's proc macros has a directory of its own (#460).
+        own = os.path.join(root, "target", "rust-analyzer" if named else "rust-analyzer-rustc")
         shutil.rmtree(os.path.join(root, "target"), ignore_errors=True)
         store = os.path.join(work, f"{name}-store-{'ours' if named else 'theirs'}")
         env = {**spec.get("env", {}), "RA_JIT_CACHE": store}

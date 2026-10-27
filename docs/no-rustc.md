@@ -1100,7 +1100,10 @@ Where J stands (2026-10-24):
   macro is compiled again by rustc. A script or proc macro ra-jit cannot build, or a proc
   macro with no server beside ra-jit, fails the load with why. A crate cargo built before the
   directory was seeded from it is described from cargo's records. `RA_JIT_PROC_MACRO_SERVER=0`
-  is kept for `macroserver.py`'s reference build alone, which rustc builds whole. On blaze's
+  is kept for `macroserver.py`'s reference build alone, which rustc builds whole, into a
+  directory of its own (`target/rust-analyzer-rustc`): cargo does not fingerprint the
+  variable, and in one directory rustc read the empty files (#460). The variable is part of
+  which build and worker it is, so the daemon never keeps the mode it was started with. On blaze's
   own release build this took the load from about 100 compiles by rustc (54 scripts, 28
   libraries, 18 proc macros compiled again) to none.
 - Shipped (2026-10-25): on Linux the release workflow's ra-jit builds the server
