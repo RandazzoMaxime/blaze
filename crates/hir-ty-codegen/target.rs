@@ -153,7 +153,7 @@ impl Target {
             Some("x86_64") => Arch::X86_64,
             Some("aarch64") => Arch::Aarch64,
             Some("wasm32") => Arch::Wasm32,
-            _ => return Err(format!("ra-jit emits no code for the architecture of {triple}")),
+            _ => return Err(format!("blaze emits no code for the architecture of {triple}")),
         };
         let system = parts.find(|part| matches!(*part, "linux" | "darwin" | "windows"));
         // Cranelift's names for the C convention: `SystemV` is the psABI's on x86-64 and
@@ -170,7 +170,7 @@ impl Target {
             }
             // FIXME: x86-64 Mach-O and AArch64 PE have no splice written for them, and the
             // GNU flavour of Windows unwinds another way than the tables of `unwind::seh`.
-            _ => return Err(format!("ra-jit emits no code for the system of {triple}")),
+            _ => return Err(format!("blaze emits no code for the system of {triple}")),
         };
         Ok(Target { triple: triple.to_owned(), arch, object_format, call_conv, unwind })
     }
@@ -211,6 +211,25 @@ impl Target {
 
     pub fn triple(&self) -> &str {
         &self.triple
+    }
+
+    /// The symbol of the `main` the C runtime calls, and whether it takes the count and the
+    /// arguments: rustc's `entry-name` and `main-needs-argc-argv` of the target. WASI's
+    /// `_start` calls `__main_void`, and std reads the arguments from WASI itself; elsewhere
+    /// on wasm a C `main(argc, argv)` is `__main_argc_argv`, as LLVM names the `main` rustc
+    /// gives it.
+    pub fn entry(&self) -> (&'static str, bool) {
+        match self.arch {
+            Arch::Wasm32 if self.triple.contains("-wasi") => ("__main_void", false),
+            Arch::Wasm32 => ("__main_argc_argv", true),
+            Arch::X86_64 | Arch::Aarch64 => ("main", true),
+        }
+    }
+
+    /// Whether the program is linked with a C library, for `write` and `abort`: not on a wasm
+    /// that is not WASI's, as wasm32-unknown-unknown has nothing to link but the program.
+    pub fn has_libc(&self) -> bool {
+        self.arch != Arch::Wasm32 || self.triple.contains("-wasi")
     }
 
     /// Whether a call can name its landing pad and the pad is entered with the exception in a

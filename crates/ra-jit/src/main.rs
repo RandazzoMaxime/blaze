@@ -149,6 +149,11 @@ struct Args {
     /// Where to write, after `exe` is linked, the dep-info rustc would have of the crate asked
     /// for: the files of its modules, as cargo reads them to know when to build it again.
     dep_info: Option<PathBuf>,
+    /// Where to write, after `exe` is linked, every file the build read for a crate that is
+    /// not the toolchain's, one a line, and each variable of this process `env!` read, as
+    /// [`cargo::keyed::var`] names it: what a build script's or a proc macro's build is kept
+    /// in the store by (`cargo/own_script.rs`).
+    inputs: Option<PathBuf>,
     /// The build is of the standard library alone ([`std_unit`]): a crate it names is the
     /// library's, not another of that name the program has too.
     library: bool,
@@ -247,6 +252,7 @@ impl Args {
         let mut exe = None;
         let mut shared = false;
         let mut dep_info = None;
+        let mut inputs = None;
         let mut cfg_test = false;
         let mut dev_deps = false;
         let mut own_target = false;
@@ -291,6 +297,7 @@ impl Args {
                 "--exe" => exe = Some(PathBuf::from(value()?)),
                 "--shared" => shared = true,
                 "--dep-info" => dep_info = Some(PathBuf::from(value()?)),
+                "--inputs" => inputs = Some(PathBuf::from(value()?)),
                 "--watch" => watch = true,
                 "--socket" => socket = Some(PathBuf::from(value()?)),
                 "--cfg-test" => cfg_test = true,
@@ -341,6 +348,7 @@ impl Args {
             exe,
             shared,
             dep_info,
+            inputs,
             library: false,
             cfg_test,
             own_target,
@@ -522,11 +530,11 @@ struct Prebuilt {
 }
 
 /// The crates of the standard library a program links, which ra-jit builds apart from it
-/// ([`std_unit`]): what the program's crates take of the library, and everything that
-/// depends on, whoever's it is (rust-analyzer gives the library a crate of the workspace's
-/// where both use one), but `test`, `proc_macro` and the panic runtime the program does not
-/// link ([`unlinked_panic_runtime`]). rust-analyzer's graph has every crate depend on the
-/// first two, which a program links only as a test or a macro.
+/// ([`std_unit`]): what the program's crates take of the library ([`library_linked_by`]), and
+/// everything that depends on, whoever's it is (rust-analyzer gives the library a crate of the
+/// workspace's where both use one), but `test`, `proc_macro` and the panic runtime the program
+/// does not link ([`unlinked_panic_runtime`]). rust-analyzer's graph has every crate depend on
+/// the first two, which a program links only as a test or a macro.
 fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_db::Crate> {
     use ide_db::base_db::LangCrateOrigin::{ProcMacro, Test};
     let unlinked = unlinked_panic_runtime(db, program);
@@ -537,18 +545,62 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
             .is_some_and(|name| name.crate_name().as_str() == unlinked),
     };
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    // The program's crates: a proc macro it depends on runs in the compiler, not in it.
+    let mut own: FxHashSet<ide_db::base_db::Crate> = program.iter().map(|&it| it.into()).collect();
+    let mut next: Vec<ide_db::base_db::Crate> = own.iter().flat_map(|&it| deps(it)).collect();
+    while let Some(krate) = next.pop() {
+        let data = krate.data(db);
+        if !data.origin.is_lang() && !data.target_kind.is_proc_macro() && own.insert(krate) {
+            next.extend(deps(krate));
+        }
+    }
     let mut unit = FxHashSet::default();
-    let mut next: Vec<ide_db::base_db::Crate> = program
-        .iter()
-        .flat_map(|&it| deps(it.into()))
-        .filter(|it| it.data(db).origin.is_lang())
-        .collect();
+    let mut next: Vec<ide_db::base_db::Crate> =
+        own.iter().flat_map(|&it| library_linked_by(db, it)).collect();
     while let Some(krate) = next.pop() {
         if !left_out(krate) && unit.insert(krate) {
             next.extend(deps(krate));
         }
     }
     unit
+}
+
+/// The standard library's crates `krate` links, as rustc puts them in: `std`, or `core` and
+/// `compiler_builtins` under `#![no_std]`, none under `#![no_core]`, and those it names with
+/// `extern crate`. A `#![no_std]` crate with a `#[panic_handler]` of its own does not get
+/// std's. One of the library's own that a program links, as `proc_macro`, links what it
+/// depends on.
+fn library_linked_by(
+    db: &RootDatabase,
+    krate: ide_db::base_db::Crate,
+) -> Vec<ide_db::base_db::Crate> {
+    if krate.data(db).origin.is_lang() {
+        return (krate.data(db).dependencies.iter())
+            .map(|dep| dep.crate_id)
+            .filter(|it| it.data(db).origin.is_lang())
+            .collect();
+    }
+    let def_map = hir_def::nameres::crate_def_map(db, krate);
+    let injected: &[&str] = if def_map.is_no_core() {
+        &[]
+    } else if def_map.is_no_std() {
+        &["core", "compiler_builtins"]
+    } else {
+        &["std"]
+    };
+    let name = |it: ide_db::base_db::Crate| Crate::from(it).display_name(db);
+    let mut linked: Vec<ide_db::base_db::Crate> = (krate.transitive_deps(db).into_iter())
+        .filter(|&it| it.data(db).origin.is_lang())
+        .filter(|&it| name(it).is_some_and(|it| injected.contains(&it.crate_name().as_str())))
+        .collect();
+    linked.extend(
+        (Crate::from(krate).modules(db).into_iter())
+            .flat_map(|module| module.extern_crate_decls(db))
+            .filter_map(|it| it.resolved_crate(db))
+            .map(ide_db::base_db::Crate::from)
+            .filter(|it| it.data(db).origin.is_lang()),
+    );
+    linked
 }
 
 /// What a program of tests compiles of the standard library's crates beside its own:
@@ -559,23 +611,59 @@ fn tests_linked(
     tests: bool,
 ) -> FxHashSet<ide_db::base_db::Crate> {
     use ide_db::base_db::LangCrateOrigin::Test;
-    let library = library_unit(db, program);
-    let unlinked = unlinked_panic_runtime(db, program);
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
     let mut next: Vec<ide_db::base_db::Crate> = match tests {
         true => program.iter().flat_map(|&it| deps(it.into())).collect(),
         false => Vec::new(),
     };
     next.retain(|it| matches!(it.data(db).origin, CrateOrigin::Lang(Test)));
-    let mut tested = FxHashSet::default();
+    beside_library(db, program, next)
+}
+
+/// What a program compiles of the standard library's crates for `proc_macro` beside its own:
+/// `proc_macro`, and what only it links, when a crate of `linked` that is not a proc macro
+/// names it with `extern crate`, as `proc-macro2` does in a build script or a program (rustc
+/// links `libproc_macro` there, whose functions then say no macro is running). None for
+/// another: rust-analyzer's graph has every crate depend on it ([`library_unit`]).
+fn macros_linked(
+    db: &RootDatabase,
+    program: &[Crate],
+    linked: &FxHashSet<ide_db::base_db::Crate>,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    use ide_db::base_db::LangCrateOrigin::ProcMacro;
+    let named = linked
+        .iter()
+        .filter(|it| !it.data(db).target_kind.is_proc_macro())
+        .flat_map(|&it| Crate::from(it).modules(db))
+        .flat_map(|module| module.extern_crate_decls(db))
+        .filter_map(|it| it.resolved_crate(db))
+        .map(ide_db::base_db::Crate::from)
+        .filter(|it| matches!(it.data(db).origin, CrateOrigin::Lang(ProcMacro)));
+    beside_library(db, program, named.collect())
+}
+
+/// `next` and everything they depend on that the program's standard library unit
+/// ([`library_unit`]) does not have, but the panic runtime it does not link.
+fn beside_library(
+    db: &RootDatabase,
+    program: &[Crate],
+    mut next: Vec<ide_db::base_db::Crate>,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    if next.is_empty() {
+        return FxHashSet::default();
+    }
+    let library = library_unit(db, program);
+    let unlinked = unlinked_panic_runtime(db, program);
+    let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    let mut beside = FxHashSet::default();
     while let Some(krate) = next.pop() {
         let name = Crate::from(krate).display_name(db);
         let unlinked = name.is_some_and(|it| it.crate_name().as_str() == unlinked);
-        if !library.contains(&krate) && !unlinked && tested.insert(krate) {
+        if !library.contains(&krate) && !unlinked && beside.insert(krate) {
             next.extend(deps(krate));
         }
     }
-    tested
+    beside
 }
 
 /// The panic runtime a program does not link: `panic_unwind` when its crate is built with
@@ -720,7 +808,7 @@ impl<'a> Resolver<'a> {
         let prebuilt = args.prebuilt.as_deref().filter(|_| table.is_empty()).map(|path| {
             let defined = defined_symbols(path);
             let defined =
-                defined.unwrap_or_else(|e| panic!("the standard library ra-jit built: {e:#}"));
+                defined.unwrap_or_else(|e| panic!("the standard library blaze built: {e:#}"));
             let program: Vec<Crate> =
                 args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten().collect();
             let crates = library_unit(db, &program);
@@ -2403,7 +2491,7 @@ fn checks_differ(db: &RootDatabase, built: &[Crate]) -> bool {
 fn linked_from_libraries(db: &RootDatabase, args: &Args) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.link_cmd.as_deref().is_none_or(links_core),
-        "the link command has no library of `core`, as rustc's has not with `lto`: ra-jit \
+        "the link command has no library of `core`, as rustc's has not with `lto`: blaze \
          links against a build with `lto = \"off\"`"
     );
     if args.symbol_files.is_empty() {
@@ -2429,7 +2517,7 @@ fn linked_from_libraries(db: &RootDatabase, args: &Args) -> anyhow::Result<()> {
     };
     anyhow::ensure!(
         libraries.is_empty() || libraries.iter().any(linked),
-        "rustc linked the program without a library of `{}`, as it does with `lto`: ra-jit \
+        "rustc linked the program without a library of `{}`, as it does with `lto`: blaze \
          links against a build with `lto = \"off\"`",
         libraries[0].trim_start_matches("lib")
     );
@@ -3200,7 +3288,7 @@ fn workspace_at(
         let toolchain =
             workspace.sysroot.root().map_or("the toolchain".to_owned(), |it| it.to_string());
         anyhow::bail!(
-            "{toolchain} has no source of the standard library, which ra-jit compiles from: \
+            "{toolchain} has no source of the standard library, which blaze compiles from: \
              `rustup component add rust-src` installs it"
         );
     }
@@ -3695,7 +3783,7 @@ fn write_reach(db: &RootDatabase, listed: &Listed, args: &Args, built: bool) {
         Err(panic) if panic.is::<ide_db::base_db::salsa::Cancelled>() => {
             std::panic::resume_unwind(panic)
         }
-        Err(panic) => format!("*\tra-jit panicked: {}\n", panic_message(&*panic)),
+        Err(panic) => format!("*\tblaze panicked: {}\n", panic_message(&*panic)),
     };
     let writing = dir.join(format!("{}.writing", cargo::plan::REACH));
     if std::fs::write(&writing, text).and_then(|()| std::fs::rename(&writing, &file)).is_err() {
@@ -4629,11 +4717,30 @@ fn link_executable(
     }
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
-    // A shared library exports what the crate asked for names with `#[no_mangle]` or
-    // `#[export_name]`.
+    // A shared library exports what the crates it links ask for names with `#[no_mangle]`
+    // or `#[export_name]`, as rustc's `cdylib` does; a proc macro's only what its own crate
+    // names. The standard library's crates name none a program may call.
     let exports = args.shared.then(|| -> anyhow::Result<Vec<String>> {
         let mut exports = Vec::new();
+        let mut crates = FxHashSet::default();
         for krate in crates_named(db, &args.krate, args)? {
+            crates.insert(krate);
+            let data = ide_db::base_db::Crate::from(krate).data(db);
+            if data.target_kind.is_proc_macro() {
+                continue;
+            }
+            crates.extend(
+                ide_db::base_db::Crate::from(krate)
+                    .transitive_deps(db)
+                    .into_iter()
+                    .filter(|it| {
+                        let data = it.data(db);
+                        !data.origin.is_lang() && !data.target_kind.is_proc_macro()
+                    })
+                    .map(Crate::from),
+            );
+        }
+        for krate in crates {
             let of = listed.of(db, krate);
             let functions = of.functions.iter().filter_map(|&it| exported_symbol(db, it));
             let statics = of.statics.iter().filter_map(|&it| exported_static(db, it));
@@ -4644,12 +4751,20 @@ fn link_executable(
         Ok(exports)
     });
     let exports = exports.transpose()?;
-    let took =
-        link::executable(db, &program, &objects, sysroot, exe, exports.as_deref(), &args.link_args)
-            .map_err(|it| refused_linked(it, args))?;
+    let took = link::executable(
+        db,
+        &program,
+        &objects,
+        sysroot,
+        exe,
+        exports.as_deref(),
+        &args.link_args,
+        args.debug.level,
+    )
+    .map_err(|it| refused_linked(it, args))?;
     let stand_ins = link::stand_ins(exe)?;
     eprintln!(
-        "linked {} in {took:.1?}, {} functions in it ra-jit could not compile",
+        "linked {} in {took:.1?}, {} functions in it blaze could not compile",
         exe.display(),
         stand_ins.len()
     );
@@ -4679,7 +4794,8 @@ fn own_link_line(db: &RootDatabase, args: &Args) -> anyhow::Result<Option<(Strin
     let objects: Vec<&Path> =
         std::iter::once(args.out.as_path()).chain(args.prebuilt.as_deref()).collect();
     let sysroot = SYSROOT.get().and_then(Option::as_deref);
-    let cmd = link::command(db, &program, &objects, sysroot, exe, &args.link_args)?;
+    let cmd =
+        link::command(db, &program, &objects, sysroot, exe, &args.link_args, args.debug.level)?;
     Ok(Some((cmd, exe.clone())))
 }
 
@@ -4744,6 +4860,36 @@ fn write_dep_info(
         }
     }
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes to `path` what [`Args::inputs`] says: the files of the modules of every crate that
+/// is not the toolchain's, what `include!` and its kin read for them, and the variables of
+/// this process `env!` and `option_env!` read where the crate's description had none.
+fn write_inputs(db: &RootDatabase, vfs: &vfs::Vfs, path: &Path) -> anyhow::Result<()> {
+    let krates: Vec<Crate> =
+        Crate::all(db).into_iter().filter(|it| !it.origin(db).is_lang()).collect();
+    let mut files = Vec::new();
+    for &krate in &krates {
+        let modules = krate.modules(db).into_iter().map(|it| it.definition_source_file_id(db));
+        files.extend(modules.map(|it| it.original_file(db).file_id(db)));
+        let included = hir_def::include_macro_invoc(db, krate.into()).iter();
+        files.extend(included.map(|(_, file)| file.file_id(db)));
+    }
+    let mut lines: Vec<String> =
+        files.iter().filter_map(|id| Some(vfs.file_path(*id).as_path()?.to_string())).collect();
+    lines.extend(
+        krates.iter().flat_map(|it| db.included_by((*it).into())).map(|it| it.0.to_string()),
+    );
+    for (krate, key) in db.env_read() {
+        let ours = krates.iter().any(|it| ide_db::base_db::Crate::from(*it) == krate);
+        if ours && krate.env(db).get(&key).is_none() {
+            lines.push(cargo::keyed::var(&key));
+        }
+    }
+    lines.sort();
+    lines.dedup();
+    anyhow::ensure!(!lines.is_empty(), "no file was loaded");
+    std::fs::write(path, lines.join("\n")).with_context(|| format!("writing {}", path.display()))
 }
 
 /// [`build`] of a build that is never held.
@@ -4815,11 +4961,17 @@ fn build(
     if table.is_empty() {
         let asked: FxHashSet<Crate> = local.iter().copied().collect();
         let tested = tests_linked(db, &local, of_tests(args));
-        let linked: FxHashSet<Crate> = local
+        let own: FxHashSet<ide_db::base_db::Crate> = local
             .iter()
             .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
-            .filter(|it| !it.data(db).origin.is_lang() && !resolver.prebuilt(*it))
+            .filter(|it| !it.data(db).origin.is_lang())
+            .collect();
+        let macros = macros_linked(db, &local, &own);
+        let linked: FxHashSet<Crate> = own
+            .into_iter()
+            .filter(|it| !resolver.prebuilt(*it))
             .chain(tested)
+            .chain(macros)
             .map(Crate::from)
             .filter(|it| !asked.contains(it))
             .collect();
@@ -5041,7 +5193,7 @@ fn build(
 /// How many of the functions ra-jit could not compile an error names.
 const REFUSED_SHOWN: usize = 16;
 /// What the first line of [`refused_error`] says, which the daemon's client finds it by.
-pub(crate) const REFUSED_SAYS: &str = "ra-jit could not compile";
+pub(crate) const REFUSED_SAYS: &str = "blaze could not compile";
 
 /// Why a program with nothing of rustc's is not built: the functions it reaches that ra-jit
 /// could not compile, `reached` of them, each `name: why`, the first [`REFUSED_SHOWN`] named.
@@ -5203,7 +5355,7 @@ fn report(build: &Build) {
         let all: String =
             build.skipped.iter().map(|(name, error)| format!("{name}: {error}\n")).collect();
         if let Err(error) = std::fs::write(&path, all) {
-            eprintln!("ra-jit: cannot write {path:?}: {error}");
+            eprintln!("blaze: cannot write {path:?}: {error}");
         }
     }
     if build.skipped.len() <= 8 {
@@ -5997,7 +6149,7 @@ fn refusal(
             None => "may call code of rustc's that is".to_owned(),
         };
         return Some(Refused::Cargos(format!(
-            "{name} is not compiled by ra-jit, and rustc's copy of it {calls} from before the \
+            "{name} is not compiled by blaze, and rustc's copy of it {calls} from before the \
              edit: {why} (no-rustc E, #85)"
         )));
     }
@@ -6005,12 +6157,12 @@ fn refusal(
     // the frontend turned the function down when rustc compiled it. Code rustc compiles
     // that ra-jit takes for wrong is ra-jit's to fix, and not for rustc to build.
     if does_not_compile(&why) && !left_from_the_start {
-        let message = format!("{name} has an error ra-jit cannot say more of: {why}");
+        let message = format!("{name} has an error blaze cannot say more of: {why}");
         let said = errors::Said::one(written_at(db, func, watched, root, &message));
         return Some(Refused::Error(said));
     }
     Some(Refused::Cargos(format!(
-        "{name} is not compiled by ra-jit and rustc's copy is from before the edit: {why} \
+        "{name} is not compiled by blaze and rustc's copy is from before the edit: {why} \
          (no-rustc E, #85)"
     )))
 }
@@ -6503,6 +6655,7 @@ fn build_batch(db: &RootDatabase, args: Args) -> anyhow::Result<()> {
             exe: args.exe.clone(),
             shared: args.shared,
             dep_info: None,
+            inputs: None,
             library: args.library,
             cfg_test: args.cfg_test,
             own_target: args.own_target,
@@ -6858,7 +7011,7 @@ impl Tests {
         let which = differs(now, self).or_else(|| differs(self, now)).unwrap_or_default();
         Some(format!(
             "the test `{which}` was added, removed or given other attributes, and the list of \
-             tests is rustc's to write: ra-jit wrote no test harness for the program (no-rustc H, \
+             tests is rustc's to write: blaze wrote no test harness for the program (no-rustc H, \
              #88)"
         ))
     }
@@ -6902,7 +7055,7 @@ fn compile_tiered(
     let mut asked = Vec::new();
     for want in wants {
         let Some(node) = known.tier_node(&want.symbol) else {
-            tier::theirs(&binary, &want.symbol, "rustc's code, which ra-jit does not tier");
+            tier::theirs(&binary, &want.symbol, "rustc's code, which blaze does not tier");
             continue;
         };
         let asked_for = codegen_tier::Asked {
@@ -7576,6 +7729,8 @@ usage: ra-jit <command>
   cargo <command>   what `cargo blaze <command>` runs: build, run, test, check
   cache <verb>      the disk store: stats, gc, verify, push, pull, keygen
                     (`cargo blaze cache clear` forgets what `#[ra_jit::cache]` kept)
+  closure fetch|materialize [--host <host>] [<root>...]
+                    the nixpkgs store paths build scripts run with (docs/closure.md)
   mir <dir> --crate <name> [--level 0|1|2] [--time]
                     a crate's MIR as blaze compiles it, written as rustc's -Zunpretty=mir
   --help, --version
@@ -7653,6 +7808,11 @@ fn main() -> anyhow::Result<()> {
             return remote::command(std::env::args().skip(2));
         }
         Some("std") => return shipped::command(std::env::args().skip(2)),
+        #[cfg(unix)]
+        Some("closure") => {
+            end_with_reader();
+            return cargo::closure::command(std::env::args().skip(2));
+        }
         _ => {}
     }
     #[cfg(windows)]
@@ -7680,7 +7840,7 @@ fn main() -> anyhow::Result<()> {
             }
             asked.args(std::env::args_os().skip(3));
             let output = answers::cargo_answer(&asked)
-                .context("ra-jit does not answer this question of cargo")??;
+                .context("blaze does not answer this question of cargo")??;
             use std::io::Write as _;
             std::io::stdout().write_all(&output.stdout)?;
             std::io::stderr().write_all(&output.stderr)?;
@@ -8664,6 +8824,7 @@ fn run_holding(
     }
     let sysroot = checkouts.loaded.workspaces().first().and_then(|it| it.sysroot.root());
     let _ = SYSROOT.set(sysroot.map(|it| AsRef::<Path>::as_ref(it).to_owned()));
+    let mut from_manifest = false;
     let cold = match rustcs_to_patch(&args, written.is_empty() && !harnessed) {
         Some(rustcs) => {
             let start = Instant::now();
@@ -8697,7 +8858,7 @@ fn run_holding(
             let manifest_mode = manifest::mode();
             let manifest_key =
                 manifest_mode.and_then(|_| manifest::key(&db, &args, table.is_empty()));
-            let from_manifest = match (manifest_mode, &manifest_key) {
+            let files_of_manifest = match (manifest_mode, &manifest_key) {
                 (Some(manifest::Mode::Use), Some(key)) => match manifest::lookup(&db, &args, key) {
                     Ok(files) => Some(files),
                     Err(why) => {
@@ -8707,8 +8868,9 @@ fn run_holding(
                 },
                 _ => None,
             };
-            let served = from_manifest.is_some();
-            let cold = match from_manifest {
+            let served = files_of_manifest.is_some();
+            from_manifest = served;
+            let cold = match files_of_manifest {
                 Some(files) => {
                     let mut cold = Build::of_manifest(files);
                     cold.keep(&mut known)?;
@@ -8805,6 +8967,9 @@ fn run_holding(
                 }
                 if let Some(path) = &args.dep_info {
                     write_dep_info(&db, &args, tree.vfs(), exe, path)?;
+                }
+                if let Some(path) = &args.inputs {
+                    write_inputs(&db, tree.vfs(), path)?;
                 }
             }
             if let (Some(key), false) = (&manifest_key, served) {
@@ -8933,7 +9098,7 @@ fn run_holding(
         tier::watch(move |ask| _ = sender.send(Event::Tier(ask)));
     } else if serving {
         eprintln!(
-            "tier: off (RA_JIT_TIER=off, ra-jit built without `--features llvm`, or not macOS \
+            "tier: off (RA_JIT_TIER=off, blaze built without `--features llvm`, or not macOS \
              on AArch64)"
         );
     }
@@ -8971,7 +9136,10 @@ fn run_holding(
         over_budget: Vec::new(),
         given_up: FxHashSet::default(),
     };
-    if programs[0].dehydrate() {
+    if from_manifest {
+        programs[0].build_from_store();
+        builds.unasked.push(0);
+    } else if programs[0].dehydrate() {
         builds.unasked.push(0);
     }
     // How many times running each checkout that is read as a loaded one has been long to turn
@@ -10212,6 +10380,17 @@ impl Program {
         true
     }
 
+    /// Has the next build be the one a start makes without a manifest, while nobody asks: a
+    /// start from a manifest wrote the program with nothing analysed and holds no base, so
+    /// the first edit would be a full build.
+    fn build_from_store(&mut self) {
+        eprintln!(
+            "taking the program's code from the store, for the first edit to patch: {}",
+            self.args.krate
+        );
+        self.unbuilt.stale = true;
+    }
+
     /// Has the next build be one in full of the program, for edits to patch from then on
     /// rather than what rustc linked.
     fn build_own_base(&mut self) {
@@ -10578,7 +10757,7 @@ impl Program {
         if let Some(why) = harness_alone(args)
             && !harnessed
         {
-            let why = format!("{why}, and ra-jit wrote no test harness for it (no-rustc H, #88)");
+            let why = format!("{why}, and blaze wrote no test harness for it (no-rustc H, #88)");
             failed = failed.or(Some(Refused::Cargos(why)));
         }
         match tests {

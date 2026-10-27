@@ -551,8 +551,17 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         else {
             return Ok(None);
         };
-        // `CONST.len()` borrows a promoted constant just as `(&CONST).len()` does.
-        if bk == BorrowKind::Shared
+        // `CONST.len()` borrows a promoted constant just as `(&CONST).len()` does, and
+        // `[][..]` mutably an empty array just as `&mut []` does (rustc's `validate_ref`).
+        let promotable_kind = match bk {
+            BorrowKind::Shared => true,
+            BorrowKind::Mut {
+                kind: super::MutBorrowKind::Default | super::MutBorrowKind::TwoPhasedBorrow,
+            } => self.is_empty_array(expr_id),
+            BorrowKind::Shallow
+            | BorrowKind::Mut { kind: super::MutBorrowKind::ClosureCapture } => false,
+        };
+        if promotable_kind
             && rest.is_empty()
             && p.local.into_raw().into_u32() as usize >= locals
             && p.projection.as_slice().is_empty()
@@ -1108,9 +1117,12 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         let func = Operand::from_bytes(Box::default(), callee_ty);
                         // `#[rustc_legacy_const_generics]`: those are generic arguments.
                         let consts = match def.0 {
-                            CallableDefId::FunctionId(func) => FunctionSignature::of(self.db, func)
-                                .legacy_const_generics_indices(self.db, func)
-                                .filter(|consts| args.len() > consts.len()),
+                            CallableDefId::FunctionId(func) => {
+                                let signature = FunctionSignature::of(self.db, func);
+                                signature
+                                    .legacy_const_generics_indices(self.db, func)
+                                    .filter(|_| args.len() > signature.params.len())
+                            }
                             _ => None,
                         }
                         .unwrap_or_default();

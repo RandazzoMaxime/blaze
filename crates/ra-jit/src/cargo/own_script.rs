@@ -18,7 +18,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use super::units::Record;
+use super::{keyed, units::Record};
 
 /// The variable that has rustc compile the build scripts, as the harness's reference builds do.
 pub(crate) const BY_RUSTC: &str = "RA_JIT_SCRIPTS_BY_RUSTC";
@@ -217,19 +217,189 @@ fn compile_in(
         deps.iter().map(|(name, path)| Ok((name.clone(), add(&mut crates, &mut linked, path)?)));
     crates[0].deps = deps.collect::<Result<_, String>>()?;
     let described = description(sysroot, &crates);
-    // A proc macro's library is kept in the store, by its description.
-    let key = made.proc_macro.then(|| super::own_macro::library_key(&described));
-    if !key.is_some_and(|key| super::own_macro::restored(&key, made)) {
-        // A script that reaches a function ra-jit could not compile is not built
-        // ([`crate::refused_error`]).
-        build(&described, dir, made, super::daemon::store(), true)?;
-        if let Some(key) = key {
-            let inputs = crates.iter().filter_map(|it| it.inputs.as_ref());
-            super::own_macro::keep(&key, made, inputs.map(|(info, cwd)| (&**info, &**cwd)));
-        }
-    }
+    built(sysroot, &described, &crates, made, dir)?;
     let read = std::fs::read_to_string(&made.dep_info).map_err(|it| it.to_string())?;
     read_otherwise(&crate::dep_info::DepInfo::parse(&read), rustc_had)
+}
+
+/// What the store keeps ra-jit's builds of build scripts and proc macros under in place of a
+/// toolchain, and the first field of each: what a build is made of is in its key.
+const BUILDS: &str = "build script and proc macro builds 1";
+
+/// The file beside a build script ra-jit built that names what it was built from: the key
+/// of its build ([`keyed`]) and the digest of the executable, by a space. A run of the script
+/// is keyed by it (`script.rs`), not by the executable, whose bytes depend on what the store
+/// had when it was linked.
+pub(crate) const MADE_OF: &str = "made-of";
+
+/// The file beside `exe` that says what it was built from ([`MADE_OF`]).
+pub(crate) fn made_of_file(exe: &Path) -> PathBuf {
+    let mut name = exe.as_os_str().to_owned();
+    name.push(".");
+    name.push(MADE_OF);
+    PathBuf::from(name)
+}
+
+/// What the build ra-jit linked at `named` was made of, as [`MADE_OF`] says, when the file is
+/// there and `exe`, where the executable is now, is the one it was written for.
+pub(crate) fn made_of(named: &Path, exe: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(made_of_file(named)).ok()?;
+    let (key, digest) = text.trim_end().split_once(' ')?;
+    (super::keyed::digest(exe.to_str()?) == digest).then(|| key.to_owned())
+}
+
+fn store() -> Option<&'static ra_jit_store::Store> {
+    ra_jit_store::compiles_against(BUILDS);
+    ra_jit_store::Store::global_or(super::daemon::store().as_deref())
+}
+
+/// Builds the first of `crates`, `described` over the standard library of `sysroot`, as
+/// `made` says, describing it in `dir`; or writes what the store kept of a build of the same
+/// description and toolchain whose every input is as it was: the files of every crate's
+/// modules and what they include (`--inputs`), the libraries of the proc macros it expands
+/// with, and the files of the dep-info each crate names. With [`keyed::CHECK`] the build runs
+/// whatever the store has, and one that made something else than the store's is an error.
+fn built(
+    sysroot: &Path,
+    described: &str,
+    crates: &[Described],
+    made: &Made<'_>,
+    dir: &Path,
+) -> Result<(), String> {
+    let mut first = keyed::Key::new(BUILDS);
+    first.field(described.as_bytes()).field(keyed::toolchain(sysroot).as_bytes());
+    first.field(&[u8::from(made.proc_macro)]);
+    let first = first.done();
+    let store = store();
+    let found = store.and_then(|it| keyed::find(it, &first, &keyed::digest));
+    let checking = keyed::check();
+    if let Some((bytes, reads)) = &found
+        && !checking
+    {
+        let kept = Built::read(bytes).ok_or("the store's build of it is not one")?;
+        kept.write(made).map_err(|it| format!("writing what the store kept of it: {it}"))?;
+        write_made_of(made, &second_of(&first, reads))?;
+        if std::env::var_os("RA_JIT_STATS").is_some() {
+            eprintln!("blaze: a build the store kept: {}", made.exe.display());
+        }
+        return Ok(());
+    }
+    let inputs = dir.join("ra-jit-inputs");
+    // A script that reaches a function ra-jit could not compile is not built
+    // ([`crate::refused_error`]).
+    build(described, dir, made, super::daemon::store(), true, Some(&inputs))?;
+    let kept = Built::of(made).map_err(|it| format!("reading what ra-jit built: {it}"))?;
+    let mut reads: Vec<String> = std::fs::read_to_string(&inputs)
+        .map_err(|it| format!("reading {}: {it}", inputs.display()))?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    for krate in crates {
+        reads.extend(krate.proc_macro.as_ref().and_then(|it| it.to_str()).map(str::to_owned));
+        let Some((info, from)) = &krate.inputs else { continue };
+        let Ok(text) = std::fs::read_to_string(info) else { continue };
+        let named = crate::dep_info::DepInfo::parse(&text).files.into_iter();
+        reads.extend(named.filter_map(|it| from.join(it).to_str().map(str::to_owned)));
+    }
+    reads.sort();
+    reads.dedup();
+    // Two builds of the same inputs by ra-jit are not the same bytes (the order of functions
+    // in the executable is not), so what a check compares is what the build read: a build
+    // the store kept under fewer inputs than it reads would be found after another changed.
+    if let Some((_, kept_reads)) = &found
+        && *kept_reads != reads
+    {
+        let only = |these: &[String], those: &[String]| {
+            these.iter().filter(|it| !those.contains(it)).cloned().collect::<Vec<_>>().join(", ")
+        };
+        return Err(format!(
+            "{}=check: ra-jit's build of {} read what the store's build of the same inputs did \
+             not (read now: {}; read then: {})",
+            keyed::CHECK,
+            made.exe.display(),
+            only(&reads, kept_reads),
+            only(kept_reads, &reads),
+        ));
+    }
+    if found.is_some() && std::env::var_os("RA_JIT_STATS").is_some() {
+        eprintln!("blaze: a build the store kept read what this one did: {}", made.exe.display());
+    }
+    if let Some(store) = store {
+        store.settled();
+        keyed::keep(store, &first, &reads, &keyed::digest, &kept.bytes());
+        store.flush();
+    }
+    write_made_of(made, &second_of(&first, &reads))
+}
+
+/// What a build of key `first` that read `reads` is told by, for [`MADE_OF`]: the reads' paths
+/// and what each has now.
+fn second_of(first: &[u8; 32], reads: &[String]) -> String {
+    let mut key = keyed::Key::new("built of");
+    key.field(first);
+    for read in reads {
+        key.field(read.as_bytes()).field(keyed::digest(read).as_bytes());
+    }
+    key.done().iter().map(|it| format!("{it:02x}")).collect()
+}
+
+fn write_made_of(made: &Made<'_>, key: &str) -> Result<(), String> {
+    let exe = made.exe.to_str().ok_or("an executable whose name is not text")?;
+    let file = made_of_file(&made.exe);
+    std::fs::write(&file, format!("{key} {}\n", keyed::digest(exe)))
+        .map_err(|it| format!("writing {}: {it}", file.display()))
+}
+
+/// What a build leaves: the executable or library and its dep-info.
+struct Built {
+    exe: Vec<u8>,
+    dep_info: Vec<u8>,
+}
+
+impl Built {
+    fn of(made: &Made<'_>) -> std::io::Result<Built> {
+        Ok(Built { exe: std::fs::read(&made.exe)?, dep_info: std::fs::read(&made.dep_info)? })
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for field in [BUILDS.as_bytes(), &self.exe, &self.dep_info] {
+            out.extend((field.len() as u64).to_le_bytes());
+            out.extend(field);
+        }
+        out
+    }
+
+    fn read(bytes: &[u8]) -> Option<Built> {
+        let mut rest = bytes;
+        let mut take = || {
+            let len = usize::try_from(u64::from_le_bytes(rest.get(..8)?.try_into().ok()?)).ok()?;
+            let field = rest.get(8..8usize.checked_add(len)?)?;
+            rest = &rest[8 + len..];
+            Some(field)
+        };
+        if take()? != BUILDS.as_bytes() {
+            return None;
+        }
+        Some(Built { exe: take()?.to_vec(), dep_info: take()?.to_vec() })
+    }
+
+    /// Writes it where `made` says, each file whole or not at all.
+    fn write(&self, made: &Made<'_>) -> std::io::Result<()> {
+        let write = |path: &Path, bytes: &[u8], executable: bool| {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let new = path.with_extension(format!("{}.new", std::process::id()));
+            std::fs::write(&new, bytes)?;
+            if executable {
+                super::script::make_executable(&new)?;
+            }
+            std::fs::rename(&new, path)
+        };
+        write(&made.exe, &self.exe, true)?;
+        write(&made.dep_info, &self.dep_info, false)
+    }
 }
 
 /// The `rust-project.json` of `crates` over the standard library of `sysroot`.
@@ -251,6 +421,7 @@ fn build(
     made: &Made<'_>,
     store: Option<PathBuf>,
     shipped: bool,
+    inputs: Option<&Path>,
 ) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     let project = dir.join("rust-project.json");
@@ -258,6 +429,9 @@ fn build(
     let mut ra_jit = Command::new(std::env::current_exe().map_err(|it| it.to_string())?);
     ra_jit.arg(&project).args(["--crate", made.name]).arg("--out").arg(dir.join("built.o"));
     ra_jit.arg("--exe").arg(&made.exe).arg("--dep-info").arg(&made.dep_info);
+    if let Some(inputs) = inputs {
+        ra_jit.arg("--inputs").arg(inputs);
+    }
     if made.proc_macro {
         ra_jit.args(["--crate", "proc_macro", "--shared"]);
     }
@@ -282,7 +456,7 @@ fn build(
         ra_jit.env("RA_JIT_STD_FROM", "off");
     }
     ra_jit.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null());
-    let built = ra_jit.output().map_err(|it| format!("ra-jit did not run: {it}"))?;
+    let built = ra_jit.output().map_err(|it| format!("blaze did not run: {it}"))?;
     let said = String::from_utf8_lossy(&built.stderr).into_owned();
     std::fs::write(dir.join("ra-jit.log"), &said).map_err(|it| it.to_string())?;
     if !built.status.success() {
@@ -290,7 +464,7 @@ fn build(
         let error = said.rfind("\nError: ").map(|at| said[at + 1..].trim_end());
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
         let last = error.unwrap_or(last);
-        return Err(format!("ra-jit did not build it ({}): {last}", built.status));
+        return Err(format!("blaze did not build it ({}): {last}", built.status));
     }
     Ok(said)
 }
@@ -316,7 +490,7 @@ pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<
     let exe = dir.join("build-script-build");
     let made = Made { name: SCRIPT, proc_macro: false, dep_info: exe.with_extension("d"), exe };
     let described = description(sysroot, &[script]);
-    build(&described, dir, &made, Some(store.to_owned()), false)
+    build(&described, dir, &made, Some(store.to_owned()), false, None)
 }
 
 /// Why rustc is to compile the script when it read a variable as another than rustc would,
@@ -327,7 +501,7 @@ fn read_otherwise(
     rustc_has: impl Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
     match info.env.iter().find(|(name, value)| rustc_has(name) != *value) {
-        Some((name, _)) => Err(format!("it reads `{name}`, which ra-jit's build is not given")),
+        Some((name, _)) => Err(format!("it reads `{name}`, which blaze's build is not given")),
         None => Ok(()),
     }
 }
@@ -354,12 +528,12 @@ fn add(
     let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
     let proc_macro = name.strip_prefix(prefix).and_then(|it| it.strip_suffix(suffix));
     let Some(stem) = library.or(proc_macro) else {
-        return Err(format!("it links {name}, which is not a library ra-jit knows"));
+        return Err(format!("it links {name}, which is not a library blaze knows"));
     };
     let parent = path.parent().ok_or("a library without a directory")?;
     let unit = &super::layout::unit_of_file(stem, parent);
     let (record, _) = Record::described_or_seeded(parent, unit).ok_or_else(|| {
-        format!("`{unit}`, which it links, was compiled before ra-jit described it")
+        format!("`{unit}`, which it links, was compiled before blaze described it")
     })?;
     let asked = Asked { args: &record.args, cwd: &record.cwd };
     let at = crates.len();

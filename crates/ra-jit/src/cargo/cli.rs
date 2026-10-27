@@ -477,12 +477,12 @@ fn unsupported_target(triple: &str) -> Option<String> {
         Ok(target)
             if matches!(
                 target.object_format,
-                ObjectFormat::Elf | ObjectFormat::MachO | ObjectFormat::Coff
+                ObjectFormat::Elf | ObjectFormat::MachO | ObjectFormat::Coff | ObjectFormat::Wasm
             ) =>
         {
             None
         }
-        Ok(_) => Some(format!("programs for {triple} are not linked through `cargo ra-jit` yet")),
+        Ok(_) => Some(format!("programs for {triple} are not linked through `cargo blaze` yet")),
         Err(why) => Some(why),
     }
 }

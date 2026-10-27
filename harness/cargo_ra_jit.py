@@ -169,7 +169,7 @@ SMALL = ["ripgrep", "fd", "hyperfine"]
 MODES = {"ra-jit": "`cargo ra-jit`", "plain": "plain cargo after `ra-jit enable`"}
 
 # What cargo and `cargo ra-jit` print about the build, which is not the program's output.
-STATUS = re.compile(r"^\s*((Compiling|Checking|Finished|Running|Downloading|Downloaded|Blocking|Waiting|Locking|Updating|Adding|Fresh|Dirty|Doc-tests)\b|ra-jit:|warning:)")
+STATUS = re.compile(r"^\s*((Compiling|Checking|Finished|Running|Downloading|Downloaded|Blocking|Waiting|Locking|Updating|Adding|Fresh|Dirty|Doc-tests)\b|blaze:|warning:)")
 
 
 def base_env(home):
@@ -303,18 +303,18 @@ def by_rustc(stderr):
     `cargo ra-jit build`, `run` and `test` say `Compiling` of each package themselves (the
     whole build, docs/no-rustc.md step K), so that line is no sign of cargo; cargo's own
     `Finished` line names its profile's settings, where ra-jit's says `[ra-jit]`."""
-    return bool(re.search(r"; (building with cargo|this build is cargo's)(, which .*)?$|^\s*Finished `\w+` profile \[(?!ra-jit)", stderr, re.M))
+    return bool(re.search(r"; (building with cargo|this build is cargo's)(, which .*)?$|^\s*Finished `\w+` profile \[(?!blaze|ra-jit)", stderr, re.M))
 
 
 def how_built(stderr):
     """Whether the daemon built it, or why cargo did."""
-    reason = re.search(r"^ra-jit: (?:bug: )?(.*?); (building with cargo|this build is cargo's|this is `cargo \w+`)(?:, which .*)?$", stderr, re.M)
+    reason = re.search(r"^blaze: (?:bug: )?(.*?); (building with cargo|this build is cargo's|this is `cargo \w+`)(?:, which .*)?$", stderr, re.M)
     if reason:
         return "cargo: " + reason[1]
-    kept = re.search(r"^ra-jit: (.*); nothing has changed since cargo built$", stderr, re.M)
+    kept = re.search(r"^blaze: (.*); nothing has changed since cargo built$", stderr, re.M)
     if kept:
         return "unchanged: " + kept[1]
-    return "daemon" if "[ra-jit]" in stderr else "cargo"
+    return "daemon" if "[blaze]" in stderr else "cargo"
 
 
 def program_output(ran):
@@ -584,7 +584,7 @@ FLAG_WORKSPACE = {
     "app/src/main.rs": '#![allow(unexpected_cfgs)]\n\nfn main() {\n    let name = std::env::args().nth(1).unwrap_or("world".to_string());\n    println!("{}", util::greeting(&name));\n    println!("{} {} {}", cfg!(debug_assertions), cfg!(extra), cfg!(target_feature = "avx2"));\n    let sum = std::panic::catch_unwind(|| name.len() as u8 + 251);\n    println!("{:?}", sum.ok());\n    if name == "fail" {\n        std::process::exit(3);\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn in_the_program() {\n        assert_eq!(util::greeting("x").len(), 7);\n    }\n}\n',
     "app/src/bin/other.rs": 'fn main() {\n    println!("other: {}", util::greeting("other"));\n}\n',
     "app/examples/demo.rs": 'fn main() {\n    println!("demo: {} {}", util::greeting("demo"), shout::shout("demo"));\n}\n',
-    "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo inside writes the programs again, and on macOS it removes each and copies it back: a\n// test starting one meanwhile finds none.\nstatic BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());\n\n// A cargo run by a test has the units of the build: the program stays the file it was.\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    use std::os::unix::fs::MetadataExt;\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let program = env!("CARGO_BIN_EXE_app");\n    let before = std::fs::metadata(program).unwrap().ino();\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    assert_eq!(before, std::fs::metadata(program).unwrap().ino());\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
+    "app/tests/it.rs": '#[test]\nfn greets_it() {\n    assert_eq!(util::greeting("it").to_lowercase(), "hello it");\n}\n\n#[test]\nfn fails_when_asked() {\n    assert!(std::env::var("FLAGS_FAIL").is_err());\n}\n\n// A cargo inside writes the programs again, and on macOS it removes each and copies it back: a\n// test starting one meanwhile finds none.\nstatic BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());\n\n// A cargo run by a test builds, and leaves a program that runs: after a build by cargo it has\n// nothing to do, after a whole build, which leaves cargo no units, it builds the program again in\n// its place (as the check of the daemon of a program that runs cargo has it).\n#[test]\nfn a_cargo_inside_leaves_the_program() {\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());\n    let built = std::process::Command::new(cargo).args(["build", "-q", "-p", "app"]).status().unwrap();\n    assert!(built.success());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_app")).arg("it").output().unwrap();\n    assert!(String::from_utf8_lossy(&ran.stdout).starts_with("hello it"));\n}\n\n// What cargo tells a test of the places of the build is what the daemon tells it.\n#[test]\nfn the_places_of_the_build_are_cargos() {\n    assert!(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).is_dir());\n    let _building = BUILDING.lock().unwrap_or_else(|it| it.into_inner());\n    let ran = std::process::Command::new(env!("CARGO_BIN_EXE_other")).output().unwrap();\n    assert_eq!(String::from_utf8_lossy(&ran.stdout).lines().count(), 1);\n}\n',
 }
 
 # What the edit round adds to the program: library code that rustc's build before the edit has
@@ -671,7 +671,7 @@ def flags(work):
             read = test_results if command == "test" else program_output
             differs = difference(read(mine), read(other))
             if "--doc" in args:
-                left = re.search(r"ra-jit: the doctests are left to rustdoc: (.*)", mine.stderr)
+                left = re.search(r"blaze: the doctests are left to rustdoc: (.*)", mine.stderr)
                 # A panic message has the id of the thread, and where the terse progress
                 # (` 1/2`) and blank lines fall depends on which test finished first.
                 text = lambda ran: re.sub(r"finished in [0-9.]+s", "", re.sub(r"' \(\d+\) panicked", "' panicked", ran.stdout))
@@ -853,7 +853,7 @@ def daemon(work):
     open(main, "w").write(kept)
     # `cargo ra-jit check` is what the daemon's build says, with no rustc.
     _, checked = here.cargo("check")
-    check("`cargo ra-jit check` of a loaded build is the daemon's, and no rustc", checked.returncode == 0 and not by_rustc(checked.stderr) and "[ra-jit]" in checked.stderr, f"exit {checked.returncode}, {checked.stderr.strip()[-300:]}")
+    check("`cargo ra-jit check` of a loaded build is the daemon's, and no rustc", checked.returncode == 0 and not by_rustc(checked.stderr) and "[blaze]" in checked.stderr, f"exit {checked.returncode}, {checked.stderr.strip()[-300:]}")
     open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
     _, failed = here.cargo("check")
     said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', failed.stderr, re.M)
@@ -863,7 +863,7 @@ def daemon(work):
     cargo_checked = lambda stderr: by_rustc(stderr) or bool(re.search(r"^\s*Checking |this is `cargo check`", stderr, re.M))
     here.cargo("stop")
     _, unloaded = here.cargo("check")
-    check("`cargo ra-jit check` with no build loaded is the daemon's, and no rustc", unloaded.returncode == 0 and not cargo_checked(unloaded.stderr) and "[ra-jit]" in unloaded.stderr, f"exit {unloaded.returncode}, {unloaded.stderr.strip()[-300:]}")
+    check("`cargo ra-jit check` with no build loaded is the daemon's, and no rustc", unloaded.returncode == 0 and not cargo_checked(unloaded.stderr) and "[blaze]" in unloaded.stderr, f"exit {unloaded.returncode}, {unloaded.stderr.strip()[-300:]}")
     open(main, "a").write("\nfn broken() -> u32 { \"text\" }\n")
     _, failed = here.cargo("check")
     said = re.search(r'^error\[E0308\]: .*\n +--> app/src/main\.rs:\d+:22\n', failed.stderr, re.M)
@@ -884,12 +884,13 @@ def daemon(work):
     open(main, "w").write(kept)
     os.remove(added)
     _, other = here.cargo("check", "--release")
-    check("`cargo ra-jit check` of flags no build had is the daemon's, and no rustc", other.returncode == 0 and not cargo_checked(other.stderr) and "`release` profile [ra-jit]" in other.stderr, f"exit {other.returncode}, {other.stderr.strip()[-300:]}")
+    check("`cargo ra-jit check` of flags no build had is the daemon's, and no rustc", other.returncode == 0 and not cargo_checked(other.stderr) and "`release` profile [blaze]" in other.stderr, f"exit {other.returncode}, {other.stderr.strip()[-300:]}")
     here.cargo("stop")
     manners(work, ws, env, here, check, edit)
     abuse(work, ws, tree, env, check, status, alive)
     in_place(work, check)
     through_link(work, check)
+    script_links_proc_macro(work, check)
     pinned(work, check)
     own_toolchain(work, check)
     return checks
@@ -1058,6 +1059,36 @@ def through_link(work, check):
     check("an edit of a workspace named through a link, with a path dependency outside it, is the daemon's and right",
           mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
     ours.cargo("stop", *manifest)
+
+
+# A build script whose build dependency is a library that links the compiler's `proc_macro`,
+# as proc-macro2 is in bat's: the script links `proc_macro` too, whose functions then say no
+# macro is running.
+SCRIPT_PROC_MACRO = {
+    "Cargo.toml": '[workspace]\nmembers = ["app", "tokens"]\nresolver = "2"\n',
+    "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[build-dependencies]\ntokens = { path = "../tokens" }\n',
+    "app/build.rs": 'fn main() {\n    println!("cargo:rustc-env=TOKENS={}", tokens::described());\n}\n',
+    "app/src/main.rs": 'fn main() {\n    println!("{}", env!("TOKENS"));\n}\n',
+    "tokens/Cargo.toml": '[package]\nname = "tokens"\nversion = "0.1.0"\nedition = "2021"\n',
+    "tokens/src/lib.rs": 'extern crate proc_macro;\n\npub fn described() -> String {\n    format!("proc_macro available: {}", proc_macro::is_available())\n}\n',
+}
+
+
+def script_links_proc_macro(work, check):
+    """A build script that links `proc_macro` through a library ([`SCRIPT_PROC_MACRO`]) is
+    built by ra-jit, and the program runs as cargo's."""
+    ws = os.path.realpath(os.path.join(work, "script-proc-macro"))
+    for file, text in SCRIPT_PROC_MACRO.items():
+        os.makedirs(os.path.dirname(os.path.join(ws, file)), exist_ok=True)
+        open(os.path.join(ws, file), "w").write(text)
+    env = base_env(os.path.join(work, "home-script-proc-macro"))
+    ours, theirs = Side(ws, env, True), Side(ws, env, False)
+    (_, mine), (_, other) = ours.cargo("run"), theirs.cargo("run")
+    wrong = difference(program_output(mine), program_output(other))
+    how = how_built(mine.stderr)
+    check("a build script whose build dependency links `proc_macro` is the daemon's, and the program is right",
+          mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
+    ours.cargo("stop")
 
 
 def in_place(work, check):
@@ -1248,7 +1279,7 @@ def abuse(work, ws, tree, env, check, status, alive):
             rewrite(os.path.join(root, "util/src/lib.rs"), f'format!("{greeting(n, r - 1)} {{name}}")', f'format!("{greeting(n, r)} {{name}}")')
         clients = [(n, spawn(root, "run", f"c{i}")) for i in range(4) for n, root in enumerate(trees)]
         ended = [(n, i // 4, *finished(client, 300)) for i, (n, client) in enumerate(clients)]
-        cargos = lambda err: re.search(r"^\s*Finished `\w+` profile \[(?!ra-jit)", err, re.M)
+        cargos = lambda err: re.search(r"^\s*Finished `\w+` profile \[(?!blaze|ra-jit)", err, re.M)
         served += sum(how_built(err) == "daemon" and not cargos(err) for _, _, (_, err), _ in ended)
         wrong += [f"; round {r} tree{n} c{i}: exit {code}, {out[-80:]!r} {err[-200 if code is not None else -2000:]!r}" for n, i, (out, err), code in ended if code != 0 or not greets(out, f"{greeting(n, r)} c{i}")]
     check(f"16 clients at once on 4 worktrees each run their own tree's program, {rounds} times over", not wrong and served == 16 * rounds and status()[0] == pid and status()[1] == workers, f"{16 * rounds - len(wrong)} of {16 * rounds} right, {served} by the daemon alone, {len(workers)} worker" + "".join(wrong))
@@ -1289,7 +1320,7 @@ def abuse(work, ws, tree, env, check, status, alive):
     older = Side(ws, dict(env, PATH=other + os.pathsep + env["PATH"]), True)
     pid = status()[0]
     seen = next((line for line in older.cargo("status")[1].stdout.splitlines() if line.startswith("daemon:")), "")
-    check("status by another build says the daemon is another build, and leaves it", "another build of ra-jit" in seen and status()[0] == pid, seen)
+    check("status by another build says the daemon is another build, and leaves it", "another build of blaze" in seen and status()[0] == pid, seen)
     # With no cargo to build in its place (docs/no-rustc.md), the build replaces the daemon
     # and is the new one's.
     edit("skew")
@@ -1406,7 +1437,7 @@ def switches(work, env, check):
         off = ra_jit(home, "disable")
         same = (open(config).read() if os.path.exists(config) else None) == text
         left = sorted(os.listdir(home)) == ([file] if text is not None else [])
-        check(f"enable and disable over {name} leave it as it was", on.returncode == 0 and named and again.returncode == 0 and "through ra-jit" in seen and off.returncode == 0 and same and left, f"{seen[:70]}; {'same bytes' if same else 'DIFFERENT'}")
+        check(f"enable and disable over {name} leave it as it was", on.returncode == 0 and named and again.returncode == 0 and "through blaze" in seen and off.returncode == 0 and same and left, f"{seen[:70]}; {'same bytes' if same else 'DIFFERENT'}")
 
     home = os.path.join(work, "switch-edited")
     os.makedirs(home)
@@ -1644,7 +1675,7 @@ def plain(work):
     later = calls("outer")[n:]
     ours = [c for c in later if c.endswith("\toff")]
     by_ra_jit = [c[:200] for c in ours if "ra-jit-rustc" in c]
-    check("and plain cargo is cargo alone again, through the user's wrappers", mine.returncode == 0 and not wrong and not re.search(r"^ra-jit:|\[ra-jit\]", mine.stderr, re.M) and not by_ra_jit and ours, f"exit {mine.returncode}, {wrong or 'same as cargo'}, {len(ours)} calls of the wrapper by this build ({len(later) - len(ours)} by others in the background), by ra-jit's {by_ra_jit[:2]}; {mine.stderr.strip()[-300:]}")
+    check("and plain cargo is cargo alone again, through the user's wrappers", mine.returncode == 0 and not wrong and not re.search(r"^blaze:|\[blaze\]", mine.stderr, re.M) and not by_ra_jit and ours, f"exit {mine.returncode}, {wrong or 'same as cargo'}, {len(ours)} calls of the wrapper by this build ({len(later) - len(ours)} by others in the background), by ra-jit's {by_ra_jit[:2]}; {mine.stderr.strip()[-300:]}")
     subprocess.run([RA_JIT, "stop"], env=env, capture_output=True)
     subprocess.run([os.path.join(other, "ra-jit"), "stop"], env=env, capture_output=True)
     return checks
@@ -1652,7 +1683,7 @@ def plain(work):
 
 # What a build said when it handed itself, or a program of it, to cargo or rustc, or warned that
 # the project's toolchain was not ra-jit's (the 10-20 nightly's lines, by either name).
-FELL_BACK = re.compile(r"^(ra-jit|blaze): .*|; building with cargo|another build of ra-jit|this (ra-jit|blaze) compiles for|^warning: ", re.M)
+FELL_BACK = re.compile(r"^(ra-jit|blaze): .*|; building with cargo|another build of (ra-jit|blaze)|this (ra-jit|blaze) compiles for|^warning: ", re.M)
 
 
 def blazes(stderr):

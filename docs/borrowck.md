@@ -180,6 +180,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   and `&Signals::EMPTY` though `Signals` holds an `Arc`. In a `static`'s value a static that is
   neither `extern` nor thread-local may be borrowed in a promoted constant
   (`static M: Meta = Meta::new(&[(&OPT, true)])`, nushell's `#[exp(..)]` tests).
+  A mutable borrow is promoted only of an empty array, the one an index or method call makes
+  of its receiver too (`&mut [][..]`, `[].iter_mut()`), as rustc's `validate_ref`.
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
   call and a block of items and a tail included: tracing's `fieldset!` names a field
@@ -218,7 +220,13 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   whose type is a subtype of what it matches, as rustc ascribes it, so it matches a
   `&'static u32` only if `'a: 'static`), casts (the type written, its `_`s holes: `ptr as _`
   relates no lifetime, though inference makes it `'static` from where the value goes), turbofishes (a method's own, `x.f::<&'a T>()`, too) and struct
-  literal and variant paths, in closures too; `Self { .. }` and `Self(..)` in an impl have the
+  literal and variant paths, in closures too. A `_` inside an associated type in any of these
+  annotations (a `let`'s, a turbofish's, a closure's parameter or return) is what equating the
+  annotation with the inferred type makes it, as rustc solves its user type annotation, so
+  the impl the associated type selects has its where clauses proven, and the value has the
+  annotation normalized: `let _: <(_,) as Tr>::Ty = a` with `impl<T: 'static> Tr for (T,)`
+  needs `A: 'static`, and `Some::<<(u8, _) as Tr>::Ty>(&temp())` needs the borrow to be
+  `'static` (E0716). `Self { .. }` and `Self(..)` in an impl have the
   impl's self type, with its anonymous lifetimes (`impl Foo<'_>`) as the impl's own. A function item called through a variable
   (`let f = foo::<&'static u32>; f(&x)`, or through a reference, `let f = &foo::<..>`) has the
   variable's type, and the variable is used where it is called (a captured constructor too).
@@ -387,7 +395,18 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   Trait>` and `impl<X: 'static> Trait for (X,)` needs `X: 'static`. A type that outlives a
   region only if a lifetime in it does is E0477 ("does not fulfill the required lifetime"):
   `foo: Foo<(&str,)>` there. As rustc, an item that also needs a lifetime to outlive one
-  it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
+  it does not (E0491) gets only that error, which ra-jit does not report yet. A function's
+  signature, with its impl's header, is normalized as rustc's `WfCheckingCtxt` normalizes it,
+  in an inference context of its own, once for what it implies and once for its
+  well-formedness, so a lifetime normalizing makes is a region variable of its own in each:
+  `&'a mut self` of an impl for `QueryTable<'me, Q, <Q as QueryBase>::Db>` with `Q: for<'f>
+  AsyncQueryFunction<'f>` (whose supertrait is `QueryBase<Db = <Self as
+  AsyncQueryFunction<'f>>::SendDb>`) implies `<Q as AsyncQueryFunction<'?1>>::SendDb: 'a`
+  and needs `<Q as AsyncQueryFunction<'?2>>::SendDb: 'a`, which does not hold (E0309). An
+  associated type with such a variable in it outlives a region as rustc's
+  `alias_ty_must_outlive` says: with no bound from the where clauses or its trait, even
+  one of other lifetimes, when its arguments do, a variable being made to; with one, only
+  by a bound of the same type or by its arguments, a variable outliving nothing. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
   a `T` is E0310 at the `impl Trait`; and well-formed where the body defines it, as rustc's
@@ -480,10 +499,11 @@ then one each of five more. The causes, grouped:
 
 - **Higher-ranked regions and placeholders**: auto traits of a coroutine's witness (`T: Send`
   of an `async` block holding a `for<'a>` future) are not proven with placeholders.
-- **Well-formedness of items** (most of what is left of E0309 and E0310): items whose
-  signature or impl header has an associated type (what normalizing it implies) are not
-  checked yet (`fn as_ref2<'a>(&'a self) -> Self::Output<'a>` normalized to `FooRef<'a, U>`
-  needs `U: 'a`), nor a `for<'a>` bound's projection under its binder (a supertrait
+- **Well-formedness of items** (most of what is left of E0309 and E0310): an impl whose
+  header has an associated type is not checked itself (its functions are), what normalizing
+  a signature needs of what outlives what is not (`fn as_ref2<'a>(&'a self) ->
+  Self::Output<'a>` through an impl whose where clause `T: AsRef2<Output<'b> = ..>` asks the
+  GAT's `Self: 'b` needs `T: 'b`), nor a `for<'a>` bound's projection under its binder (a supertrait
   `for<'a> GatTrait<Gat<'a> = T>` needs the GAT's `Self: 'a` for every `'a`, E0311).
 - **Member constraints of `impl Trait`**: the choice rustc makes is not applied, and a
   projection bound that names a lifetime (`impl Iterator<Item = Box<dyn Foo>>`) leaves them

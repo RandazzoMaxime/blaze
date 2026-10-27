@@ -125,7 +125,7 @@ fn program_unit(sysroot: &Path, dir: &Path, store: &Path, profile: &str) -> anyh
     std::fs::write(dir.join(format!("ra-jit-{profile}.log")), &said)?;
     if !built.status.success() {
         let last = said.lines().rev().find(|it| !it.trim().is_empty()).unwrap_or("");
-        anyhow::bail!("ra-jit did not build a `{profile}` program ({}): {last}", built.status);
+        anyhow::bail!("blaze did not build a `{profile}` program ({}): {last}", built.status);
     }
     Ok(said)
 }

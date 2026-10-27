@@ -122,6 +122,9 @@ zstd = "0.13.3"
 # The `.tar.xz` files of blaze's own toolchain (`cargo/toolchain/own.rs`): in Rust, within 1.3x
 # of liblzma's time on rustc's 84 MB.
 lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "xz", "optimization"] }
+# The keys and signatures of nixpkgs' binary cache (`cargo/closure/narinfo.rs`); already in the
+# graph, by hyper-util.
+base64 = "0.23"
 ra-jit-live = { path = "../ra-jit-live" }
 
 [target.'cfg(unix)'.dependencies]
