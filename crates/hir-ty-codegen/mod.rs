@@ -4293,6 +4293,12 @@ pub fn exported_symbol(db: &dyn HirDatabase, func: FunctionId) -> Option<String>
         .then(|| FunctionSignature::of(db, func).name.as_str().to_owned())
 }
 
+/// Whether a function is `#[rustc_comptime]`: one the const evaluator alone runs, such as
+/// `TypeId::size` over the reflection intrinsics, of which rustc compiles no code.
+pub fn compile_time_only(db: &dyn HirDatabase, func: FunctionId) -> bool {
+    AttrFlags::has_word(db, func.into(), "rustc_comptime")
+}
+
 /// The symbol a static of the program, not of an `extern` block, is exported under when an
 /// attribute names it: code of another language finds it by that name, whatever its
 /// visibility and whether or not Rust code uses it.
@@ -11984,17 +11990,10 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     let overridden = AttrFlags::query(db, func.into())
                         .contains(AttrFlags::RUSTC_INTRINSIC_MUST_BE_OVERRIDDEN);
                     let signature = FunctionSignature::of(db, func);
-                    // These have a body that only stands in for the const evaluator.
-                    let compile_time = matches!(
-                        signature.name.as_str(),
-                        "const_allocate"
-                            | "const_deallocate"
-                            | "const_make_global"
-                            | "size_of_type_id"
-                            | "type_id_vtable"
-                            | "type_of"
-                    );
-                    if overridden || compile_time || !signature.has_body() {
+                    // One only the const evaluator answers has nothing to run. The body of any
+                    // other is what rustc runs too: `const_allocate` gives a null pointer,
+                    // `const_deallocate` does nothing.
+                    if overridden || compile_time_only(db, func) || !signature.has_body() {
                         unsupported!("intrinsic `{}`", signature.name.as_str());
                     }
                 }

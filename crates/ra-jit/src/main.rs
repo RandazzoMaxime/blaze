@@ -4739,6 +4739,8 @@ fn build(
     if table.is_empty() {
         functions.retain(|&(func, _)| !resolver.is_generic(func));
     }
+    // A function only the const evaluator runs has no code, in rustc's build or ours.
+    functions.retain(|&(func, _)| !hir_ty_codegen::compile_time_only(db, func));
     let list = start.elapsed();
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.
