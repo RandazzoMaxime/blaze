@@ -1221,6 +1221,142 @@ pub mod simd_lanes {
     }
 }
 
+/// Fused multiply-adds of `f32`s and `f64`s with each operand a number, a quiet NaN or a
+/// signalling NaN, every NaN with a payload of its own and the second operand's negative. The
+/// NaN that comes out is the one the instruction picks from its operands in their order, so
+/// it shows which operand each form puts where: scalar `mul_add` and `intrinsics::fma`,
+/// `simd_fma` and `simd_relaxed_fma` of vectors of one register and of two, and the NEON
+/// `vfma*` and `vfms*` forms on whole vectors, broadcast scalars and lanes.
+#[cfg(feature = "nightly")]
+pub mod fma_nans {
+    use core::intrinsics::simd::{simd_fma, simd_relaxed_fma};
+    use std::simd::{Simd, StdFloat};
+
+    const SINGLES: [[u32; 3]; 3] = [
+        [0x3fc0_0000, 0x7fc0_0001, 0x7f80_0011],
+        [0xc020_0000, 0xffc0_0002, 0xff80_0022],
+        [0x4080_0000, 0x7fc0_0003, 0x7f80_0033],
+    ];
+    const DOUBLES: [[u64; 3]; 3] = [
+        [0x3ff8_0000_0000_0000, 0x7ff8_0000_0000_0001, 0x7ff0_0000_0000_0011],
+        [0xc004_0000_0000_0000, 0xfff8_0000_0000_0002, 0xfff0_0000_0000_0022],
+        [0x4010_0000_0000_0000, 0x7ff8_0000_0000_0003, 0x7ff0_0000_0000_0033],
+    ];
+
+    pub fn scalars(a: f32, b: f32, c: f32, x: f64, y: f64, z: f64) -> [u64; 4] {
+        [
+            a.mul_add(b, c).to_bits() as u64,
+            core::intrinsics::fma(a, b, c).to_bits() as u64,
+            x.mul_add(y, z).to_bits(),
+            core::intrinsics::fma(x, y, z).to_bits(),
+        ]
+    }
+
+    pub fn vectors(a: f32, b: f32, c: f32, x: f64, y: f64, z: f64) -> Vec<u64> {
+        let [a, b, c] = [a, b, c].map(Simd::<f32, 4>::splat);
+        let [wide_a, wide_b, wide_c] = [a, b, c].map(|it| Simd::<f32, 8>::splat(it[0]));
+        let [x, y, z] = [x, y, z].map(Simd::<f64, 2>::splat);
+        let [wide_x, wide_y, wide_z] = [x, y, z].map(|it| Simd::<f64, 4>::splat(it[0]));
+        unsafe {
+            let mut out: Vec<u64> = Vec::new();
+            for v in [simd_fma(a, b, c), simd_relaxed_fma(a, b, c), a.mul_add(b, c)] {
+                out.extend(v.to_array().map(|it| it.to_bits() as u64));
+            }
+            for v in [simd_fma(wide_a, wide_b, wide_c), simd_relaxed_fma(wide_a, wide_b, wide_c)] {
+                out.extend(v.to_array().map(|it| it.to_bits() as u64));
+            }
+            for v in [simd_fma(x, y, z), simd_relaxed_fma(x, y, z), x.mul_add(y, z)] {
+                out.extend(v.to_array().map(f64::to_bits));
+            }
+            for v in [simd_fma(wide_x, wide_y, wide_z), simd_relaxed_fma(wide_x, wide_y, wide_z)] {
+                out.extend(v.to_array().map(f64::to_bits));
+            }
+            out
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn neon(a: f32, b: f32, c: f32, x: f64, y: f64, z: f64) -> Vec<u64> {
+        use core::arch::aarch64::*;
+        use core::mem::transmute;
+        unsafe {
+            let [qa, qb, qc] = [a, b, c].map(|it| vsetq_lane_f32::<3>(it, vdupq_n_f32(1.0)));
+            let [da, db, dc] = [a, b, c].map(|it| vset_lane_f32::<1>(it, vdup_n_f32(1.0)));
+            let [qx, qy, qz] = [x, y, z].map(|it| vsetq_lane_f64::<1>(it, vdupq_n_f64(1.0)));
+            let [dx, dy, dz] = [x, y, z].map(vdup_n_f64);
+            let mut out: Vec<u64> = Vec::new();
+            for v in [
+                vfmaq_f32(qa, qb, qc),
+                vfmsq_f32(qa, qb, qc),
+                vfmaq_n_f32(qa, qb, c),
+                vfmsq_n_f32(qa, qb, c),
+                vfmaq_laneq_f32::<3>(qa, qb, qc),
+                vfmsq_laneq_f32::<3>(qa, qb, qc),
+                vfmaq_lane_f32::<1>(qa, qb, dc),
+            ] {
+                out.extend(transmute::<_, [u32; 4]>(v).map(u64::from));
+            }
+            for v in [
+                vfma_f32(da, db, dc),
+                vfms_f32(da, db, dc),
+                vfma_n_f32(da, db, c),
+                vfma_lane_f32::<1>(da, db, dc),
+                vfms_laneq_f32::<3>(da, db, qc),
+            ] {
+                out.extend(transmute::<_, [u32; 2]>(v).map(u64::from));
+            }
+            for v in [
+                vfmas_lane_f32::<1>(a, b, dc),
+                vfmas_laneq_f32::<3>(a, b, qc),
+                vfmss_lane_f32::<1>(a, b, dc),
+            ] {
+                out.push(v.to_bits() as u64);
+            }
+            for v in [
+                vfmaq_f64(qx, qy, qz),
+                vfmsq_f64(qx, qy, qz),
+                vfmaq_n_f64(qx, qy, z),
+                vfmaq_laneq_f64::<1>(qx, qy, qz),
+                vfmsq_laneq_f64::<1>(qx, qy, qz),
+                vfmaq_lane_f64::<0>(qx, qy, dz),
+            ] {
+                out.extend(transmute::<_, [u64; 2]>(v));
+            }
+            for v in [vfma_f64(dx, dy, dz), vfms_f64(dx, dy, dz), vfma_n_f64(dx, dy, z)] {
+                out.push(transmute::<_, u64>(v));
+            }
+            for v in [
+                vfmad_lane_f64::<0>(x, y, dz),
+                vfmad_laneq_f64::<1>(x, y, qz),
+                vfmsd_lane_f64::<0>(x, y, dz),
+            ] {
+                out.push(v.to_bits());
+            }
+            out
+        }
+    }
+
+    /// Every choice of number, quiet NaN or signalling NaN for each of the three operands.
+    pub fn run() -> String {
+        let mut out = String::new();
+        for i in 0..27 {
+            let pick = [i % 3, i / 3 % 3, i / 9];
+            let [a, b, c] = [0, 1, 2].map(|k| f32::from_bits(SINGLES[k][pick[k]]));
+            let [x, y, z] = [0, 1, 2].map(|k| f64::from_bits(DOUBLES[k][pick[k]]));
+            let mut results = scalars(a, b, c, x, y, z).to_vec();
+            results.extend(vectors(a, b, c, x, y, z));
+            #[cfg(target_arch = "aarch64")]
+            results.extend(neon(a, b, c, x, y, z));
+            out += &format!("{pick:?}");
+            for it in results {
+                out += &format!(" {it:x}");
+            }
+            out += ";";
+        }
+        out
+    }
+}
+
 /// `f16` and `f128`, which AArch64 has no arithmetic for without its half-precision extension:
 /// an `f16` is worked on as an `f32` and rounded back, an `f128` by compiler-builtins and C's
 /// `long double` functions. The values are at the edges of each format: signed zeros, the
