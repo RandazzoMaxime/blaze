@@ -328,10 +328,11 @@ one place a script is run. A script is given, of what cargo gave it, what cargo 
 scripts (`CARGO_*`, `DEP_*`, `OUT_DIR`, `TARGET`, `PROFILE`, ...), the C compiler's and
 pkg-config's variables (`CC`, `CFLAGS_<target>`, `PKG_CONFIG_PATH`, `NIX_CFLAGS_COMPILE`,
 `CPATH`, `SOURCE_DATE_EPOCH`, ...), `PATH`, `HOME`, `LANG` and the rest tests are given, and
-what the root manifest's `build-script-env` names; what else the shell had is not there. A
-script that says it reads one it was not given (`cargo:rerun-if-env-changed=OPENSSL_DIR`)
-while it is set where cargo ran fails, naming it and `build-script-env`, rather than build as
-if it were unset. The machine is read-only; it writes
+what the root manifest's `build-script-env` names, and what it says it reads
+(`cargo:rerun-if-env-changed=OPENSSL_DIR`) as cargo has it; what else the shell had is not
+there. A run that said it reads a variable it was not given saw it unset, so the script runs
+again given it, and the store keeps that run under the variable's value. The machine is
+read-only; it writes
 its `OUT_DIR` for real, which is the one directory the Cargo book lets a script write ("Scripts
 should not modify any files outside of that directory"); the temporary directories start empty;
 there is no network but the sandbox's own loopback. Its package's directory, the workspace and
