@@ -543,9 +543,19 @@ impl LinkLine {
             let closing = arg.len() - arg.trim_end_matches('\\').len();
             format!("\"{arg}{}\"", "\\".repeat(closing))
         };
+        // lld takes its flavour from the command line, which a response file does not give it.
+        let flavor: String = match self.args.iter().position(|it| it == "-flavor") {
+            Some(at) => self.args.drain(at..at + 2).map(|it| format!("\"{it}\" ")).collect(),
+            None => String::new(),
+        };
         let quoted: Vec<String> = self.args.iter().map(quoted).collect();
         std::fs::write(response, quoted.join("\n"))?;
-        Ok(format!("\"{}\" \"@{}\"", self.linker, response.display()))
+        // rustc runs the `rust-lld` a target names from its toolchain, not from the PATH.
+        let linker = match self.linker.as_str() {
+            "rust-lld" => super::toolchain::rust_lld(),
+            _ => PathBuf::from(&self.linker),
+        };
+        Ok(format!("\"{}\" {flavor}\"@{}\"", linker.display(), response.display()))
     }
 }
 
@@ -946,6 +956,27 @@ mod tests {
                 r#""/PDBALTPATH:P:/bin.pdb""#,
                 r#""/STACK:8388608""#,
             ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The repository's cargo configuration links MSVC programs with `rust-lld`, which only the
+    /// toolchain has; the daemon runs it by its path.
+    #[cfg(windows)]
+    #[test]
+    fn rust_lld_is_run_from_the_toolchain() {
+        const LINE: &str = r#""rust-lld" "-flavor" "link" "/NOLOGO" "C:\\t\\rustc1\\symbols.o" "C:\\t\\a.1.rcgu.o" "/OUT:C:\\t\\a.exe""#;
+        let dir = std::env::temp_dir().join(format!("ra-jit-plan-lld-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = LinkLine::parse(LINE).unwrap().present();
+        let lld = crate::cargo::toolchain::rust_lld();
+        assert!(lld.is_file(), "{}", lld.display());
+        let command = link
+            .command(&[Path::new("P:/ra-jit.o")], Path::new("P:/bin"), &dir.join("link.args"))
+            .unwrap();
+        assert!(
+            command.starts_with(&format!(r#""{}" "-flavor" "link" "@"#, lld.display())),
+            "{command}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

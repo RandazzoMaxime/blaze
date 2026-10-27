@@ -1007,6 +1007,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A patch asks rustc's executable whether it has a function of a name once per name, where
   each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
   where they took 2.2–2.8 s (cargo 2.3 s).
+- On Windows x86-64 (MSVC), `cargo blaze build` and `run` rebuild through the daemon and print
+  `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
+  `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
+  configuration names, and closes an existing directory of its own that others can enter, as
+  on Unix. Live edits of a running program are still macOS and Linux only.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev
