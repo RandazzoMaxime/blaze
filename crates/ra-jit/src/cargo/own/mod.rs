@@ -7,6 +7,7 @@ mod args;
 mod clean;
 mod manifest;
 mod new;
+mod report;
 mod tree;
 mod uninstall;
 
@@ -101,7 +102,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("yank", REGISTRY_API, "yank a version from a registry"),
     sub("login", REGISTRY_API, "keep a registry's token"),
     sub("logout", REGISTRY_API, "forget a registry's token"),
-    sub("report", Status::Not("not written yet"), "reports cargo keeps of builds"),
+    sub("report", Status::Own, "reports cargo keeps of builds"),
     sub("config", Status::Not("not written yet"), "the configuration cargo reads"),
     sub("read-manifest", Status::Own, "the manifest as JSON (deprecated)"),
 ];
@@ -115,6 +116,7 @@ pub(crate) fn named(name: &str) -> Option<&'static Subcommand> {
 /// the status to exit with.
 pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
     let Some((name, rest)) = args.split_first() else { return Ok(0) };
+    super::say::color(color_of(rest).as_deref());
     if name == "--list" {
         list();
         return Ok(0);
@@ -134,6 +136,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "pkgid" => manifest::pkgid(Args::new(rest)),
         "read-manifest" => manifest::read_manifest(Args::new(rest)),
         "uninstall" => uninstall::command(Args::new(rest)),
+        "report" => report::command(Args::new(rest)),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
         "new" | "init" => new::command(subcommand.name, Args::new(rest)),
@@ -147,6 +150,20 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         }
         _ => Ok(not_yet(subcommand)),
     }
+}
+
+/// What `--color` the words of a subcommand give, the last one.
+fn color_of(words: &[String]) -> Option<String> {
+    let mut found = None;
+    let mut words = words.iter().take_while(|it| *it != "--");
+    while let Some(word) = words.next() {
+        match word.strip_prefix("--color") {
+            Some("") => found = words.next().cloned(),
+            Some(rest) => found = rest.strip_prefix('=').map(str::to_owned).or(found),
+            None => {}
+        }
+    }
+    found
 }
 
 /// Says that blaze has no `subcommand` yet and that nothing was done, as a failure.
@@ -239,6 +256,14 @@ mod tests {
         assert_eq!(subcommand_first(words("--version")), words("--version"));
         assert_eq!(subcommand_first(words("-q")), words("-q"));
         assert_eq!(subcommand_first(Vec::new()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_last_color_given_counts() {
+        assert_eq!(color_of(&words("-q --color always x")).as_deref(), Some("always"));
+        assert_eq!(color_of(&words("--color=never --color always")).as_deref(), Some("always"));
+        assert_eq!(color_of(&words("-- --color always")), None);
+        assert_eq!(color_of(&words("--colorful")), None);
     }
 
     #[test]

@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use blaze_manifest::config::{ConfigRelativePath, Definition};
-use blaze_manifest::{Config, Context};
 use blaze_manifest::manifest::{EitherManifest, read_manifest};
 use blaze_manifest::targets::TargetKind;
+use blaze_manifest::{Config, Context};
 use blaze_resolve::{PackageId, PackageIdSpec, SourceId};
 use serde::{Deserialize, Serialize};
 
@@ -246,23 +246,28 @@ impl Tracker {
         let v2 = locked(root, ".crates2.json", quiet)?;
         let read = |(path, mut file): (&Path, &File)| {
             let mut text = String::new();
-            file.read_to_string(&mut text)
-                .with_context(|| format!("failed to parse crate metadata at `{}`", path.display()))?;
+            file.read_to_string(&mut text).with_context(|| {
+                format!("failed to parse crate metadata at `{}`", path.display())
+            })?;
             anyhow::Ok(text)
         };
         let text = read((&v1.0, &v1.1))?;
         let listed: ListingV1 = match text.is_empty() {
             true => ListingV1::default(),
-            false => toml::from_str(&text)
-                .context("invalid TOML found for metadata")
-                .with_context(|| format!("failed to parse crate metadata at `{}`", v1.0.display()))?,
+            false => {
+                toml::from_str(&text).context("invalid TOML found for metadata").with_context(
+                    || format!("failed to parse crate metadata at `{}`", v1.0.display()),
+                )?
+            }
         };
         let text = read((&v2.0, &v2.1))?;
         let mut installs: ListingV2 = match text.is_empty() {
             true => ListingV2::default(),
             false => serde_json::from_str(&text)
                 .context("invalid JSON found for metadata")
-                .with_context(|| format!("failed to parse crate metadata at `{}`", v2.0.display()))?,
+                .with_context(|| {
+                    format!("failed to parse crate metadata at `{}`", v2.0.display())
+                })?,
         };
         installs.sync(&listed);
         Ok(Tracker { v1: listed, v2: installs, files: [v1, v2] })

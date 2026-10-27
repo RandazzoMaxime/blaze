@@ -17,6 +17,9 @@ All notable changes to ra-jit are written here. The format follows
   and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
   too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
   793; the rest are those refusals).
+- `cargo blaze report future-incompatibilities` is blaze's own: the report a build left, as
+  cargo prints it (`harness/own_report.py`, 23 of 23 cases). Every own command colors its
+  lines as `--color` or `CARGO_TERM_COLOR` says.
 - `cargo blaze uninstall` and `cargo blaze read-manifest` are blaze's own. `uninstall` is cargo
   1.99's, with its install tracker: `.crates.toml` and `.crates2.json` are written byte for
   byte as cargo writes them (`harness/own_uninstall.py`, 18 of 18 cases equal to cargo's).
