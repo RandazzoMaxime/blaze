@@ -2,6 +2,8 @@
 // RFCs live in rfcs/, the charter in charter.flecs, /bench in bench.flecs.
 site {
   OrderedChildren
+  // https://ix.dev/blaze/ (the worker answers there; ra-jit.ix.dev and blaze.ix.dev redirect to it).
+  Served: {"https://ix.dev", "/blaze"}
 
   index : Page {
     Title: {"ra-jit"}

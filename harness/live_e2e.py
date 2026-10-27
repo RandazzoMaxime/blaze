@@ -25,8 +25,10 @@ Python 3.13, stdlib only. Every step has a timeout; a failure names the step.
 """
 
 import asyncio
+import atexit
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -144,6 +146,7 @@ async def start(executable: Path, cwd: Path, env: dict[str, str], step: str, ans
 
 
 async def main() -> None:
+    own_home()
     bin_dir = Path(os.environ["RA_JIT_BIN"]).resolve().parent
     work = Path(tempfile.mkdtemp(prefix="ra-jit-live-e2e-"))
     started: list[Running] = []
@@ -227,6 +230,25 @@ async def main() -> None:
         for running in started:
             await running.stop()
         shutil.rmtree(work, ignore_errors=True)
+
+
+def own_home() -> None:
+    """Gives this run a daemon of its own when RA_JIT_HOME names none: the default home
+    (XDG_RUNTIME_DIR/ra-jit) is one daemon and socket for every harness and lane of the user,
+    and a run that talks to another's daemon tests that daemon's binary and state, not its own."""
+    if os.environ.get("RA_JIT_HOME"):
+        return
+    # Short, under /tmp: the daemon's socket is in it, and macOS allows 104 bytes.
+    home = tempfile.mkdtemp(prefix="rj-live-", dir=None if os.name == "nt" else "/tmp")
+    os.environ["RA_JIT_HOME"] = home
+
+    def stop() -> None:
+        # The daemon of this home alone, which nothing else talks to; its logs stay for a failure.
+        cargo_ra_jit = Path(os.environ["RA_JIT_BIN"]).resolve().parent / "cargo-ra-jit"
+        subprocess.run([str(cargo_ra_jit), "ra-jit", "stop"], env=dict(os.environ, RA_JIT_HOME=home),
+                       capture_output=True, timeout=120)
+
+    atexit.register(stop)
 
 
 def daemon_home() -> Path:
