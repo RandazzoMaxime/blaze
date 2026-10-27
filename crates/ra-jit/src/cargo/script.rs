@@ -179,7 +179,7 @@ pub(crate) fn run_as_cargo_does(
         script_sandbox::keep_reads(&out_dir, reads);
         // Cargo keeps what a script printed to stderr beside its `OUT_DIR`.
         if std::env::var_os("RA_JIT_STATS").is_some() {
-            eprintln!("ra-jit: a run the store kept");
+            eprintln!("blaze: a run the store kept");
         }
         std::io::stdout().write_all(&kept.stdout)?;
         std::io::stderr().write_all(&kept.stderr)?;
@@ -227,7 +227,7 @@ pub(crate) fn run_as_cargo_does(
         std::process::exit(1);
     }
     if checking && found.is_some() && std::env::var_os("RA_JIT_STATS").is_some() {
-        eprintln!("ra-jit: a run the store kept is what this one did");
+        eprintln!("blaze: a run the store kept is what this one did");
     }
     if let (Some(((store, shared), here)), Some(made), Some(mut reads)) = (keys, made, reads) {
         reads.extend(watched(&output.stdout, &cwd));

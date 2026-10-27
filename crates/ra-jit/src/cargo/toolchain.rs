@@ -16,6 +16,8 @@
 
 mod own;
 
+pub(crate) use own::home;
+
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},

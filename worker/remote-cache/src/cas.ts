@@ -5,8 +5,9 @@
 // an unknown one takes.
 
 import * as zlib from "node:zlib";
-import { lookupTenant, type Caller } from "./auth";
+import { lookupTenant, type Caller, type TenantRecord } from "./auth";
 import { CborError, decode, encode, type Cbor } from "./cbor";
+import { clock, DAY } from "./clock";
 import {
   blobRecordHeader,
   buildPack,
@@ -18,6 +19,7 @@ import {
   STREAM_MAGIC,
   StreamError,
   TAG_END,
+  type Frame,
 } from "./pack";
 
 export interface CasEnv {
@@ -35,6 +37,10 @@ const ROWS_PER_STATEMENT = 5_000;
 const MAX_READ = 4 * 1024 * 1024;
 /** R2 reads in flight per /get; a Worker keeps at most 6 subrequests waiting for headers. */
 const READ_AHEAD = 4;
+/** A location whose object was uploaded longer ago than this is absent: the object is about to expire (docs/remote-cache.md, "GC"). */
+export const ROW_TTL = 80 * DAY;
+/** Rows the background sweep deletes per write, at most. */
+const SWEEP_ROWS = 500;
 
 export interface Namespace {
   /** `pub`, or the tenant id. */
@@ -60,8 +66,17 @@ export async function access(env: CasEnv, caller: Caller): Promise<Access | Resp
   if (caller.kind !== "token") return { read: [PUBLIC], write: null };
   const tenant = await lookupTenant(env.TOKENS, caller.tenant);
   if (tenant === null) return text(401, "the token's tenant does not exist");
-  const own = tenant.public ? PUBLIC : { ns: tenant.id, key: await tenantKey(env, tenant.id) };
-  return { read: tenant.public ? [PUBLIC] : [own, PUBLIC], write: caller.scope === "write" ? own : null };
+  return accessOf(env, tenant, caller.scope === "write");
+}
+
+/** What a tenant's own index may name, and where its writes go. */
+export async function accessOf(env: CasEnv, tenant: TenantRecord, write: boolean): Promise<Access> {
+  const own = await namespaceOf(env, tenant);
+  return { read: tenant.public ? [PUBLIC] : [own, PUBLIC], write: write ? own : null };
+}
+
+export async function namespaceOf(env: CasEnv, tenant: TenantRecord): Promise<Namespace> {
+  return tenant.public ? PUBLIC : { ns: tenant.id, key: await tenantKey(env, tenant.id) };
 }
 
 /** `k_t = HKDF-SHA256(GATEWAY_SECRET_<v>, salt, "blaze tenant key" 0 <id> 0 <v>)`, as an HMAC-SHA256 key. */
@@ -84,18 +99,20 @@ async function tenantKey(env: CasEnv, tenantId: string): Promise<CryptoKey> {
   return key;
 }
 
-async function keyIn(ns: Namespace, hash: Uint8Array): Promise<Uint8Array> {
+export async function keyIn(ns: Namespace, hash: Uint8Array): Promise<Uint8Array> {
   if (ns.key === null) return hash;
   return new Uint8Array(await crypto.subtle.sign("HMAC", ns.key, hash));
 }
 
-interface Location {
+export interface Location {
   ns: string;
   object: string;
   offset: number;
   length: number;
   ulength: number;
   codec: number;
+  /** The object's upload date, unix seconds (D1 `objects.uploaded`). */
+  uploaded: number;
 }
 
 /**
@@ -103,13 +120,15 @@ interface Location {
  * the time spent waiting on D1 (a Worker's clock moves only across IO, so CPU time is not
  * measurable here).
  */
-async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Promise<{ locations: (Location | null)[]; d1Ms: number }> {
+export async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Promise<{ locations: (Location | null)[]; d1Ms: number }> {
   const keys = await Promise.all(read.map((ns) => Promise.all(hashes.map(async (h) => hex(await keyIn(ns, h))))));
+  const live = clock.nowSeconds() - ROW_TTL;
   const statements = read.flatMap((ns, n) =>
     chunks(keys[n], ROWS_PER_STATEMENT).map((part) =>
       env.DB.prepare(
-        'SELECT key, object, "offset", length, ulength, codec FROM blobs WHERE ns = ?1 AND key IN (SELECT value FROM json_each(?2))',
-      ).bind(ns.ns, JSON.stringify(part)),
+        `SELECT b.key, b.object, b."offset", b.length, b.ulength, b.codec, o.uploaded FROM blobs b JOIN objects o ON o.object = b.object
+         WHERE b.ns = ?1 AND b.key IN (SELECT value FROM json_each(?2)) AND o.uploaded >= ?3`,
+      ).bind(ns.ns, JSON.stringify(part), live),
     ),
   );
   const t0 = Date.now();
@@ -125,7 +144,7 @@ async function locate(env: CasEnv, read: Namespace[], hashes: Uint8Array[]): Pro
   const locations = hashes.map((_, i) => {
     for (const [n, ns] of read.entries()) {
       const row = byNs[n].get(keys[n][i]);
-      if (row) return { ns: ns.ns, object: row.object, offset: row.offset, length: row.length, ulength: row.ulength, codec: row.codec };
+      if (row) return { ns: ns.ns, ...row };
     }
     return null;
   });
@@ -303,15 +322,21 @@ export async function put(env: CasEnv, request: Request, acc: Access): Promise<A
     if (refusal !== null) return answer(text(422, `${refusal}: ${hex(f.hash)}`));
   }
 
+  const object = await storePack(env, ns, frames);
+  return answer(cbor({ pack: object.slice(object.lastIndexOf("/") + 1, -".bpk".length), blobs: frames.length }));
+}
+
+/** Writes `frames` as one new pack in `ns` and points every blob's location at it. Returns the object's name. */
+export async function storePack(env: CasEnv, ns: Namespace, frames: Frame[]): Promise<string> {
   const keys = await Promise.all(frames.map((f) => keyIn(ns, f.hash)));
   const pack = buildPack(frames, keys);
   const packSha = new Uint8Array(await crypto.subtle.digest("SHA-256", pack.bytes));
   const object = ns.key === null ? `cas/pub/${hex(packSha)}.bpk` : `cas/t/${ns.ns}/${hex(await keyIn(ns, packSha))}.bpk`;
-  await env.BUCKET.put(object, pack.bytes, { sha256: hex(packSha) });
+  const stored = await env.BUCKET.put(object, pack.bytes, { sha256: hex(packSha) });
 
   const rows = pack.entries.map((e) => [hex(e.key), e.offset, e.clen, e.ulen, e.codec]);
   await env.DB.batch([
-    env.DB.prepare("INSERT OR REPLACE INTO objects (object, uploaded) VALUES (?1, ?2)").bind(object, Math.floor(Date.now() / 1000)),
+    env.DB.prepare("INSERT OR REPLACE INTO objects (object, uploaded) VALUES (?1, ?2)").bind(object, Math.floor(stored.uploaded.getTime() / 1000)),
     ...chunks(rows, ROWS_PER_STATEMENT).map((part) =>
       env.DB.prepare(
         `INSERT INTO blobs (ns, key, object, "offset", length, ulength, codec)
@@ -323,7 +348,25 @@ export async function put(env: CasEnv, request: Request, acc: Access): Promise<A
       ).bind(ns.ns, object, JSON.stringify(part)),
     ),
   ]);
-  return answer(cbor({ pack: object.slice(object.lastIndexOf("/") + 1, -".bpk".length), blobs: frames.length }));
+  return object;
+}
+
+/**
+ * Deletes up to `SWEEP_ROWS` location rows whose object is past `ROW_TTL`, and the `objects` rows
+ * left with no location. Run in the background of writes; there is no separate job.
+ */
+export async function sweep(env: CasEnv): Promise<void> {
+  const cutoff = clock.nowSeconds() - ROW_TTL;
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM blobs WHERE (ns, key) IN
+         (SELECT b.ns, b.key FROM objects o JOIN blobs b ON b.object = o.object WHERE o.uploaded < ?1 LIMIT ?2)`,
+    ).bind(cutoff, SWEEP_ROWS),
+    env.DB.prepare(
+      `DELETE FROM objects WHERE object IN
+         (SELECT o.object FROM objects o WHERE o.uploaded < ?1 AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.object = o.object) LIMIT ?2)`,
+    ).bind(cutoff, SWEEP_ROWS),
+  ]);
 }
 
 /** Why a frame is refused, or null. Decompresses zstd with workerd's `node:zlib`, capped at the frame's `ulen`. */

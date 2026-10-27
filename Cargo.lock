@@ -3471,6 +3471,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "base64",
  "blaze-doc",
  "blaze-fmt",
  "blaze-lints",

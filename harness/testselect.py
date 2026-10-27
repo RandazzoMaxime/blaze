@@ -325,7 +325,7 @@ def benched(root, env):
         os.makedirs(os.path.dirname(os.path.join(ws, path)), exist_ok=True)
         open(os.path.join(ws, path), "w").write(text)
     deadline = time.monotonic() + 300
-    while "[ra-jit]" not in test(ws, env, "all")[1]:
+    while "[blaze]" not in test(ws, env, "all")[1]:
         if time.monotonic() > deadline:
             return "NEVER SERVED BY THE DAEMON"
         time.sleep(0.5)
@@ -334,7 +334,7 @@ def benched(root, env):
     open(os.path.join(ws, path), "w").write(text.replace(old, new, 1))
     code, said = test(ws, env, "all")
     ran = {name for name, _ in RAN.findall(said)}
-    if "[ra-jit]" not in said:
+    if "[blaze]" not in said:
         return "NOT SERVED BY THE DAEMON"
     if ran != {"tests::added", "tests::adds", "tests::bench_add"} or code != 0:
         return f"ENDED {code} HAVING RUN {', '.join(sorted(ran)) or 'nothing'}"
@@ -380,11 +380,11 @@ def main():
             code, said = test(ws, env, "affected")
             if code != 0:
                 raise SystemExit(f"the tests failed {when}:\n{said[-3000:]}")
-            if "[ra-jit]" in said:
+            if "[blaze]" in said:
                 break
             time.sleep(0.5)
         else:
-            raise SystemExit(f"no build said `[ra-jit]` {when}; the daemon's log is in {home}")
+            raise SystemExit(f"no build said `[blaze]` {when}; the daemon's log is in {home}")
         # The daemon's first build of the tests: each is new to it, and runs.
         test(ws, env, "affected")
 
@@ -401,7 +401,7 @@ def main():
             verdict = "ok"
             # An edit of the manifest is cargo's to build, and the daemon's again after it.
             manifest = any(path == "Cargo.toml" for path, _, _ in edits)
-            if "[ra-jit]" not in said and not manifest:
+            if "[blaze]" not in said and not manifest:
                 verdict = "NOT SERVED BY THE DAEMON"
             elif expected is not None and ran != expected:
                 extra, missing = sorted(ran - expected), sorted(expected - ran)

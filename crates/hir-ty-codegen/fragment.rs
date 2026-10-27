@@ -582,7 +582,12 @@ impl Wants {
         self.func(FuncTarget::Path(path.to_owned()), sig)
     }
 
+    /// A function of assembly. The text is assembled here, on the thread compiling the caller,
+    /// into the cache [`super::asm::assemble`] keeps: the one thread that puts functions in the
+    /// object would otherwise run the assembler for each block in turn. An error is not kept,
+    /// so that thread meets it again and refuses the caller with it as before.
     pub(super) fn assembly(&mut self, text: String, sig: &Signature) -> FuncId {
+        _ = super::asm::assemble(&self.isa.triple().to_string(), &text);
         self.func(FuncTarget::Asm(text), sig)
     }
 

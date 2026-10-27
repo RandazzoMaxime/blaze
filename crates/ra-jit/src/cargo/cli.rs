@@ -485,7 +485,7 @@ fn unsupported_target(triple: &str) -> Option<String> {
         {
             None
         }
-        Ok(_) => Some(format!("programs for {triple} are not linked through `cargo ra-jit` yet")),
+        Ok(_) => Some(format!("programs for {triple} are not linked through `cargo blaze` yet")),
         Err(why) => Some(why),
     }
 }

@@ -444,7 +444,7 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
     let (spec, root_manifest) = match plan {
         Plan::Outside(why, env) => {
             if std::env::var_os("RA_JIT_STATS").is_some() {
-                eprintln!("ra-jit: the build script of `{}` runs outside: {why}", script.package());
+                eprintln!("blaze: the build script of `{}` runs outside: {why}", script.package());
             }
             let mut command = Command::new(script.real);
             command.args(script.args).env_clear().envs(env.iter().map(|(k, v)| (k, v)));
