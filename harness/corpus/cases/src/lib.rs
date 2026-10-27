@@ -4879,11 +4879,59 @@ pub mod simd_x86 {
         for (i, index) in indices.iter_mut().enumerate() { *index = (i as u8).wrapping_mul(37).wrapping_add(11); }
         core::mem::transmute(_mm512_permutex2var_epi8(a, core::mem::transmute(indices), b))
     } }
+    /// The float compares, whose predicate `core::arch` passes to LLVM as a literal, over lanes
+    /// that are equal, ordered both ways, and NaN.
+    pub fn compares() -> Vec<u64> { unsafe {
+        let a = _mm_set_ps(f32::NAN, 1.0, 2.0, -0.0);
+        let b = _mm_set_ps(1.0, f32::NAN, 1.0, 0.0);
+        let c = _mm_set_pd(f64::NAN, -3.5);
+        let d = _mm_set_pd(2.0, -3.5);
+        let ps = |m: __m128| core::mem::transmute::<_, [u32; 4]>(m).map(u64::from);
+        let pd = |m: __m128d| core::mem::transmute::<_, [u64; 2]>(m);
+        let mut out = Vec::new();
+        for m in [_mm_cmpeq_ps(a, b), _mm_cmplt_ps(a, b), _mm_cmple_ps(a, b), _mm_cmpgt_ps(a, b), _mm_cmpge_ps(a, b),
+                  _mm_cmpneq_ps(a, b), _mm_cmpnlt_ps(a, b), _mm_cmpnle_ps(a, b), _mm_cmpngt_ps(a, b), _mm_cmpnge_ps(a, b),
+                  _mm_cmpord_ps(a, b), _mm_cmpunord_ps(a, b), _mm_cmpeq_ss(a, b), _mm_cmplt_ss(b, a), _mm_cmpunord_ss(b, a)] {
+            out.extend(ps(m));
+        }
+        for (l, r) in [(c, d), (d, c)] {
+            for m in [_mm_cmpeq_pd(l, r), _mm_cmplt_pd(l, r), _mm_cmple_pd(l, r), _mm_cmpgt_pd(l, r), _mm_cmpge_pd(l, r),
+                      _mm_cmpneq_pd(l, r), _mm_cmpnlt_pd(l, r), _mm_cmpnle_pd(l, r), _mm_cmpngt_pd(l, r), _mm_cmpnge_pd(l, r),
+                      _mm_cmpord_pd(l, r), _mm_cmpunord_pd(l, r), _mm_cmpeq_sd(l, r), _mm_cmplt_sd(l, r), _mm_cmpge_sd(l, r),
+                      _mm_cmpneq_sd(l, r), _mm_cmpord_sd(l, r), _mm_cmpunord_sd(l, r)] {
+                out.extend(pd(m));
+            }
+        }
+        out
+    } }
+    /// The compares whose predicate is a const generic (`IMM5 as i8`, `const { IMM5 as u8 }`).
+    #[target_feature(enable = "avx")]
+    pub unsafe fn compares_avx() -> Vec<u64> { unsafe {
+        let a = _mm256_set_ps(f32::NAN, 1.0, 2.0, -0.0, 5.0, 6.0, f32::NAN, 8.0);
+        let b = _mm256_set_ps(1.0, f32::NAN, 1.0, 0.0, 5.0, 7.0, 7.0, f32::NAN);
+        let c = _mm256_set_pd(f64::NAN, -3.5, 1.0, 9.0);
+        let d = _mm256_set_pd(2.0, -3.5, f64::NAN, 4.0);
+        let ps = |m: __m256| core::mem::transmute::<_, [u32; 8]>(m).map(u64::from);
+        let pd = |m: __m256d| core::mem::transmute::<_, [u64; 4]>(m);
+        let mut out = Vec::new();
+        for m in [_mm256_cmp_ps::<_CMP_EQ_OQ>(a, b), _mm256_cmp_ps::<_CMP_NGE_UQ>(a, b), _mm256_cmp_ps::<_CMP_FALSE_OQ>(a, b),
+                  _mm256_cmp_ps::<_CMP_TRUE_US>(a, b), _mm256_cmp_ps::<_CMP_NEQ_OS>(a, b)] {
+            out.extend(ps(m));
+        }
+        for m in [_mm256_cmp_pd::<_CMP_LT_OS>(c, d), _mm256_cmp_pd::<_CMP_UNORD_Q>(c, d), _mm256_cmp_pd::<_CMP_GT_OQ>(c, d)] {
+            out.extend(pd(m));
+        }
+        let (x, y) = (_mm256_castpd256_pd128(c), _mm256_castpd256_pd128(d));
+        out.extend(core::mem::transmute::<_, [u64; 2]>(_mm_cmp_sd::<_CMP_GE_OS>(x, y)));
+        out.extend(core::mem::transmute::<_, [u32; 4]>(_mm_cmp_ps::<_CMP_NLE_US>(_mm256_castps256_ps128(a), _mm256_castps256_ps128(b))).map(u64::from));
+        out
+    } }
     pub fn run() -> String {
         let mut out = String::new();
         let v = unsafe { _mm_set_epi8(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16) };
         let w = unsafe { _mm_set_epi8(-1,0,3,14,5,6,7,-8,9,1,11,2,3,4,15,6) };
-        out += &format!("{:?} {:?} {:?} {:?} {:?}", ext(v), shift(v), shl(v), lanes(v), shr16(w));
+        out += &format!("{:?} {:?} {:?} {:?} {:?} {:?}", ext(v), shift(v), shl(v), lanes(v), shr16(w), compares());
+        if is_x86_feature_detected!("avx") { out += &format!(" {:?}", unsafe { compares_avx() }); }
         if is_x86_feature_detected!("ssse3") { out += &format!(" {:?} {:?} {:?}", unsafe { alignr(v, w) }, unsafe { pshufb(v, w) }, unsafe { unload(w) }); }
         if is_x86_feature_detected!("avx2") { unsafe {
             let a = _mm256_set_m128i(v, w); let b = _mm256_set_m128i(w, _mm_set1_epi8(9));

@@ -10670,6 +10670,69 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         }
     }
 
+    /// The value of an integer operand that an intrinsic takes as an immediate, which rustc
+    /// requires to be a constant, as `core::arch` writes one: a literal (`cmpps(a, b, 0)`,
+    /// which comes as the bytes const eval made of it), an inline or named constant
+    /// (`const { IMM5 as u8 }`), or a local assigned once from one, through an `as` between
+    /// integers (`IMM5 as i8`). The bits are those of the operand's type.
+    fn immediate(&mut self, operand: &Operand) -> Result<Option<u128>> {
+        if let Some((bits, _)) = self.literal_bits(operand) {
+            return Ok(Some(bits));
+        }
+        let ty = self.operand_ty(operand)?;
+        if !matches!(ty.kind(), TyKind::Int(_) | TyKind::Uint(_)) {
+            return Ok(None);
+        }
+        let bits = self.layout(ty)?.size.bits();
+        let mask = u128::MAX >> (128 - bits);
+        match &operand.kind {
+            OperandKind::Constant { konst, .. } => {
+                let ConstKind::Unevaluated(named) = konst.as_ref().kind() else {
+                    return Ok(None);
+                };
+                let allocation = self.eval_const(named)?;
+                let Some(memory) = allocation.memory.get(..bits as usize / 8) else {
+                    return Ok(None);
+                };
+                let mut bytes = [0; 16];
+                bytes[..memory.len()].copy_from_slice(memory);
+                Ok(Some(u128::from_le_bytes(bytes)))
+            }
+            OperandKind::Copy(place) | OperandKind::Move(place)
+                if place.projection.as_slice().is_empty() =>
+            {
+                let Some(body) = self.body else { return Ok(None) };
+                let mut assigned = body.basic_blocks.iter().flat_map(|(_, block)| {
+                    block.statements.iter().filter_map(|it| match &it.kind {
+                        StatementKind::Assign(to, rvalue) if to.local == place.local => {
+                            Some((to, rvalue))
+                        }
+                        _ => None,
+                    })
+                });
+                let (Some((to, rvalue)), None) = (assigned.next(), assigned.next()) else {
+                    return Ok(None);
+                };
+                let (Rvalue::Use(from) | Rvalue::Cast(CastKind::IntToInt, from, _)) = rvalue else {
+                    return Ok(None);
+                };
+                if to != place {
+                    return Ok(None);
+                }
+                let from_ty = self.operand_ty(from)?;
+                let Some(value) = self.immediate(from)? else { return Ok(None) };
+                // An `as` to a wider type extends by the sign of the narrower.
+                let unused = 128 - self.layout(from_ty)?.size.bits() as u32;
+                let value = match from_ty.kind() {
+                    TyKind::Int(_) => ((value << unused) as i128 >> unused) as u128,
+                    _ => value,
+                };
+                Ok(Some(value & mask))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn load_scalar(&mut self, operand: &Operand) -> Result<(Value, AbiScalar)> {
         if let Some(register) = self.register_of(operand) {
             let ty = self.operand_ty(operand)?;
@@ -14998,7 +15061,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 | "x86.sse.cmp.ss" | "x86.sse2.cmp.sd",
                 [a, b, predicate],
             ) => {
-                let Some(predicate) = self.const_bits(predicate) else {
+                let Some(predicate) = self.immediate(predicate)? else {
                     unsupported!("`llvm.{name}` with a predicate that is not a constant");
                 };
                 let double = name.contains(".pd") || name.ends_with(".sd");
