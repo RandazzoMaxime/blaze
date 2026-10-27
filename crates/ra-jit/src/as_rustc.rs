@@ -21,7 +21,6 @@ use std::{
     ffi::{OsStr, OsString},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Context as _, bail};
@@ -71,9 +70,7 @@ fn run(args: &[OsString]) -> anyhow::Result<i32> {
         std::io::stdin().read_to_end(&mut stdin).context("reading standard input")?;
     }
     if crate::answers::is_question(args) {
-        let mut asked = Command::new(&rustc);
-        asked.args(args);
-        let answer = crate::answers::own_answer(&asked, &stdin)
+        let answer = crate::answers::own_answer_of(&rustc, args, &stdin)
             .context("ra-jit has no answer of its own to this question")?;
         std::io::stdout().write_all(&answer)?;
         return Ok(0);
@@ -212,9 +209,9 @@ impl<'a> Probe<'a> {
         let name = self.name()?;
         // The cfgs the crate is checked with are those rustc would print for the same flags,
         // which ra-jit answers or does not.
-        let mut asked = Command::new(rustc);
-        asked.args(&self.cfg_flags).args(["--print", "cfg"]);
-        crate::answers::own_answer(&asked, &[])
+        let mut asked: Vec<OsString> = self.cfg_flags.iter().map(OsString::from).collect();
+        asked.extend(["--print", "cfg"].map(OsString::from));
+        crate::answers::own_answer_of(rustc, &asked, &[])
             .context("ra-jit can't tell the cfgs rustc would check the crate with")?;
         let cfg_args: Vec<String> = self.cfg_flags.iter().map(|it| (*it).to_owned()).collect();
         let cfg = crate::cargo::own_script::cfg_of(&cfg_args);
