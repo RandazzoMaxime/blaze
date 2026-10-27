@@ -245,7 +245,8 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
     let key = asked.key(&cwd);
     let finished = |state: &State| {
         let took = started.elapsed().as_secs_f64();
-        let finished = format!("`{}` profile [ra-jit] target(s) in {took:.2}s", state.profile);
+        let finished =
+            format!("`{}` profile [{}] target(s) in {took:.2}s", state.profile, ra_jit_tag());
         say::status(asked.flags.quiet, "Finished", &finished);
     };
     let read = State::read(&key);
@@ -330,11 +331,31 @@ fn build(asked: &Invocation) -> anyhow::Result<i32> {
         note("client write state", CLIENT, writing);
         crate::trace::finish();
     }
+    if let Some(failed) = remote_failed_it() {
+        return Ok(failed);
+    }
     after_build(asked, &state, &cwd, held)
 }
 
 /// The status of a build that failed, as cargo's of one rustc turned down.
 const FAILED: i32 = 101;
+
+/// What the `Finished` line says the build was: ra-jit's, and the remote's failure if the
+/// daemon's last exchange with it failed (`RA_JIT_REMOTE=off` stops using it).
+fn ra_jit_tag() -> String {
+    match crate::remote::noted_down() {
+        Some(down) => format!("ra-jit, remote down: {down}"),
+        None => "ra-jit".to_owned(),
+    }
+}
+
+/// The status a build that is over ends with when the daemon's remote failed and
+/// `RA_JIT_REMOTE_REQUIRED` makes that a failure of the build.
+fn remote_failed_it() -> Option<i32> {
+    let down = crate::remote::noted_down().filter(|_| crate::remote::required())?;
+    say::error(&format!("the remote failed and RA_JIT_REMOTE_REQUIRED is set: {down}"));
+    Some(FAILED)
+}
 
 /// `cargo ra-jit check`: what the daemon says of the source as it builds the programs of
 /// the build with the same flags, when it has that build loaded. Any other check is the
@@ -353,7 +374,7 @@ fn check(asked: &Invocation) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let finished = |profile: &str| {
         let took = started.elapsed().as_secs_f64();
-        let finished = format!("`{profile}` profile [ra-jit] target(s) in {took:.2}s");
+        let finished = format!("`{profile}` profile [{}] target(s) in {took:.2}s", ra_jit_tag());
         say::status(asked.flags.quiet, "Finished", &finished);
         messages::passed(format);
     };
