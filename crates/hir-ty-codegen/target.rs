@@ -60,6 +60,9 @@ pub enum VariableArguments {
     Homed,
     /// On the stack, eight bytes each, whatever registers are left: Apple's AArch64.
     Stack,
+    /// In memory the caller writes them to, each at its own alignment right after the one
+    /// before, whose address is one more argument after the named ones: WebAssembly's C.
+    Buffer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +223,7 @@ impl Target {
     /// definition of one is compiled for.
     pub fn variable_arguments(&self) -> Option<VariableArguments> {
         match (self.call_conv, self.arch) {
+            (_, Arch::Wasm32) => Some(VariableArguments::Buffer),
             (CallConv::SystemV, Arch::X86_64 | Arch::Aarch64) => Some(VariableArguments::Registers),
             (CallConv::WindowsFastcall, Arch::X86_64) => Some(VariableArguments::Homed),
             (CallConv::AppleAarch64, Arch::Aarch64) => Some(VariableArguments::Stack),
