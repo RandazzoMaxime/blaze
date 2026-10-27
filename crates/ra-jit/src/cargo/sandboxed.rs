@@ -334,6 +334,7 @@ impl Scratch {
             record: Some(record.clone()),
             record_reads: reads,
             not_inputs,
+            view: None,
         };
         std::fs::write(&spec_file, serde_json::to_string(&spec)?)
             .with_context(|| format!("writing {}", spec_file.display()))?;

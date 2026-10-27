@@ -125,10 +125,13 @@ fn import_of(symbol: &str) -> Option<(&str, &str)> {
 }
 
 /// Writes as a wasm object what the ELF object `elf` holds. `signatures` has the signature
-/// of every function the object names and does not define.
+/// of every function the object names and does not define. `custom` are the contents of
+/// custom sections, by name: those of one name are one section, in order, as the linker
+/// joins the ones of every object.
 pub(super) fn from_elf(
     elf: &[u8],
     signatures: &FxHashMap<String, WasmSignature>,
+    custom: &[(String, Vec<u8>)],
 ) -> Result<Vec<u8>, String> {
     let file = object::File::parse(elf).map_err(|e| format!("wasm object: {e}"))?;
     let mut writer = Writer::default();
@@ -287,11 +290,11 @@ pub(super) fn from_elf(
         let section_index = symbol.section_index().expect("a defined symbol");
         let (section, data) = section_data(section_index)?;
         let size = symbol.size() as usize;
-        let zeroed = matches!(
+        let uninitialized = matches!(
             section.kind(),
             SectionKind::UninitializedData | SectionKind::UninitializedTls
         );
-        let bytes = if zeroed {
+        let bytes = if uninitialized {
             std::borrow::Cow::Owned(vec![0; size])
         } else {
             let start = (symbol.address() - section.address()) as usize;
@@ -300,6 +303,12 @@ pub(super) fn from_elf(
                 .ok_or_else(|| format!("wasm object: `{name}` out of range"))?;
             std::borrow::Cow::Borrowed(bytes)
         };
+        // Writable data that is all zeros, with no address written into it, is `.bss` as LLVM
+        // makes it: the linker leaves such segments out of the module, memory being zeros.
+        let zeroed = uninitialized
+            || section.kind() == SectionKind::Data
+                && section.relocations().next().is_none()
+                && bytes.iter().all(|&b| b == 0);
         // Each piece of data is in a section of its own (`per_data_object_section`), which is
         // aligned as the code generator asked. Its size says nothing: four bytes of a field of
         // a value aligned to 64 are aligned to 64.
@@ -408,7 +417,63 @@ pub(super) fn from_elf(
         }
     }
 
-    Ok(writer.finish(imports, function_types))
+    let mut sections: Vec<(&str, Vec<u8>)> = Vec::new();
+    for (name, bytes) in custom {
+        if matches!(name.as_str(), "linking" | "name") || name.starts_with("reloc.") {
+            return Err(format!("wasm object: a custom section may not be named `{name}`"));
+        }
+        match sections.iter_mut().find(|(it, _)| it == name) {
+            Some((_, contents)) => contents.extend(bytes),
+            None => sections.push((name, bytes.clone())),
+        }
+    }
+    Ok(writer.finish(imports, function_types, &sections))
+}
+
+/// The `target_features` section of an object compiled with `enabled` (the `target_feature`
+/// values of its crates), which says what its code may use as LLVM's does: the linker joins
+/// those of every object, and wasm-bindgen reads `reference-types` off the program's.
+pub(super) fn target_features(enabled: impl IntoIterator<Item = String>) -> (String, Vec<u8>) {
+    /// The features LLVM's wasm target knows, of the names rustc gives them too.
+    const KNOWN: &[&str] = &[
+        "atomics",
+        "bulk-memory",
+        "bulk-memory-opt",
+        "call-indirect-overlong",
+        "exception-handling",
+        "extended-const",
+        "fp16",
+        "gc",
+        "multimemory",
+        "multivalue",
+        "mutable-globals",
+        "nontrapping-fptoint",
+        "reference-types",
+        "relaxed-simd",
+        "sign-ext",
+        "simd128",
+        "tail-call",
+        "wide-arithmetic",
+    ];
+    let mut features = std::collections::BTreeSet::new();
+    for feature in enabled {
+        let implied = match feature.as_str() {
+            "bulk-memory" => Some("bulk-memory-opt"),
+            "reference-types" => Some("call-indirect-overlong"),
+            "relaxed-simd" => Some("simd128"),
+            _ => None,
+        };
+        features.extend(implied.map(str::to_owned));
+        features.insert(feature);
+    }
+    features.retain(|it| KNOWN.contains(&it.as_str()));
+    let mut contents = Vec::new();
+    (features.len() as u32).encode(&mut contents);
+    for feature in &features {
+        contents.push(b'+');
+        feature.as_str().encode(&mut contents);
+    }
+    ("target_features".to_owned(), contents)
 }
 
 impl Writer {
@@ -431,7 +496,12 @@ impl Writer {
         self.symbol_count - 1
     }
 
-    fn finish(mut self, imports: ImportSection, functions: FunctionSection) -> Vec<u8> {
+    fn finish(
+        mut self,
+        imports: ImportSection,
+        functions: FunctionSection,
+        custom: &[(&str, Vec<u8>)],
+    ) -> Vec<u8> {
         let mut types = TypeSection::new();
         for signature in &self.types {
             let values = |types: &[super::wasm::WasmType]| {
@@ -479,13 +549,24 @@ impl Writer {
         module.section(&functions);
         module.section(&RawSection { id: SectionId::Code as u8, data: &self.code });
         module.section(&RawSection { id: SectionId::Data as u8, data: &self.data });
-        let custom = |name: &'static str, data: &[u8]| CustomSection {
-            name: name.into(),
-            data: data.to_vec().into(),
-        };
-        module.section(&custom("linking", &linking));
-        module.section(&custom("reloc.CODE", &code_relocs));
-        module.section(&custom("reloc.DATA", &data_relocs));
+        fn section<'a>(name: &'a str, data: &'a [u8]) -> CustomSection<'a> {
+            CustomSection { name: name.into(), data: data.into() }
+        }
+        // After the data section: the reloc sections name the code and data sections by
+        // their place in the module. The ones the tool conventions order come after them, in
+        // that order, which the linker checks.
+        const LAST: [&str; 2] = ["producers", "target_features"];
+        for (name, data) in custom.iter().filter(|(name, _)| !LAST.contains(name)) {
+            module.section(&section(name, data));
+        }
+        module.section(&section("linking", &linking));
+        module.section(&section("reloc.CODE", &code_relocs));
+        module.section(&section("reloc.DATA", &data_relocs));
+        for last in LAST {
+            for (name, data) in custom.iter().filter(|(name, _)| *name == last) {
+                module.section(&section(name, data));
+            }
+        }
         module.finish()
     }
 }
