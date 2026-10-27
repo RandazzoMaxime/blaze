@@ -355,7 +355,9 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   `async fn foo() -> &'static impl T` needs `Self: 'static` (E0310).
 - Function items and locals, as rustc's type check: a function item used as a value, not
   only called (`let f: fn(&'a str) -> _ = extend;`, or passed to a call), needs its where
-  clauses and its type arguments well-formed; a variable's or temporary's type is `Sized`,
+  clauses and its type arguments well-formed, and so does a function an inline `asm!` names
+  by `sym`, with the lifetimes its path writes (`sym dep::<'a, T>` with `fn dep<'a, T: 'a>`
+  needs `T: 'a`, E0309); a variable's or temporary's type is `Sized`,
   which a where clause `<&'static T as A>::X: Sized` proves only for `'static`.
 - E0621 ("explicit lifetime required") where rustc gives it: for an anonymous lifetime a
   parameter's written type has, not in a trait impl's method, nor for one of `self`, of the
@@ -523,6 +525,10 @@ changes to rust-analyzer were needed, each made as rustc does it:
   parameter whose lifetimes are not counted from its written type (`dyn Trait`, `impl Trait`,
   a function pointer, an associated type) adds none, and gives elision no lifetime unless
   `&self` does.
+- Type inference types an inline `asm!`'s `sym` of a function as a path to a value, as
+  rustc's `check_expr_asm` does (`InferenceResult::asm_sym_tys`), so MIR lowering names the
+  function item with the generic arguments the path spells out, and lowers an `asm!` with a
+  `sym` even when its template is only a comment, as it lowered no generic `sym` before.
 - Type inference takes an inline `asm!` output as a place written, as rustc's
   `check_expr_asm_operand` does, so `out(reg) v[0]` indexes with `IndexMut` and needs `v`
   mutable (E0596).
