@@ -22,7 +22,7 @@ engine, so the two have to be installed side by side, with `ra-jit-rustc` and
 [installer](../install.sh) and `cargo install` both do that:
 
     curl -fsSL https://ix.dev/blaze | sh
-    cargo +nightly-2026-10-25 install --locked cargo-blaze
+    cargo +nightly-2026-10-27 install --locked cargo-blaze
 
 From the release after 0.1.0, `--profile dist` builds the profile a release is built with, less
 the PGO a release adds ([reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)); 0.1.0 has no such
@@ -40,7 +40,7 @@ same LLVM. `cargo build -p ra-jit --release` is the quicker build the harnesses 
 working on blaze; it is not what ships.
 
 `cargo blaze` builds with the one toolchain blaze compiles, the dated nightly in
-`harness/toolchain` (`nightly-2026-10-25`), whatever toolchain the project names (a
+`harness/toolchain` (`nightly-2026-10-27`), whatever toolchain the project names (a
 `rust-toolchain.toml`, `rustup override`, `+toolchain`, `RUSTUP_TOOLCHAIN` or rustup's
 default): it runs cargo, rustc and the daemon under that nightly by naming it in
 `RUSTUP_TOOLCHAIN` and `CARGO`. The nightly builds what older releases built, so a project on a
@@ -52,10 +52,10 @@ directory: cargo keys what it builds by the rustc, so neither rebuilds the other
 ([support.md](support.md#toolchain)).
 
 Where the nightly comes from, in this order: `RUSTC` naming a rustc whose `rustc -V` line is
-the pinned one's (`rustc 1.101.0-nightly (12433c307 2026-10-24)`: the whole line, since every
-nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-25`
+the pinned one's (`rustc 1.101.0-nightly (16d1ffac1 2026-10-26)`: the whole line, since every
+nightly of a release says `1.101.0`) with its library's source; rustup's `nightly-2026-10-27`
 with `rust-src`, when rustup has it; else blaze's own copy in
-`~/.blaze/toolchains/nightly-2026-10-25-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
+`~/.blaze/toolchains/nightly-2026-10-27-<host>` (`BLAZE_HOME` moves `~/.blaze`), laid out as rustup lays
 out a toolchain. blaze downloads its copy the first time it needs it, once, with a line on
 stderr while it does: rustc, cargo, the standard library and its source from the Rust project's
 own servers, 97 MB on macOS, 134 MB on Linux x86-64 and 118 MB on Linux ARM64 (548 MB on macOS
