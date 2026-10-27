@@ -13992,7 +13992,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         static ENABLED: LazyLock<bool> =
             LazyLock::new(|| std::env::var_os("RA_JIT_INLINE").is_none_or(|it| it != "0"));
         let db = self.cg.db;
-        if !*ENABLED || !self.cg.target.exception_in_register() || Target::current().is_wasm() {
+        if !*ENABLED {
+            return None;
+        }
+        if Target::current().writes_wasm_objects() {
+            return self.always_inlined(def, args, sig);
+        }
+        if !self.cg.target.exception_in_register() || Target::current().is_wasm() {
             return None;
         }
         let erased = |args| erase_regions(DbInterner::new_with(db, self.env.krate), args);
@@ -14045,6 +14051,34 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             return None;
         }
         Some(self.cg.declare_inlined(body, self.builder.func))
+    }
+
+    /// The body of an `#[inline(always)]` callee of a crate no edit changes, which rustc
+    /// builds into every caller at every level. What reads a wasm module counts on it:
+    /// wasm-bindgen finds each of its descriptor shims by the call of its marker import,
+    /// which `describe_generic_import` has to put in the shim itself.
+    fn always_inlined(
+        &mut self,
+        def: InstanceDef,
+        args: GenericArgs<'db>,
+        sig: &Signature,
+    ) -> Option<ir::FuncRef> {
+        let db = self.cg.db;
+        let InstanceDef::Fn(func) = def else { return None };
+        let signature = FunctionSignature::of(db, func);
+        if !AttrFlags::query(db, func.into()).contains(AttrFlags::INLINE_ALWAYS)
+            || func.krate(db).data(db).origin.is_local()
+            || signature.abi != ExternAbi::Rust
+            || signature.is_varargs()
+            || FunctionSignature::is_intrinsic(db, func)
+            || track_caller(db, func)
+        {
+            return None;
+        }
+        let args = erase_regions(DbInterner::new_with(db, self.env.krate), args);
+        let instance = Instance { def, args: args.store(), checked: self.cg.checked };
+        let body = inlinable(db, instance, self.env.store()).as_ref()?;
+        (body.func.signature == *sig).then(|| self.cg.declare_inlined(body, self.builder.func))
     }
 
     /// Shows LLVM the body of the callee `id` a compile at a level above 1 calls, where
