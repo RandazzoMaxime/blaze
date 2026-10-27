@@ -343,8 +343,11 @@ impl<'a> Writer<'a> {
             Target::Url(url) => Some(url.clone()),
             Target::Item(item) => {
                 let anchor = item.anchor.as_ref().map(|it| format!("#{it}")).unwrap_or_default();
+                // As rustdoc's `extern_location`: docs of the crate's name here first.
                 if self.names.contains(item.krate.as_str()) {
                     Some(format!("{}{}{anchor}", self.root, item.page()))
+                } else if let Some(remote) = &item.remote {
+                    Some(format!("{remote}{}{anchor}", item.page()))
                 } else if SYSROOT.contains(&item.krate.as_str()) {
                     Some(format!("https://doc.rust-lang.org/nightly/{}{anchor}", item.page()))
                 } else {

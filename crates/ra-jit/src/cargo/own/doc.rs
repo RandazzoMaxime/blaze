@@ -14,7 +14,7 @@ use blaze_doc::{Asked, Documented};
 use cargo_metadata::{Metadata, Package, TargetKind};
 use hir::Crate;
 use ide_db::RootDatabase;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::args::{Args, Flag, switch, valued};
 use crate::{
@@ -200,6 +200,7 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
     args.extend(["--crate", "doc", "--out", "none"].map(str::to_owned));
     let args = crate::Args::parse(args.into_iter())?;
     crate::process_wide();
+    blaze_doc::before_load();
     let cargo_config = crate::cargo_config(&args);
     let (mut db, vfs, _checkouts) = crate::load(
         &[project.as_path()],
@@ -217,7 +218,10 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
             return Ok(101);
         }
     };
-    let crates = hir::attach_db(&db, || blaze_doc::crates_to_document(&db, &asked, flags.no_deps));
+    let test_only = test_only(&db, &vfs, &metadata);
+    let crates = hir::attach_db(&db, || {
+        blaze_doc::crates_to_document(&db, &asked, flags.no_deps, &test_only)
+    });
     blaze_doc::set_cfg_doc(&mut db, &crates);
     for documented in &crates {
         say::status(flags.quiet, "Documenting", &describe(&db, &vfs, documented));
@@ -225,7 +229,7 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
     let first = crates.first().map(|it| it.name.clone()).context("nothing to document")?;
     let asked_names: Vec<String> =
         crates.iter().filter(|it| it.warn).map(|it| it.name.clone()).collect();
-    let model = hir::attach_db(&db, || blaze_doc::model(&db, crates));
+    let model = hir::attach_db(&db, || blaze_doc::model(&db, crates, test_only));
     let modelled = started.elapsed();
     let target_dir = match &flags.target_dir {
         Some(dir) => cwd.join(dir),
@@ -325,13 +329,7 @@ fn asked_crates(
     packages: &[&Package],
     flags: &Flags,
 ) -> Result<Vec<Asked>, String> {
-    let mut by_root: FxHashMap<PathBuf, Crate> = FxHashMap::default();
-    for krate in Crate::all(db) {
-        let path = vfs.file_path(krate.root_file(db));
-        if let Some(path) = path.as_path() {
-            by_root.entry(PathBuf::from(path.as_str())).or_insert(krate);
-        }
-    }
+    let by_root = crates_by_root(db, vfs);
     let picks_targets = flags.lib || flags.bins || !flags.bin.is_empty();
     let mut out = vec![];
     for package in packages {
@@ -370,17 +368,67 @@ fn asked_crates(
     Ok(out)
 }
 
+/// Each loaded crate by the path of its root file.
+fn crates_by_root(db: &RootDatabase, vfs: &vfs::Vfs) -> FxHashMap<PathBuf, Crate> {
+    let mut by_root: FxHashMap<PathBuf, Crate> = FxHashMap::default();
+    for krate in Crate::all(db) {
+        let path = vfs.file_path(krate.root_file(db));
+        if let Some(path) = path.as_path() {
+            by_root.entry(PathBuf::from(path.as_str())).or_insert(krate);
+        }
+    }
+    by_root
+}
+
+/// The dependencies each workspace member's crates have for its tests alone: the packages its
+/// manifest names only as dev-dependencies, which rust-analyzer's crate graph gives its library
+/// and binaries too.
+fn test_only(db: &RootDatabase, vfs: &vfs::Vfs, metadata: &Metadata) -> blaze_doc::TestOnly {
+    use cargo_metadata::DependencyKind;
+    let by_root = crates_by_root(db, vfs);
+    let mut out = blaze_doc::TestOnly::default();
+    for package in metadata.workspace_packages() {
+        let named = |dev: bool| -> FxHashSet<&str> {
+            package
+                .dependencies
+                .iter()
+                .filter(|it| (it.kind == DependencyKind::Development) == dev)
+                .map(|it| it.name.as_str())
+                .collect()
+        };
+        let (dev, other) = (named(true), named(false));
+        if dev.iter().all(|it| other.contains(it)) {
+            continue;
+        }
+        for target in &package.targets {
+            let Some(&krate) = by_root.get(target.src_path.as_std_path()) else { continue };
+            for dep in krate.dependencies(db) {
+                let name = package_name(db, dep.krate);
+                if name.as_deref().is_some_and(|it| dev.contains(it) && !other.contains(it)) {
+                    out.insert((krate, dep.krate));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The name of a crate's package, as its manifest has it.
+fn package_name(db: &RootDatabase, krate: Crate) -> Option<String> {
+    use ide_db::base_db::CrateOrigin;
+    match krate.origin(db) {
+        CrateOrigin::Local { name: Some(name), .. } | CrateOrigin::Library { name, .. } => {
+            Some(name.as_str().to_owned())
+        }
+        _ => None,
+    }
+}
+
 /// `serde v1.0.219` as cargo names a package it documents, with the directory of one that is
 /// not from a registry or a git checkout.
 fn describe(db: &RootDatabase, vfs: &vfs::Vfs, documented: &Documented) -> String {
-    use ide_db::base_db::CrateOrigin;
     let krate = documented.krate;
-    let name = match krate.origin(db) {
-        CrateOrigin::Local { name: Some(name), .. } | CrateOrigin::Library { name, .. } => {
-            name.as_str().to_owned()
-        }
-        _ => documented.name.clone(),
-    };
+    let name = package_name(db, krate).unwrap_or_else(|| documented.name.clone());
     let version = krate.version(db).map(|it| format!(" v{it}")).unwrap_or_default();
     let root = vfs.file_path(krate.root_file(db));
     let dir = root

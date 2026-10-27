@@ -31,7 +31,15 @@ and beside them:
 - docs as rustdoc renders Markdown: pulldown-cmark with rustdoc's options, headings with
   anchors, the first paragraph as the summary in lists and search, Rust examples highlighted
   with their `# ` lines hidden, and intra-doc links resolved by rust-analyzer; a link that
-  resolves to nothing prints `warning: unresolved link to `...`` as rustdoc does;
+  resolves to nothing prints `warning: unresolved link to `...`` as rustdoc does, for the
+  packages asked for and those from a path (cargo caps the lints of registry and git ones),
+  unless an `allow` or `expect` of `rustdoc::broken_intra_doc_links` (or `rustdoc::all`,
+  `warnings`) is on the item or around it, `cfg_attr` read with the crate's cfg, or a macro of
+  another crate (or an attribute or derive macro) wrote the doc attribute, where rustc
+  reports no lint;
+- links to an item of a crate not documented here go where its `#![doc(html_root_url)]` says,
+  at the path the item is declared at, as rustdoc's do; with no `html_root_url` the name is
+  not a link;
 - a source page for every file, linked from each item's `Source` link;
 - an "All items" page per crate, the module list in the sidebar, a search box (`s` or `/`)
   over every crate documented, light and dark themes following the system's.
@@ -42,9 +50,15 @@ the model and the writing took.
 The flags are cargo's: `-p`, `--workspace`, `--exclude`, `--no-deps`,
 `--document-private-items`, `--open`, `--features`, `--all-features`, `--no-default-features`,
 `--target`, `--target-dir`, `--manifest-path`, `--lib`, `--bins`, `--bin`, `--release`,
-`--profile`, `-q`, `-v`. A binary is documented with its private items, as cargo does. Two
-dependencies of one name share a directory; as cargo's `remove_duplicate_doc` does, the newest
-version is documented, and none that shares a name with a package asked for.
+`--profile`, `-q`, `-v`. A binary is documented with its private items, as cargo does. A
+dev-dependency is not documented, nor linked into the crate it is a dev-dependency of (its
+library's docs have no tests in them), though rust-analyzer's crate graph gives the library
+it. Two dependencies of one name share a directory, so one is documented, as cargo's
+`remove_duplicate_doc` picks it: none that shares a name with a package asked for; of several,
+none built only for the host (a proc macro and what it depends on), so two versions of `syn`
+leave `syn` undocumented; then the newest version. A crate only a left-out one depends on is
+left out with it (helix's `ahash`, which only the older `hashbrown` uses), as cargo drops the
+units nothing reaches any more.
 
 ## How
 
@@ -59,8 +73,17 @@ Three passes over one loaded database, each parallel over the crates:
 Which provided methods an impl shows follows rustc: a method whose where-clauses on the
 trait's parameters cannot hold for the impl (`rev` of an iterator that is not a
 `DoubleEndedIterator`) is left out, by a port of rustc's `is_impossible_associated_item` into
-rust-analyzer's solver (`hir_ty::traits::is_impossible_associated_item`). Blanket impls apply
-as rustdoc's `synthesize_blanket_impls` asks (`hir_ty::traits::impl_may_apply`).
+rust-analyzer's solver (`hir_ty::traits::is_impossible_associated_item`). Blanket impls come
+from every crate linked into the documented one, documented or not (not a proc macro's
+dependencies, which rustc loads as the compiler's own), and apply as rustdoc's
+`synthesize_blanket_impls` asks (`hir_ty::traits::impl_may_apply`), solved in the documented
+crate: a type it re-exports gets the impls of every crate it links, not only those its own
+crate sees (`hashbrown`'s `Equivalent` on `gix_diff::blob::Algorithm`, from `imara_diff`).
+
+rust-analyzer stores no macro expansion longer than 2,097,152 tokens, a guard for the editor;
+rustc has no such limit, and biome_wasm's one `#[wasm_bindgen] extern "C"` block of 2271 types
+expands past it. The command lifts the limit for its process before the load
+(`blaze_doc::before_load`, `hir_expand::set_token_limit`), which the one-shot load allows.
 
 ### The load is one-shot, in the command's process
 
@@ -87,9 +110,16 @@ Both go when the load stops needing them ([no-rustc.md](no-rustc.md)).
 
 - Smart punctuation is on, as in rustdoc's `main_body_opts` (`--` becomes an en dash, quotes
   curl); the brief asked for it off.
-- A link to an item another crate places points straight at that crate's page. rustdoc points
-  at the path the item is defined at and writes a redirect page there; blaze writes no
-  redirect pages, and names the defined path in the link's title as rustdoc does.
+- A link to an item another documented crate places points straight at that crate's page.
+  rustdoc points at the path the item is defined at and writes a redirect page there; blaze
+  writes no redirect pages, and names the defined path in the link's title as rustdoc does.
+  (Links to a crate not documented here, which blaze writes no page for, go to the defined
+  path under its `html_root_url`, as rustdoc's do, since that crate's own docs redirect.)
+- With `--target`, cargo writes the crates built only for the host (proc macros and what they
+  depend on) to `target/doc`, apart from the rest in `target/<triple>/doc`; blaze writes one
+  directory and drops a host crate whose name another crate has, as cargo does with no
+  `--target`.
+- Lint levels given on the command line (`RUSTDOCFLAGS="-A rustdoc::..."`) are not read.
 - Implementors from crates downstream of a trait's crate are written into the trait's page,
   where rustdoc adds them with a script (`implementors/*.js`); a reader sees the same list.
 - The stylesheet and script are blaze's own (`crates/blaze-doc/static`), with rustdoc's class
@@ -101,17 +131,22 @@ Both go when the load stops needing them ([no-rustc.md](no-rustc.md)).
 the same flags and compares, for each crate both documented: the item pages, the members and
 impls anchored on pages both have (`method.new`, `impl-Debug-for-Foo`), the intra-doc links
 rustdoc resolved (by their titles), and the `unresolved link` warnings. On the bench apps (each
-with its dependencies; 2026-10-26, dev-aws-8):
+with its dependencies; 2026-10-26, dev-aws-8, blaze at 69cbce21f5):
 
-| App | Pages | Members and impls | Resolved links | Warnings | `cargo doc` | `cargo blaze doc` |
+| App | Pages | Members and impls | Resolved links | Warnings rustdoc gives, blaze gives too | `cargo doc` | `cargo blaze doc` |
 |---|---|---|---|---|---|---|
-| fd | 12785 of 12787 (100.0%) | 91952 of 92078 (99.9%) | 13339 of 13420 (99.4%) | 1 of 1 | 27.4 s | 7.6 s |
-| ripgrep | 8037 of 8042 (99.9%) | 58476 of 58705 (99.6%) | 6527 of 6588 (99.1%) | 0 of 0 | 5.6 s | 5.8 s |
-| nushell | 60756 of 61083 (99.5%) | 587662 of 594585 (98.8%) | 77282 of 78793 (98.1%) | 0 of 3 | 497.1 s | 66.8 s |
+| fd | 12785 of 12787 (100.0%) | 91972 of 92078 (99.9%) | 13340 of 13420 (99.4%) | 1 of 1 | 27.4 s | 7.7 s |
+| ripgrep | 8037 of 8042 (99.9%) | 58477 of 58705 (99.6%) | 6527 of 6588 (99.1%) | 0 of 0 | 5.6 s | 5.9 s |
+| nushell | 60756 of 61083 (99.5%) | 589898 of 594585 (99.2%) | 77494 of 78793 (98.4%) | 2 of 3 | 497.1 s | 28.4 s |
+| helix | 28164 of 28476 (98.9%) | 376345 of 380019 (99.0%) | 54300 of 55013 (98.7%) | 0 of 0 | 149.2 s | 19.0 s |
+| biome | 41563 of 42003 (99.0%) | 1770723 of 1784684 (99.2%) | 218253 of 222469 (98.1%) | 22 of 22, and 3 more | 1028.0 s | 92.5 s |
 
 `cargo doc` starts from an empty target directory; `cargo blaze doc` with its build scripts
 already run (the first load also runs them through cargo: fd's first run took 56.6 s, nearly
-all of it that). fd's 7.6 s is 0.75 s of load, 6.3 s of model and 0.06 s of writing.
+all of it that). fd's 7.6 s, at an earlier commit, was 0.75 s of load, 6.3 s of model and
+0.06 s of writing. helix ran with `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` on both sides (its
+build script otherwise fetches tree-sitter grammars), and biome with `RA_JIT_SANDBOX=off`
+(its build scripts write outside the sandbox blaze runs them in).
 
 What blaze still misses or adds, and why:
 
@@ -125,8 +160,17 @@ What blaze still misses or adds, and why:
   redirects.
 - Macros a `macro_rules!` defines inside another macro's expansion (icu's baked data
   `impl_*_v1!`) have no page.
-- rustdoc warns of three unresolved links in nushell (`std::io::Error::other`, `.get`, `tls`)
-  that blaze says nothing of; why is not looked into yet.
+- rustdoc writes pages under a directory named `self` (`futures/prelude/self/enum.Either.html`,
+  `notify/self/...`, `crossbeam/self/fn.scope.html`), and blaze writes none there; why rustdoc
+  does is not looked into yet.
+- nushell's `tz`, `tzdb` and `tzdb_data` are documented by blaze and not by cargo: a feature
+  enabled only through a build-dependency (resolver 2 keeps those apart) pulls them in, and
+  `cargo metadata`, which the load reads, merges the two.
+- rustdoc warns of `std::io::Error::other` in nushell and blaze does not; biome gets two
+  warnings of `[0]` blaze cannot place in the source and one more of `serde::Deserialize`
+  than rustdoc gives. Not looked into yet.
+- blaze reads Markdown with pulldown-cmark 0.9.6, the workspace's (rust-analyzer's hover uses
+  it too); rustdoc's is newer, and reads some nested brackets (`[[Call]]`) differently.
 
 ## Not done
 
@@ -134,4 +178,4 @@ What blaze still misses or adds, and why:
 - `--message-format` is refused; `--examples`, `--tests` and `--benches` are not read.
 - No settings page and no `help.html`; the theme follows the system's. Links into the
   standard library point at doc.rust-lang.org's nightly docs, as rustdoc's do with no local
-  copy; there is no `--extern-html-root-url`.
+  copy; a crate's `html_root_url` is read, but there is no `--extern-html-root-url`.

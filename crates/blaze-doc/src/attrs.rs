@@ -1,5 +1,6 @@
 //! What an item's attributes say that the HIR does not keep: `#[deprecated]`'s `since` and
-//! `note`, `#[doc(cfg(..))]` and the words of `#[doc(..)]` (`inline`, `no_inline`).
+//! `note`, `#[doc(cfg(..))]`, the words of `#[doc(..)]` (`inline`, `no_inline`) and a crate's
+//! `html_root_url`.
 
 use syntax::{
     AstNode, AstToken, SyntaxKind, T,
@@ -77,6 +78,27 @@ pub(crate) fn doc_cfg(node: &impl HasAttrs) -> Option<String> {
                 && let Some(inner) = ast::TokenTree::cast(inner)
             {
                 return Some(crate::cfg::describe(&inner));
+            }
+        }
+    }
+    None
+}
+
+/// `#![doc(html_root_url = "..")]` of a crate's root file, ending in `/`.
+pub(crate) fn html_root_url(file: &ast::SourceFile) -> Option<String> {
+    for attr in file.attrs() {
+        for meta in attr.skip_cfg_attrs() {
+            let Some((name, tt)) = meta.as_simple_call() else { continue };
+            if name != "doc" {
+                continue;
+            }
+            if let Some((_, mut url)) =
+                key_values(&tt).into_iter().find(|(k, _)| k == "html_root_url")
+            {
+                if !url.ends_with('/') {
+                    url.push('/');
+                }
+                return Some(url);
             }
         }
     }

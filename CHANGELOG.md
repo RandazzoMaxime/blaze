@@ -933,6 +933,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- `cargo blaze doc` documents the crates cargo does: of two of one name the one cargo keeps
+  (none of a proc macro's two `syn`s), nothing only a left-out one or a test needs. It links
+  a crate not documented at its `html_root_url`, finds blanket impls of every crate linked and
+  applies them as solved in the documented crate, leaves out more provided methods that
+  cannot apply, warns of a broken link where rustdoc does (lint levels, `cfg_attr`, no
+  warning in another crate's macro), and documents what a macro expands to past
+  rust-analyzer's token limit (biome_wasm's 2271 types). Against `cargo doc`, biome goes from
+  93.5% to 99.0% of the pages, helix from 98.2% to 99.0% of the members and impls; docs/doc.md
+  has all five bench apps.
 - The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
   rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
   1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives

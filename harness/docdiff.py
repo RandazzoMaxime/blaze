@@ -135,7 +135,9 @@ def main():
     done, blaze_wall = run([RA_JIT, "cargo", "doc", *flags], ws, env)
     blaze_err = done.stderr
     if done.returncode != 0:
-        sys.exit(f"cargo blaze doc failed:\n{done.stderr[-4000:]}")
+        # blaze's error is the first line, what a build script said follows it.
+        said = done.stderr if len(done.stderr) <= 6000 else f"{done.stderr[:3000]}\n...\n{done.stderr[-3000:]}"
+        sys.exit(f"cargo blaze doc failed:\n{said}")
 
     report, only = compare(oracle_doc, blaze_doc, asked.show)
     print(f"{os.path.basename(ws)}: cargo doc {oracle_wall and f'{oracle_wall:.1f}s' or '(kept)'}, "
