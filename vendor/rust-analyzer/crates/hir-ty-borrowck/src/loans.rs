@@ -239,7 +239,7 @@ fn const_promoted(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashSet<LocalId> {
             {
                 let ty = body.locals[place.local].ty.as_ref();
                 if hir_ty::drop::is_freeze(&ctx.infcx, ty, ctx.env)
-                    && hir_ty::drop::has_drop_glue(&ctx.infcx, ty, ctx.env)
+                    && ctx.drop_glue(ty)
                         == hir_ty::drop::DropGlue::None
                 {
                     found.insert(place.local);
@@ -346,7 +346,7 @@ fn promoted_borrows(ctx: &Ctx<'_, '_>, body: &MirBody<'_>) -> FxHashSet<Location
             {
                 let ty = body.locals[place.local].ty.as_ref();
                 if hir_ty::drop::is_freeze(&ctx.infcx, ty, ctx.env)
-                    && hir_ty::drop::has_drop_glue(&ctx.infcx, ty, ctx.env)
+                    && ctx.drop_glue(ty)
                         == hir_ty::drop::DropGlue::None
                 {
                     found.insert(Location { block, statement });
@@ -417,7 +417,7 @@ fn const_promotable(
             };
             // Not with an argument that needs dropping, `ManuallyDrop::new(String::new())`.
             let dropped = args.iter().any(|&it| {
-                hir_ty::drop::has_drop_glue(&ctx.infcx, ctx.infer.expr_ty(it), ctx.env)
+                ctx.drop_glue(ctx.infer.expr_ty(it))
                     != hir_ty::drop::DropGlue::None
             });
             callable && !dropped && all(args.to_vec())
@@ -428,7 +428,7 @@ fn const_promotable(
                 hir_def::signatures::FunctionSignature::of(ctx.db, func).is_const()
             });
             let dropped = std::iter::once(receiver).chain(args.iter()).any(|&it| {
-                hir_ty::drop::has_drop_glue(&ctx.infcx, ctx.infer.expr_ty(it), ctx.env)
+                ctx.drop_glue(ctx.infer.expr_ty(it))
                     != hir_ty::drop::DropGlue::None
             });
             callable && !dropped && all(std::iter::once(*receiver).chain(args.to_vec()).collect())
