@@ -2989,12 +2989,8 @@ fn instance_code(
             });
         }
         InstanceDef::CallOnceShim => {
-            let args = instance.args.as_ref();
             return compile_as(db, env, None, false, instance.checked, shim, |fx| {
-                match args.len() {
-                    1 => fx.call_once_shim(ty()),
-                    _ => fx.call_once_by_pointer(args),
-                }
+                fx.call_once_shim(ty())
             });
         }
         InstanceDef::VtableShim(func) => {
@@ -3517,6 +3513,21 @@ fn fn_trait_methods(lang_items: &LangItems) -> [[Option<FunctionId>; 3]; 2] {
             lang_items.AsyncFnOnce_async_call_once,
         ],
     ]
+}
+
+/// The `Fn`-trait method (`call`, `call_mut` or `call_once`) that `func` is the impl of,
+/// when it is one written for a type.
+fn implemented_fn_method(
+    db: &dyn HirDatabase,
+    lang_items: &LangItems,
+    func: FunctionId,
+) -> Option<FunctionId> {
+    let ItemContainerId::ImplId(impl_) = func.lookup(db).container else { return None };
+    let trait_ref = db.impl_trait(impl_)?;
+    let name = &FunctionSignature::of(db, func).name;
+    let method = trait_ref.skip_binder().def_id.0.trait_items(db).method_by_name(name)?;
+    let [fn_methods, _] = fn_trait_methods(lang_items);
+    fn_methods.contains(&Some(method)).then_some(method)
 }
 
 /// The instance that is the `poll` of the future `ty`, when that is one of an `async` block.
@@ -12775,15 +12786,25 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if fn_methods.contains(&Some(func)) && !written {
             return self.vtable_fn_method(self_ty, once);
         }
-        // A type with an impl of the trait, as `Box<dyn Fn()>` has: `call_once` takes it by
-        // value, and the slot is called with a pointer to it.
-        if once {
-            let (callee, callee_args, sig, mode) = self.call_once_impl(trait_ref.args)?;
-            if matches!(mode, PassMode::Indirect) {
-                return self.cg.callee(InstanceDef::Fn(callee), callee_args, self.env, &sig);
+        // A type with an impl of the trait, as `Box<dyn Fn()>` and `&mut dyn FnMut()` have:
+        // the slot is called with the arguments one by one and, for `call_once`, a pointer to
+        // the receiver, where the method takes them as a tuple and the receiver by value.
+        if fn_methods.contains(&Some(func)) {
+            let Some(callee_args) = self.vtable_method_args(func, trait_ref) else {
+                unsupported!("generic `Fn`-trait method in a vtable");
+            };
+            let (callee, callee_args) = db.lookup_impl_method(self.env, func, callee_args);
+            let either::Either::Left(callee) = callee else {
+                unsupported!("builtin `Fn`-trait method in the vtable of {self_ty:?}");
+            };
+            if !FunctionSignature::of(db, callee).has_body() {
+                let method = FunctionSignature::of(db, callee).name.as_str();
+                unsupported!("no impl of `{method}` found for the vtable of {self_ty:?}");
             }
-            let sig = Self::by_pointer(&sig, mode);
-            return self.cg.callee(InstanceDef::CallOnceShim, trait_ref.args, self.env, &sig);
+            let body = self.body_types(InstanceDef::Fn(callee), callee_args)?;
+            let (_, abi) = self.spread_shim_abi(body)?;
+            let sig = self.signature(&abi.args, abi.ret);
+            return self.cg.callee(InstanceDef::VtableShim(callee), callee_args, self.env, &sig);
         }
         if Some(func) == lang_items.FuturePoll
             && let Some((def, parent_args)) = coroutine_instance(db, self_ty)
@@ -13130,43 +13151,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         Ok(())
     }
 
-    /// The `FnOnce::call_once` written for a type, given the type and the tuple of what it
-    /// is called with, and how the function takes the type.
-    fn call_once_impl(
-        &mut self,
-        args: GenericArgs<'db>,
-    ) -> Result<(FunctionId, GenericArgs<'db>, Signature, PassMode)> {
-        let Some(func) = self.interner.lang_items().FnOnce_call_once else {
-            unsupported!("no `FnOnce::call_once`");
-        };
-        let (callee, callee_args) = self.cg.db.lookup_impl_method(self.env, func, args);
-        let either::Either::Left(callee) = callee else {
-            unsupported!("builtin derive method in a vtable");
-        };
-        if !FunctionSignature::of(self.cg.db, callee).has_body() {
-            unsupported!("no impl of `call_once` found for {:?}", args.type_at(0));
-        }
-        let body = self.body_types(InstanceDef::Fn(callee), callee_args)?;
-        let sig = self.body_signature(body)?;
-        let Some(receiver) = body.params.first() else {
-            unsupported!("`call_once` without a receiver");
-        };
-        let layout = self.layout(receiver.as_ref())?;
-        let mode = self.pass_mode(&layout, false)?;
-        Ok((callee, callee_args, sig, mode))
-    }
-
-    /// The body of a `CallOnceShim` for a type with an impl of `FnOnce`: calls it with the
-    /// value the shim is handed a pointer to.
-    fn call_once_by_pointer(&mut self, args: GenericArgs<'db>) -> Result<()> {
-        let (callee, callee_args, sig, mode) = self.call_once_impl(args)?;
-        let layout = self.layout(args.type_at(0))?;
-        self.call_by_pointer(callee, callee_args, &sig, mode, &layout)
-    }
-
     /// The body of a `VtableShim`: calls the method with the value the shim is handed a
     /// pointer to.
     fn vtable_shim(&mut self, func: FunctionId, args: GenericArgs<'db>) -> Result<()> {
+        if let Some(method) = implemented_fn_method(self.cg.db, self.interner.lang_items(), func) {
+            return self.spread_shim(func, args, method);
+        }
         let body = self.body_types(InstanceDef::Fn(func), args)?;
         let sig = self.body_signature(body)?;
         let Some(receiver) = body.params.first() else {
@@ -13175,6 +13165,92 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         let layout = self.layout(receiver.as_ref())?;
         let mode = self.pass_mode(&layout, false)?;
         self.call_by_pointer(func, args, &sig, mode, &layout)
+    }
+
+    /// What the vtable slot for an `Fn`-trait method written for a type, whose body is
+    /// `body`, is called with: the data pointer of the object, then the arguments one by one,
+    /// as every call through an `Fn`-trait vtable passes them. The method takes them as the
+    /// tuple this also gives.
+    fn spread_shim_abi(&self, body: &BodyTypes) -> Result<(Ty<'db>, FnAbi)> {
+        let [_, tuple] = &body.params[..] else {
+            unsupported!("an `Fn`-trait method that takes other than a receiver and a tuple");
+        };
+        let tuple = tuple.as_ref();
+        let TyKind::Tuple(fields) = tuple.kind() else {
+            unsupported!("an `Fn`-trait method that takes {tuple:?}, not a tuple");
+        };
+        let thin = Ty::new_imm_ptr(self.interner, Ty::new_unit(self.interner));
+        let inputs = std::iter::once(thin).chain(fields.iter());
+        Ok((tuple, self.fn_abi(ExternAbi::Rust, body.returned.as_ref(), inputs)?))
+    }
+
+    /// The body of a `VtableShim` for `func`, the `Fn`-trait method `method` written for a
+    /// type: puts the arguments it is handed one by one back in the tuple `func` takes, and
+    /// hands `func` the receiver, which for `call_once` it has a pointer to.
+    fn spread_shim(
+        &mut self,
+        func: FunctionId,
+        args: GenericArgs<'db>,
+        method: FunctionId,
+    ) -> Result<()> {
+        if track_caller(self.cg.db, func) {
+            unsupported!("an `Fn`-trait method in a vtable that tracks its caller");
+        }
+        let body = self.body_types(InstanceDef::Fn(func), args)?;
+        let receiver_ty = body.params[0].as_ref();
+        let dst_ty = body.returned.as_ref();
+        let (tuple_ty, FnAbi { ret, args: modes }) = self.spread_shim_abi(body)?;
+        self.builder.func.signature = self.signature(&modes, ret);
+        let entry = self.builder.create_block();
+        self.builder.append_block_params_for_function_params(entry);
+        self.builder.switch_to_block(entry);
+        let mut incoming = self.builder.block_params(entry).to_vec().into_iter();
+        let dst_layout = self.layout(dst_ty)?;
+        let dst = match ret {
+            PassMode::Indirect => incoming.next().expect("sret param"),
+            _ => self.stack_slot(&dst_layout),
+        };
+        let thin = Ty::new_imm_ptr(self.interner, Ty::new_unit(self.interner));
+        let tuple_layout = self.layout(tuple_ty)?;
+        let tuple = self.stack_slot(&tuple_layout);
+        let inputs = std::iter::once(thin).chain(tuple_ty.tuple_fields().iter());
+        let mut data = None;
+        for (i, (ty, mode)) in inputs.zip(modes).enumerate() {
+            let layout = self.layout(ty)?;
+            let addr = match mode {
+                PassMode::OnStack { padded: true, .. } => {
+                    incoming.nth(1).expect("a parameter in memory after its padding")
+                }
+                PassMode::Indirect | PassMode::OnStack { .. } => {
+                    incoming.next().expect("indirect param")
+                }
+                _ => self.stack_slot(&layout),
+            };
+            self.receive(mode, &mut incoming, addr, &layout);
+            match i.checked_sub(1) {
+                None => data = Some(addr),
+                Some(field) => {
+                    let offset = tuple_layout.fields.offset(field).bytes() as i64;
+                    let at = self.builder.ins().iadd_imm(tuple, offset);
+                    self.copy(at, addr, layout.size);
+                }
+            }
+        }
+        let data = data.expect("the data pointer of the object");
+        // `call` and `call_mut` borrow the object, which is what the data pointer is.
+        // `call_once` takes it by value, and the data pointer is where it is.
+        let receiver = match Some(method) == self.interner.lang_items().FnOnce_call_once {
+            true => self.builder.ins().load(ptr(), MEM, data, 0),
+            false => data,
+        };
+        let values = [(receiver, receiver_ty), (tuple, tuple_ty)];
+        self.emit_call(Callee::Instance(InstanceDef::Fn(func), args), &values, dst, dst_ty)?;
+        let mut results = Vec::new();
+        if !matches!(ret, PassMode::Indirect) {
+            self.pass(ret, dst, &dst_layout, &mut results);
+        }
+        self.builder.ins().return_(&results);
+        Ok(())
     }
 
     /// The body of a shim that is handed a pointer to the receiver of `callee`, which takes
