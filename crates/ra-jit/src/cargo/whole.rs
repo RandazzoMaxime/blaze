@@ -54,6 +54,9 @@ fn refused(asked: &Invocation) -> Option<String> {
             (Some(flag), _) => not_yet(&format!(
                 "the targets `{flag}` picks; a build of the default programs, or of one named by `--bin` or `--example`, is"
             )),
+            (None, Subcommand::Test) if asked.target().is_some_and(|it| is_wasm(&it)) => {
+                not_yet("or run the tests of a wasm target")
+            }
             (None, _) => asked.target_not_linked(),
         },
     }
@@ -646,9 +649,37 @@ fn ran(asked: &Invocation, cwd: &Path, programs: &[Program]) -> anyhow::Result<i
     };
     let shown =
         program.executable.strip_prefix(cwd).unwrap_or(&program.executable).display().to_string();
+    let target = asked.selection().target;
+    let runner = match &target {
+        Some(triple) => runner(asked, cwd, triple)?,
+        None => None,
+    };
+    let mut command = match runner {
+        Some(mut runner) => {
+            runner.arg(&program.executable);
+            runner
+        }
+        None if target.as_deref().is_some_and(is_wasm) => {
+            let triple = target.unwrap_or_default();
+            let variable =
+                format!("CARGO_TARGET_{}_RUNNER", triple.replace('-', "_").to_uppercase());
+            say::error(&format!(
+                "`{shown}` is a wasm module, which runs in a runtime: name one with `target.{triple}.runner` in the configuration or `{variable}` (`wasmtime run`, say), as cargo runs it"
+            ));
+            return Ok(FAILED);
+        }
+        None => Command::new(&program.executable),
+    };
     let args = asked.program_args().map(|it| format!(" {it}")).collect::<String>();
-    say::status(asked.flags.quiet, "Running", &format!("`{shown}{args}`"));
-    let mut command = Command::new(&program.executable);
+    let ran = std::iter::once(command.get_program()).chain(command.get_args());
+    let ran: Vec<String> = ran.map(|it| it.to_string_lossy().into_owned()).collect();
+    let ran = match ran.len() {
+        1 => shown.clone(),
+        _ => {
+            format!("{} {shown}", shlex::try_join(ran[..ran.len() - 1].iter().map(String::as_str))?)
+        }
+    };
+    say::status(asked.flags.quiet, "Running", &format!("`{ran}{args}`"));
     for it in configured_env(cwd) {
         if it.force || std::env::var_os(&it.name).is_none() {
             command.env(&it.name, &it.value);
@@ -708,7 +739,8 @@ fn planned(
                 program.package
             );
         };
-        let exe = |name: &str| format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        let named = FileNames::of(selection.target.as_deref());
+        let exe = |name: &str| format!("{name}{}", named.exe_suffix);
         let kind = format!("{:?}", program.kind).to_lowercase();
         // A library's file is named for its crate, as rustc names it.
         let library = |prefix: &str, suffix: &str| {
@@ -716,9 +748,7 @@ fn planned(
         };
         let executable = match (program.kind, program.test) {
             (Kind::Example, _) => out.join("examples").join(exe(&program.name)),
-            (Kind::Cdylib, _) => {
-                out.join(library(std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX))
-            }
+            (Kind::Cdylib, _) => out.join(library(named.dll_prefix, named.dll_suffix)),
             (Kind::Staticlib, _) => out.join(match cfg!(windows) {
                 true => library("", ".lib"),
                 false => library("lib", ".a"),
@@ -779,4 +809,50 @@ fn test_hash(package: &str, kind: &str, name: &str, profile: &Path) -> String {
     let mut hasher = rustc_hash::FxHasher::default();
     (package, kind, name, profile).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// How rustc names the files of the programs it links for a target (its spec's
+/// `exe-suffix`, `dll-prefix` and `dll-suffix`), which cargo puts as they are.
+struct FileNames {
+    exe_suffix: &'static str,
+    dll_prefix: &'static str,
+    dll_suffix: &'static str,
+}
+
+impl FileNames {
+    /// Of the target `triple`, the host when it is none.
+    fn of(triple: Option<&str>) -> FileNames {
+        match triple {
+            Some(triple) if is_wasm(triple) => {
+                FileNames { exe_suffix: ".wasm", dll_prefix: "", dll_suffix: ".wasm" }
+            }
+            _ => FileNames {
+                exe_suffix: std::env::consts::EXE_SUFFIX,
+                dll_prefix: std::env::consts::DLL_PREFIX,
+                dll_suffix: std::env::consts::DLL_SUFFIX,
+            },
+        }
+    }
+}
+
+/// Whether `triple` is a WebAssembly target, whose programs run in a runtime.
+fn is_wasm(triple: &str) -> bool {
+    triple.starts_with("wasm32-") || triple.starts_with("wasm64-")
+}
+
+/// The program `target.<triple>.runner` (or a `target.'cfg(..)'.runner` that matches, or
+/// `CARGO_TARGET_<TRIPLE>_RUNNER`) names to run what is built for `triple`, and its
+/// arguments, as cargo finds it for `cargo run`.
+fn runner(asked: &Invocation, cwd: &Path, triple: &str) -> anyhow::Result<Option<Command>> {
+    use blaze_manifest::config::CompileKind;
+    let config = blaze_manifest::Config::load(cwd, std::env::vars(), &asked.flags.config)?;
+    let host = super::own::manifest::host_triple()?;
+    let cfg = super::own::manifest::target_cfg(triple)?;
+    let kind = CompileKind::Target(triple.to_owned());
+    let Some((program, args)) = config.target_runner(&kind, &host, &cfg)? else {
+        return Ok(None);
+    };
+    let mut command = Command::new(program);
+    command.args(args);
+    Ok(Some(command))
 }
