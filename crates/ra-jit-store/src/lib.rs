@@ -326,8 +326,7 @@ pub fn fetch_missing_with(fetch: FetchMissing) {
 /// sent to other machines now. Between builds a small pack is otherwise left open.
 pub fn seal_open() {
     if let Some(store) = Store::global() {
-        store.settled();
-        store.settle(1);
+        store.seal();
     }
 }
 

@@ -285,6 +285,9 @@ fn built(
         return Ok(());
     }
     let inputs = dir.join("ra-jit-inputs");
+    if let Some(store) = super::daemon::store() {
+        standard_library_once(sysroot, &store, &dir.join("standard-library"))?;
+    }
     // A script that reaches a function ra-jit could not compile is not built
     // ([`crate::refused_error`]).
     build(described, dir, made, super::daemon::store(), true, Some(&inputs))?;
@@ -469,10 +472,48 @@ fn build(
     Ok(said)
 }
 
+/// Has the store `store` hold what every build of a script or proc macro takes from it before
+/// its own crates ([`build_nothing`]), once a store, build of ra-jit and toolchain of
+/// `sysroot`, building in `dir`. The builds cargo starts together in a cold build wait for the
+/// first to make it, where each made it itself, a gigabyte and seconds of every core apiece.
+fn standard_library_once(sysroot: &Path, store: &Path, dir: &Path) -> Result<(), String> {
+    let mut key = keyed::Key::new("standard library of the scripts' builds");
+    key.field(ra_jit_store::build_name().unwrap_or_default().as_bytes());
+    key.field(keyed::toolchain(sysroot).as_bytes());
+    let key: String = key.done()[..8].iter().map(|it| format!("{it:02x}")).collect();
+    once(&store.join(format!("scripts-std-{key}")), || {
+        build_nothing(sysroot, dir, store, true).map(drop)
+    })
+}
+
+/// Runs `make` unless a run of it left `done`, one process at a time: the others wait for the
+/// one that runs it.
+fn once(done: &Path, make: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let at = |it: std::io::Error| format!("{}: {it}", done.display());
+    if let Some(dir) = done.parent() {
+        std::fs::create_dir_all(dir).map_err(at)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    let lock = options.create(true).truncate(false).write(true);
+    let lock = lock.open(done.with_extension("lock")).map_err(at)?;
+    lock.lock().map_err(at)?;
+    if done.exists() {
+        return Ok(());
+    }
+    make()?;
+    std::fs::write(done, "").map_err(at)
+}
+
 /// Builds a script that does nothing over the standard library of `sysroot` in `dir`, into
 /// the store `store`: what the store then has is what any build script's build takes from
 /// it before its own crates, the standard library's unit and the frozen maps of its crates.
-pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<String, String> {
+/// With `shipped` it fetches the standard library as builds do.
+pub(crate) fn build_nothing(
+    sysroot: &Path,
+    dir: &Path,
+    store: &Path,
+    shipped: bool,
+) -> Result<String, String> {
     let source = dir.join("build.rs");
     std::fs::create_dir_all(dir).map_err(|it| it.to_string())?;
     std::fs::write(&source, "fn main() {}\n").map_err(|it| it.to_string())?;
@@ -490,7 +531,7 @@ pub(crate) fn build_nothing(sysroot: &Path, dir: &Path, store: &Path) -> Result<
     let exe = dir.join("build-script-build");
     let made = Made { name: SCRIPT, proc_macro: false, dep_info: exe.with_extension("d"), exe };
     let described = description(sysroot, &[script]);
-    build(&described, dir, &made, Some(store.to_owned()), false, None)
+    build(&described, dir, &made, Some(store.to_owned()), shipped, None)
 }
 
 /// Why rustc is to compile the script when it read a variable as another than rustc would,
@@ -591,6 +632,29 @@ mod tests {
         assert_eq!(read_otherwise(&info, rustc_has(Some("1"))), Ok(()));
         assert!(read_otherwise(&info, rustc_has(Some("2"))).is_err());
         assert!(read_otherwise(&info, rustc_has(None)).is_err());
+    }
+
+    #[test]
+    fn builds_that_start_together_make_it_once() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-once-{}", std::process::id()));
+        let done = dir.join("made");
+        let made = std::sync::atomic::AtomicUsize::new(0);
+        let failed = once(&done, || Err("no".to_owned()));
+        assert_eq!(failed, Err("no".to_owned()));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    once(&done, || {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(())
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        assert_eq!(made.into_inner(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

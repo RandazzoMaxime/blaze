@@ -1041,6 +1041,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   before it answers, as the loaded checkout's is, so a patch its executable does not take is
   built in full; linked after, it failed the build (`ra_jit::static::21 is not in the
   executable`) and split the worktree off (`harness/cargo_ra_jit.py`, daemon group).
+- A spliced edit no longer runs a closure's old code (#582). A closure is named by its place
+  among the closures of its body, so after an edit that moves the call of a generic function
+  such as `caught(|| ...)` from one closure into the body, the patch called the base's
+  unchanged copy of `caught::<{closure#N}>`, and through it the base's code of the closure
+  there before: nothing the patch compiled had reached that closure's new code. A patch now
+  compiles what such an unchanged copy reaches that the edit changed, and refuses when that is
+  code which gained or lost a body of its own (`harness/fuzz/found/edits/closure-called-again.rs`;
+  `fuzz/edits.py` seed `push1`, round 27, had 7 wrong checksums and has none).
 - A whole build of other features or flags no longer leaks into the next: every worker linked
   its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
   loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
