@@ -9154,6 +9154,41 @@ pub mod byte_compares {
     }
 }
 
+/// A trait object written in a body under a lifetime left to inference, as cargo's
+/// credential error's `source` casts: `&dyn Error` is `&'_ (dyn Error + '_)`, two lifetimes
+/// inferred apart, so it coerces to `dyn Error + 'static` behind a shorter reference.
+pub mod body_object_lifetimes {
+    use std::error::Error;
+    use std::fmt;
+
+    #[derive(Debug)]
+    pub struct Chained {
+        source: Option<Box<Chained>>,
+    }
+
+    impl fmt::Display for Chained {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("chained")
+        }
+    }
+
+    impl Error for Chained {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source.as_ref().map(|err| err as &dyn Error)
+        }
+    }
+
+    pub fn annotated(e: &Chained) -> &(dyn Error + 'static) {
+        let object: &dyn Error = e;
+        object
+    }
+
+    pub fn boxed(e: Box<Chained>) -> Box<dyn Error> {
+        let object: Box<dyn Error> = e;
+        object
+    }
+}
+
 /// Statics of `&dyn` of other statics, read by value in another static's, as rustls's cipher
 /// suites are: each was evaluated with vtables of its own.
 pub mod dyn_static_suites {
