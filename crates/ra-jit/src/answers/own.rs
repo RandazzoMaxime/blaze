@@ -131,8 +131,9 @@ const LINTS: [&str; 10] = [
     "--cap-lints",
 ];
 
-/// The codegen options that change no answer.
-const IGNORED_CODEGEN: [&str; 16] = [
+/// The codegen options that change no answer. `linker-features` is how
+/// rustc links (cargo's `-Clinker-features=-lld`), not the target it prints.
+const IGNORED_CODEGEN: [&str; 17] = [
     "embed-bitcode",
     "debuginfo",
     "metadata",
@@ -142,6 +143,7 @@ const IGNORED_CODEGEN: [&str; 16] = [
     "prefer-dynamic",
     "lto",
     "linker",
+    "linker-features",
     "link-arg",
     "link-args",
     "split-debuginfo",
@@ -425,5 +427,8 @@ mod tests {
         assert!(Given::of(&["-Ctarget-feature=+avx2", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Z", "ub-checks", "--print", "cfg"]).is_none());
         assert!(Given::of(&["-Zthreads=8", "--print", "cfg"]).is_some());
+        // cargo's `-Clinker-features=-lld` is how rustc links (rust-analyzer's `cargo rustc
+        // --print cfg`, cargo's question of its targets).
+        assert!(Given::of(&["-Clinker-features=-lld", "-O", "--print", "cfg"]).is_some());
     }
 }

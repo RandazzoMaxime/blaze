@@ -4,6 +4,7 @@
 #![allow(clippy::print_stderr, reason = "a command line program: stderr is where it speaks")]
 
 mod answers;
+mod as_rustc;
 mod borrowck;
 mod cargo;
 mod check;
@@ -7312,6 +7313,11 @@ fn main() -> anyhow::Result<()> {
     }
     syntax::set_green_trees(std::env::var_os("RA_JIT_GREEN_TREES").is_some());
     project_model::answer_toolchain_questions_with(answers::ask);
+    // A build script runs ra-jit as its `RUSTC`, whose load asks what it asks
+    // rustc of [`answers`].
+    if as_rustc::is_me() {
+        as_rustc::command();
+    }
     let stands_in_for_rustc = std::env::var_os("RA_JIT_WRAPS_RUSTC").is_some();
     if let Some(replayed) = doctest::replay() {
         return replayed;

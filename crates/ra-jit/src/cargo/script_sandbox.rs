@@ -88,12 +88,59 @@ pub(crate) struct Ran {
 
 /// Where a script runs.
 pub(crate) enum Plan {
-    /// Outside, and why.
-    Outside(String),
+    /// Outside, why, and the environment it runs with ([`with_own_rustc`]).
+    Outside(String, Vec<(String, String)>),
     Sandboxed {
         spec: Spec,
         root_manifest: Option<PathBuf>,
     },
+}
+
+impl Plan {
+    /// All of the environment the script runs with.
+    pub(crate) fn env(&self) -> &[(String, String)] {
+        match self {
+            Plan::Outside(_, env) => env,
+            Plan::Sandboxed { spec, .. } => &spec.env,
+        }
+    }
+}
+
+/// The directory of a run's `scratch` that has ra-jit linked as `rustc`.
+const OWN_RUSTC: &str = "ra-jit-rustc";
+
+/// `env`, cargo's for a script, with `RUSTC` naming ra-jit as rustc ([`crate::as_rustc`]),
+/// linked in `scratch`, and the toolchain's rustc in [`crate::as_rustc::TOOLCHAIN`]: what
+/// the script asks rustc, its version, the cfgs, whether a probe compiles, is ra-jit's to
+/// answer, and no rustc runs. Cargo's wrappers are taken out, as with no `build.rustc-wrapper`
+/// configured: a script runs `$RUSTC_WRAPPER $RUSTC`, and ra-jit's wrapper would run rustc.
+/// A script cargo gave no `RUSTC` is left as it is.
+fn with_own_rustc(
+    env: &[(String, String)],
+    scratch: &Path,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let Some(rustc) = env.iter().find(|it| it.0 == "RUSTC").map(|it| it.1.clone()) else {
+        return Ok(env.to_vec());
+    };
+    let dir = scratch.join(OWN_RUSTC);
+    std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+    let link = dir.join(format!("{}{}", crate::as_rustc::NAME, std::env::consts::EXE_SUFFIX));
+    let exe = std::env::current_exe().context("finding ra-jit itself")?;
+    if std::fs::read_link(&link).ok().as_deref() != Some(&*exe) {
+        _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&exe, &link)
+            .with_context(|| format!("linking {}", link.display()))?;
+        #[cfg(windows)]
+        std::fs::hard_link(&exe, &link).with_context(|| format!("linking {}", link.display()))?;
+    }
+    let link = link.to_str().context("a directory whose name is not text")?.to_owned();
+    let dropped = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", crate::as_rustc::TOOLCHAIN];
+    let mut env: Vec<(String, String)> =
+        env.iter().filter(|it| !dropped.contains(&it.0.as_str())).cloned().collect();
+    env.push(("RUSTC".to_owned(), link));
+    env.push((crate::as_rustc::TOOLCHAIN.to_owned(), rustc));
+    Ok(env)
 }
 
 /// Whether sandboxes are on for a script run with `env`, as [`sandbox::on_with`] says. The
@@ -136,8 +183,9 @@ fn target_of(out_dir: &Path) -> Option<&Path> {
 /// sandbox's spec. `Err` is a manifest that says it wrongly.
 pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     let package = script.package();
+    let env = with_own_rustc(script.env, script.scratch)?;
     if !on_in(script.env) {
-        return Ok(Plan::Outside(format!("{}=off", sandboxed::VAR)));
+        return Ok(Plan::Outside(format!("{}=off", sandboxed::VAR), env));
     }
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         // No running it outside instead: a build that can't keep its promise stops.
@@ -153,7 +201,7 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         let out = sandboxed::workspace_opt_out(root)?;
         if out.build_scripts.contains(package) {
             let why = format!("`{package}` is in `unsandboxed-build-scripts`");
-            return Ok(Plan::Outside(format!("{why} in {}", out.manifest.display())));
+            return Ok(Plan::Outside(format!("{why} in {}", out.manifest.display()), env));
         }
         // A package of the workspace may take its script out in its own manifest; one from a
         // registry or git, which is below cargo's home, can't take itself out.
@@ -162,10 +210,9 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
             && !home.is_some_and(|it| script.cwd.starts_with(it))
             && sandboxed::opt_out(script.cwd)?.build_script_outside
         {
-            return Ok(Plan::Outside(format!(
-                "`build-script = false` in {}",
-                script.cwd.join("Cargo.toml").display()
-            )));
+            let why =
+                format!("`build-script = false` in {}", script.cwd.join("Cargo.toml").display());
+            return Ok(Plan::Outside(why, env));
         }
     }
     let mut writable = vec![script.out_dir.to_owned()];
@@ -174,10 +221,13 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     readable.extend(root.clone());
     readable.extend(target_of(script.out_dir).map(Path::to_owned));
     // The programs cargo names, and the directories of `PATH`, where a sandbox has empty
-    // directories: cargo's `RUSTC` is ra-jit's own, which may be built below `/dev/shm`.
-    let programs = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC", "CARGO"];
-    let programs = programs.into_iter().filter_map(|it| script.var(it)).filter(|it| !it.is_empty());
+    // directories: `RUSTC` is ra-jit's own, which may be built below `/dev/shm`.
+    let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| it.1.as_str());
+    let programs = ["RUSTC", "RUSTDOC", "CARGO"];
+    let programs = programs.into_iter().filter_map(var).filter(|it| !it.is_empty());
     let programs = programs.filter_map(|it| Path::new(it).parent().map(Path::to_owned));
+    let exe = std::env::current_exe().context("finding ra-jit itself")?;
+    let programs = programs.chain(exe.parent().map(Path::to_owned));
     let path = script.var("PATH").unwrap_or_default().split(':').map(PathBuf::from);
     // One reached through a link (NixOS's `/run/current-system/sw/bin`) is seen where the link
     // leads, which is not emptied.
@@ -193,7 +243,7 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     not_inputs.extend(std::fs::canonicalize(script.real).ok());
     let spec = Spec {
         cwd: script.cwd.to_owned(),
-        env: script.env.to_vec(),
+        env,
         overlays: Vec::new(),
         writable,
         readable,
@@ -242,12 +292,12 @@ fn user_cache() -> Option<PathBuf> {
 /// it and how to take it out; a sandbox that could not be made, why and how to fix it.
 pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Result<Ran> {
     let (spec, root_manifest) = match plan {
-        Plan::Outside(why) => {
+        Plan::Outside(why, env) => {
             if std::env::var_os("RA_JIT_STATS").is_some() {
                 eprintln!("ra-jit: the build script of `{}` runs outside: {why}", script.package());
             }
             let mut command = Command::new(script.real);
-            command.args(script.args).env_clear().envs(script.env.iter().map(|(k, v)| (k, v)));
+            command.args(script.args).env_clear().envs(env.iter().map(|(k, v)| (k, v)));
             command.current_dir(script.cwd).stdin(stdin);
             let output = command.output().with_context(|| running(script))?;
             return Ok(Ran { output, reads: None });

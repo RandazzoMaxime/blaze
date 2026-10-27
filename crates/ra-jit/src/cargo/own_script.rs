@@ -34,6 +34,12 @@ pub(crate) fn read_by_crates(name: &str) -> bool {
         || matches!(name, "CARGO_CRATE_NAME" | "CARGO_PRIMARY_PACKAGE" | "OUT_DIR" | "CARGO")
 }
 
+/// The cfgs rustc compiles a crate with beside the target's, given `args`: `--cfg`, and
+/// `debug_assertions` unless it optimizes or is told not to.
+pub(crate) fn cfg_of(args: &[String]) -> Vec<String> {
+    Asked { args, cwd: Path::new("/") }.cfg()
+}
+
 /// A crate of the description, as rustc was told to compile it.
 struct Described {
     name: String,
