@@ -546,8 +546,7 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
     };
     let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
     // The program's crates: a proc macro it depends on runs in the compiler, not in it.
-    let mut own: FxHashSet<ide_db::base_db::Crate> =
-        program.iter().map(|&it| it.into()).collect();
+    let mut own: FxHashSet<ide_db::base_db::Crate> = program.iter().map(|&it| it.into()).collect();
     let mut next: Vec<ide_db::base_db::Crate> = own.iter().flat_map(|&it| deps(it)).collect();
     while let Some(krate) = next.pop() {
         let data = krate.data(db);
@@ -570,7 +569,10 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
 /// `compiler_builtins` under `#![no_std]`, none under `#![no_core]`, and those it names with
 /// `extern crate`. A `#![no_std]` crate with a `#[panic_handler]` of its own does not get
 /// std's.
-fn library_linked_by(db: &RootDatabase, krate: ide_db::base_db::Crate) -> Vec<ide_db::base_db::Crate> {
+fn library_linked_by(
+    db: &RootDatabase,
+    krate: ide_db::base_db::Crate,
+) -> Vec<ide_db::base_db::Crate> {
     let def_map = hir_def::nameres::crate_def_map(db, krate);
     let injected: &[&str] = if def_map.is_no_core() {
         &[]
