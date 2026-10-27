@@ -147,8 +147,11 @@ pub(crate) enum Asked {
     Stop,
     Enable,
     Disable,
-    /// Which Rust blaze builds with, downloaded first when it has none.
-    Toolchain,
+    /// blaze's own toolchain, downloaded first when it has none; with `--path`, its directory
+    /// alone, for the installer to link.
+    Toolchain {
+        path: bool,
+    },
     Help,
     Version,
 }
@@ -218,7 +221,7 @@ impl Asked {
             ("stop", _) => Asked::Stop,
             ("enable", _) => Asked::Enable,
             ("disable", _) => Asked::Disable,
-            ("toolchain", _) => Asked::Toolchain,
+            ("toolchain", _) => Asked::Toolchain { path: rest.iter().any(|it| it == "--path") },
             _ => Asked::Own(args),
         }
     }
