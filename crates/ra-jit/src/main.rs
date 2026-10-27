@@ -11267,6 +11267,47 @@ fn main() {}
         assert!(!defined.contains("local"));
     }
 
+    /// A `macro` names the modules of where it is defined, and a module private to the one it
+    /// is in is not visible where the macro is used: std's `utf16!` writes
+    /// `crate::sys::pal::windows::api::utf16_len` for `sys::path::windows`, from where `windows`
+    /// is private. The path is looked up where the macro is defined.
+    #[test]
+    fn a_macro_names_the_private_modules_of_where_it_is_defined() {
+        use test_fixture::WithFixture;
+        let (db, file) = RootDatabase::with_single_file(
+            r#"
+#![feature(decl_macro)]
+mod outer {
+    mod private {
+        pub const fn three() -> usize { 3 }
+        pub macro size() { crate::outer::private::three() }
+    }
+    pub use self::private::size;
+}
+mod user {
+    pub const N: usize = crate::outer::size!();
+}
+"#,
+        );
+        hir::attach_db(&db, || {
+            let sema = hir::Semantics::new(&db);
+            let root = sema.file_to_module_defs(file.file_id(&db)).next().unwrap();
+            let user =
+                root.children(&db).find(|it| it.name(&db).is_some_and(|it| it.as_str() == "user"));
+            let hir::ModuleDef::Const(n) = user
+                .unwrap()
+                .declarations(&db)
+                .into_iter()
+                .find(|it| matches!(it, hir::ModuleDef::Const(_)))
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            let value = n.eval(&db).expect("the constant is evaluated");
+            assert_eq!(value.render_debug(&db).unwrap(), "3");
+        });
+    }
+
     #[test]
     fn a_link_command_of_lto_has_no_core() {
         let ordinary = r#"cc "/t/deps/app-1.app.0.rcgu.o" "/sysroot/lib/libcore-667b96598095cbda.rlib" -o /t/app"#;
