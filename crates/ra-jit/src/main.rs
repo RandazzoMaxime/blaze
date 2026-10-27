@@ -863,7 +863,16 @@ impl Resolver<'_> {
         if self.rustc_built(krate) && self.shares_path(func) {
             return None;
         }
-        let path = self.path(func)?;
+        let extern_block =
+            matches!(func.lookup(self.db).container, ItemContainerId::ExternBlockId(_));
+        let Some(path) = self.path(func) else {
+            // No path to look up in what rustc built, but one of a crate rustc built nothing of
+            // is ours to name all the same, by where it is written.
+            if extern_block || self.rustc_built(krate) {
+                return None;
+            }
+            return self.own_function_name(func);
+        };
         // A test is the second of its name where it is written: rustc puts the constant
         // that describes it to the harness before it, under the same name.
         let function = hir::Function::from(func);
@@ -881,7 +890,7 @@ impl Resolver<'_> {
             return Some(symbol.to_owned());
         } // rustc has built nothing of the crate: the function is ours to name, unless it is
         // declared in an `extern` block, where what it links to names it.
-        if matches!(func.lookup(self.db).container, ItemContainerId::ExternBlockId(_)) {
+        if extern_block {
             return None;
         }
         if self.rustc_built(krate) {
@@ -908,11 +917,7 @@ impl Resolver<'_> {
             // written say which function it is just as well.
             let name = hir::Function::from(func).name(self.db);
             let place = hir_ty_codegen::function_place(self.db, self, func)?;
-            return Some(format!(
-                "ra-jit.{id:x}.{}.{:x}",
-                name.as_str(),
-                short_hash(&place)
-            ));
+            return Some(format!("ra-jit.{id:x}.{}.{:x}", name.as_str(), short_hash(&place)));
         };
         if hir_def::HasModule::module(&func, self.db).block(self.db).is_none() {
             return Some(format!("ra-jit.{id:x}.{path}"));
