@@ -21,7 +21,7 @@ use super::{
     cli,
     daemon::{self, NotBuilt},
     own_macro, own_script, say, script,
-    state::{State, place},
+    state::{State, place_copy},
     switch::Enabled,
     units::{Copied, Record, stamp_now},
     wasi_script,
@@ -452,32 +452,37 @@ impl Unit {
             Err(why) => return Err(why.why()),
         }
         let binary = &checkout.programs[at].binary;
-        self.put(binary, read)?;
-        state.cargo_has(dir, binary).map_err(|it| format!("keeping {}: {it}", binary.display()))?;
+        let linked = self.put(binary, read)?;
+        state
+            .cargo_has(dir, &linked)
+            .map_err(|it| format!("keeping {}: {it}", linked.display()))?;
         // Every other build with the program kept the one cargo had before.
         State::forget(known.iter().filter(|it| **it != state.key));
         Ok(())
     }
 
-    /// Puts `binary`, the daemon's build of the program, where rustc would have linked it,
-    /// with the dep-info rustc wrote of it (`read`, rustc run by [`Self::dep_info`]).
+    /// Puts a copy of `binary`, the daemon's build of the program, where rustc would have
+    /// linked it, with the dep-info rustc wrote of it (`read`, rustc run by
+    /// [`Self::dep_info`]). The result is that place.
     fn put(
         &self,
         binary: &Path,
         read: Result<std::io::Result<Output>, String>,
-    ) -> Result<(), String> {
+    ) -> Result<PathBuf, String> {
         let read = read?.map_err(|it| format!("rustc did not run: {it}"))?;
         if !read.status.success() {
             let _ = std::io::stderr().write_all(&read.stderr);
             std::process::exit(super::FAILED);
         }
-        // Cargo starts the program with no word to the daemon, which may still be writing it.
+        // The copy is taken once the daemon is through writing it, and none of its later
+        // writes, for the next build or a load, reach the one cargo starts.
         let _unwritten = crate::splice::unwritten(binary);
         let record = self.as_record(0, Vec::new(), None);
         let linked = record.outputs().into_iter().next().ok_or("rustc names no executable")?;
-        place(binary, &linked).map_err(|it| format!("installing {}: {it}", linked.display()))?;
+        place_copy(binary, &linked)
+            .map_err(|it| format!("installing {}: {it}", linked.display()))?;
         let _ = std::io::stderr().write_all(&read.stderr);
-        Ok(())
+        Ok(linked)
     }
 
     /// Has ra-jit compile and link the build script, where rustc would have put it, and
