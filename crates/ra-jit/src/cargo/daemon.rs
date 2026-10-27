@@ -374,12 +374,16 @@ impl Checkout {
             true => (String::new(), plan.binary.display().to_string()),
             false => (plan.binary.display().to_string(), String::new()),
         };
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let (shared, patch) = match plan.shared {
+            true => ("shared", String::new()),
+            false => ("", plan.patch.display().to_string()),
+        };
         let mut line = format!(
-            "sync\t{}\t{}\t{}\t{}\t{}\t{splice}\t{exe}",
+            "sync\t{}\t{}\t{}\t{patch}\t{}\t{splice}\t{exe}\t{shared}",
             self.project().display(),
             crates,
             plan.object.display(),
-            plan.patch.display(),
             plan.link_cmd,
         );
         for file in &plan.symbol_files {
@@ -481,9 +485,14 @@ impl Worker {
             ("--socket", &socket),
         ];
         let named: &[(&str, &Path)] = if first.whole { &whole } else { &rustcs };
-        for &(flag, path) in named {
+        // A shared library is linked again for each build, not patched: see [`Plan::shared`].
+        let patched = |flag: &str| !(first.shared && flag == "--patch");
+        for &(flag, path) in named.iter().filter(|(flag, _)| patched(flag)) {
             args.push(flag.into());
             args.push(path.into());
+        }
+        if first.shared {
+            args.push("--shared".into());
         }
         if let Some(rustcs) = &first.rustc_binary {
             args.push("--rustc-binary".into());

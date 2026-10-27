@@ -10,6 +10,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `cargo blaze build` links a library's `cdylib` (#262): a package whose crate types include
+  `cdylib`, such as a napi-rs Node addon or a pyo3 extension, gets its shared library at
+  cargo's path (`target/debug/lib<name>.so`, `.dylib` on macOS), exporting its
+  `#[no_mangle]` and `#[export_name]` functions and statics, with `cargo:rustc-cdylib-link-arg`
+  honoured. Before, the build printed `Finished` and wrote no library. A build that would write
+  a `staticlib` stops with an error saying blaze does not link one yet. Reported by @bompus.
+
 - blaze is its own toolchain, named `blaze-<date>` (`blaze-2026-10-25`, today the Rust nightly
   of that date): `blaze toolchain` names it and `blaze toolchain --path` prints its directory,
   and a project that pins another toolchain is told so once, as a note, while blaze builds
