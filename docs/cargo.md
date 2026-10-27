@@ -564,7 +564,17 @@ all, and says whether each kept as passed passed again:
     Verified the passes kept: 245 of 245 tests passed again
 
 One that failed is flaky or its key misses something it is a function of, which is a bug in
-blaze; it is named, marked flaky, and the command fails. The release train runs it.
+blaze; it is named, marked flaky, and the command fails. It is for the release train, which
+does not run it yet.
+
+On a CI runner's shape (a fresh target directory and daemon, with the store main's run filled),
+every test that passed on main is skipped. After a one-function edit, only the tests that reach
+the function run: just ran 344 of its 515 passing tests and took 171 from main, nushell 42 of 67,
+cargo none of 8, and `verify` found every pass kept to pass again on seven projects. On these
+projects it is not yet faster than running every test: the daemon's walk for each test's hash
+on a fresh daemon (8.5 s and 3.6 s for axum's two test programs) costs more than the short tests
+it skips (axum 20.6 s against 13.1 s for every test, nushell 21.3 s against 17.2 s;
+[the numbers](../bench/results/2026-10-27-testcache/README.md)).
 
 `-v`, `-q` and `--color` only change what cargo prints, and are the same build to the daemon.
 
