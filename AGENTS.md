@@ -30,6 +30,16 @@ How to build, test and change ra-jit, including the vendored rust-analyzer, is
   since 2026-10-26). One that needs
   more than the sandbox allows is the only exception, and is made to work rather than refused
   where possible: [docs/no-rustc.md](docs/no-rustc.md).
+- **blaze is its own toolchain: one nightly that blaze controls.** "You should use your own
+  nightly that you control since you are trying to replace rustc" (Andrew, 2026-10-26). blaze
+  builds every project with its own pinned nightly (`harness/toolchain`), named and versioned as
+  blaze's, whatever the project pins. It does not follow the project's toolchain, does not
+  support stable or several rustc versions, and never pins stable. The nightly moves only when
+  blaze moves it, deliberately, with the corpus difftest as the gate. We are moving off rustc
+  entirely ("no rustc", Andrew): the nightly is the language and std definition blaze matches
+  while rustc is still in the tree, not a dependency to track, and every rustc use left is
+  removed on the way to none ([docs/no-rustc.md](docs/no-rustc.md)). Users keep their own
+  toolchain and CI as the final word; blaze says so rather than switching toolchains.
 - **Every test, build script and proc macro runs in a sandbox, by default, on every
   platform.** "Everything should by default be in sandbox and yea it should have sandbox
   support macos" (Andrew, 2026-10-26). `cargo ra-jit test` runs each test executable in one
