@@ -359,7 +359,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it does not (E0491) gets only that error, which ra-jit does not report yet. The type a
   returned `impl Trait` hides must be well-formed and outlive what its bounds say, given what
   the function knows (rustc's `check_opaque_meets_bounds`): `-> impl Sized + 'static` hiding
-  a `T` is E0310 at the `impl Trait`. Its trait and associated type bounds hold of the type
+  a `T` is E0310 at the `impl Trait`. In its defining body the type it hides is also
+  well-formed at the signature, as rustc's implied bounds normalize the returned `impl Trait`
+  to it there and prove what that asks: `-> (Box<dyn Any>, impl Sized)` hiding
+  `Outlives<'static, <T as Trait>::Assoc>` needs `<T as Trait>::Assoc: 'static` (E0310 at
+  the function), the type around it (`&'t impl Trait`) still assumed. Its trait and
+  associated type bounds hold of the type
   it hides where the body returns it, as rustc proves them there: `impl Iterator<Item =
   Box<dyn Foo>>` hiding `Iter<'a, T>` needs the where clauses of that `Iterator` impl with
   `'a` `'static`. A closure or coroutine outlives as its captures do, and

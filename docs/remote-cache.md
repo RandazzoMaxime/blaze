@@ -1,6 +1,11 @@
 # A shared remote cache: one store for CI and everyone
 
-2026-10-27. Status: design, nothing built. Written against blaze main `e4bbb88` and
+2026-10-27. Status: slice 1's gateway is built and deployed (`worker/remote-cache`, API-v0.md,
+measured in `bench/remote-cache/gateway-v0.tsv`); the client and everything after slice 1 are
+design. The Worker is TypeScript rather than workers-rs: its tests run on real R2 and KV bindings
+in workerd, and a Rust part would need rustc to build its wasm while blaze cannot build `wasm32`
+(blaze-builds-blaze). The sans-IO `blaze-gateway-core` below stays the plan for the native server
+and for the Worker once blaze builds wasm. Written against blaze main `e4bbb88` and
 `blaze-next` `5c5299f` ([#283](https://github.com/indexable-inc/blaze/pull/283)). Each claim is
 marked **read** (in a source we read, or measured by us), **reported** (a document or someone
 says so, not checked again here) or **unverified** (our inference or an estimate). "Slice R2"
