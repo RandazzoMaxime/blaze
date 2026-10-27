@@ -1,8 +1,7 @@
 name: llvm
 
-# Builds the LLVM the `llvm` feature links (crates/hir-ty-codegen/llvm.json: blaze's fork of
-# LLVM at the commit wasm-host's ix-aot builds) on each runner a release of blaze is built on,
-# with .github/scripts/llvm.py, and puts the archives on the release llvm.json names, each under
+# Builds the LLVM the `llvm` feature links (crates/hir-ty-codegen/llvm.json: LLVM 23.1.4) on
+# each runner a release of blaze is built on, and Windows, with .github/scripts/llvm.py, and puts the archives on the release llvm.json names, each under
 # a name that carries its sha256. The run's summary has the `targets` to write into llvm.json
 # (`llvm.py pin`), which the flake, CI and the release then fetch by that hash.
 #
@@ -43,10 +42,9 @@ jobs:
       - run: python -m pip install ninja==1.13.0
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
-      # The fork is private: the bot's token reads it.
+      # LLVM's own source needs no token. A private one (blaze's fork, indexable-inc/llvm) would
+      # need GITHUB_TOKEN set to a token that can read it: no secret of this repository can today.
       - run: python .github/scripts/llvm.py build --target ${{ matrix.target }} --work "${{ runner.temp }}/llvm" --out "${{ runner.temp }}/out"
-        env:
-          GITHUB_TOKEN: ${{ secrets.RA_JIT_BOT_TOKEN }}
       - uses: actions/upload-artifact@v7
         with:
           name: llvm-${{ matrix.target }}

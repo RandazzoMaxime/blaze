@@ -1,6 +1,6 @@
 //! The `llvm` feature links the one LLVM blaze pins (`llvm.json` beside this script: LLVM
-//! 23 from blaze's fork, built by .github/scripts/llvm.py and fetched by its sha256) and no
-//! other, statically: a binary built with the feature needs no libLLVM where it runs.
+//! 23.1.4, built by .github/scripts/llvm.py and fetched by its sha256) and no other,
+//! statically: a binary built with the feature needs no libLLVM where it runs.
 //!
 //! `LLVM_SYS_231_PREFIX` names the prefix. Its `blaze-llvm.json`, written by the build, must name
 //! the pinned commit and version, and its `llvm-config` must say that version: neither a

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The one LLVM blaze's `llvm` feature links: built here from blaze's fork, fetched everywhere else.
+"""The one LLVM blaze's `llvm` feature links: built here, fetched everywhere else.
 
-crates/hir-ty-codegen/llvm.json pins it: the fork (indexable-inc/llvm, branch ix/23.x, the
-same commit wasm-host's ix-aot builds: LLVM 23.1.4 and our fixes), the release of this repository
-whose assets are the builds, and per target the asset's name and sha256.
+crates/hir-ty-codegen/llvm.json pins it: the source (a repository, a ref and its commit; today
+LLVM's own llvmorg-23.1.4, the base of the fork wasm-host's ix-aot builds), the release of this
+repository whose assets are the builds, and per target the asset's name and sha256.
 
   llvm.py build --target T --work DIR --out DIR   # build the pinned commit, archive it into --out
                                                     # (named by its sha256, beside a T.json)
@@ -17,11 +17,12 @@ libraries of the X86 and AArch64 targets, the headers, `llvm-config`, `llvm-dwar
 zlib, zstd, libxml2 or terminfo, so neither it nor a binary that links it asks the system for
 more than libc. On Linux it is built on the oldest hosted Ubuntu (22.04) like the release, on
 macOS for macOS 13 like the release, and on Windows against the static C runtime like ra-jit's
-Windows build. The prefix gets `blaze-llvm.json` (version, fork, commit, target), which
+Windows build. The prefix gets `blaze-llvm.json` (version, repository, commit, target), which
 crates/hir-ty-codegen/build.rs reads to refuse any other LLVM.
 
-The fork is private: `build` fetches it with `GITHUB_TOKEN` (sent as a header through the
-environment, never on a command line). What it builds is public, as the release's assets.
+A private source (blaze's fork, indexable-inc/llvm) is fetched with `GITHUB_TOKEN`, sent as a
+header through the environment, never on a command line. What it builds is public, as the
+release's assets.
 
 Every step is bounded; a failure names the step, the command, its exit code and its output's
 tail. Stdlib only; `build` needs Python 3.11+, `fetch` and `pin` 3.10.
@@ -94,7 +95,7 @@ async def run(step, *cmd, cwd=None, env=None, limit=3600.0):
 
 
 async def checkout(p, work):
-    """The pinned commit of the fork in `work/src`, fetched alone (depth 1)."""
+    """The pinned commit in `work/src`, fetched alone (depth 1)."""
     src = work / "src"
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     token = os.environ.get("GITHUB_TOKEN")
@@ -181,7 +182,7 @@ async def build(args):
     if said != p["version"]:
         sys.exit(f"error: llvm.py: the build says LLVM {said}, llvm.json pins {p['version']}")
     (prefix / MARKER).write_text(json.dumps(
-        {"version": p["version"], "repo": p["repo"], "branch": p["branch"], "commit": p["commit"],
+        {"version": p["version"], "repo": p["repo"], "ref": p["ref"], "commit": p["commit"],
          "target": args.target}, indent=2) + "\n")
     stem = archive_stem(p, args.target)
     packed = out / f"{stem}.tar.xz"
