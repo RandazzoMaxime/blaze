@@ -258,7 +258,12 @@ impl Backend {
             llvm::Unhandled,
             store::Store,
         };
-        let named: Vec<_> = recorder.named_slots().collect();
+        let mut named: Vec<_> = recorder.named_slots().collect();
+        let shared = recorder
+            .frame_locals
+            .as_ref()
+            .map(|frame| super::overlap::share_escaping(func, frame, &mut named));
+        let func = shared.as_ref().unwrap_or(func);
         let imports = match super::imports::enabled() {
             true => super::imports::chosen(recorder),
             false => Vec::new(),

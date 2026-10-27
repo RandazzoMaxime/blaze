@@ -163,7 +163,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
         return Ok(());
     }
     let start = Instant::now();
-    let built = own_script::build_nothing(sysroot, &dir.join("build"), &store);
+    let built = own_script::build_nothing(sysroot, &dir.join("build"), &store, false);
     let said = built.map_err(|e| anyhow::anyhow!("{e} (the log is in {})", dir.display()))?;
     let unit = said.lines().find(|it| it.starts_with("standard library:")).unwrap_or_default();
     eprintln!("{unit}; built in {:.1?}", start.elapsed());

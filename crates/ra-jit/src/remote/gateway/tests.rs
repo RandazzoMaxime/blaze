@@ -206,9 +206,12 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
     let Some(kind) = kind(&name) else { return not_found() };
     let key = (tenant.clone(), name.clone());
     let sent_sha = header("x-blaze-sha256").map(str::to_owned);
-    let hash_holds = |kind: &Kind, bytes: &[u8]| match kind {
-        Kind::Hashed(hash) => sha(bytes) == *hash,
-        Kind::Packed => sent_sha.as_deref() == Some(sha(bytes).as_str()),
+    // Each body is hashed once, under the lock every request takes: a part and a whole pack
+    // are tens of MiB, and hashing one again for each check made the completion of an upload
+    // outlast the client's deadline in a build without optimized SHA-256.
+    let hash_holds = |kind: &Kind, sha: &str| match kind {
+        Kind::Hashed(hash) => sha == hash,
+        Kind::Packed => sent_sha.as_deref() == Some(sha),
         Kind::List => true,
     };
     match (method.as_str(), query.get("upload"), query.contains_key("uploads")) {
@@ -259,10 +262,11 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
                 whole.extend_from_slice(bytes);
             }
             let said = asked["sha256"].as_str().unwrap_or_default();
-            if said != sha(&whole) || !hash_holds(&kind, &whole) {
+            let whole_sha = sha(&whole);
+            if said != whole_sha || !hash_holds(&kind, &whole_sha) {
                 return plain(StatusCode::UNPROCESSABLE_ENTITY, "hash mismatch");
             }
-            let etag = format!("\"{}\"", sha(&whole));
+            let etag = format!("\"{whole_sha}\"");
             let key = (upload.tenant, upload.name);
             state.objects.insert(key, Stored { bytes: whole, etag: etag.clone() });
             etagged(&etag)
@@ -276,7 +280,8 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
             if body.len() as u64 > PUT_MAX {
                 return plain(StatusCode::PAYLOAD_TOO_LARGE, "too large");
             }
-            if !hash_holds(&kind, &body) {
+            let body_sha = sha(&body);
+            if !hash_holds(&kind, &body_sha) {
                 return plain(StatusCode::UNPROCESSABLE_ENTITY, "hash mismatch");
             }
             let now = state.objects.get(&key).map(|it| it.etag.clone());
@@ -288,7 +293,7 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
             if !holds {
                 return plain(StatusCode::PRECONDITION_FAILED, "precondition failed");
             }
-            let etag = format!("\"{}\"", sha(&body));
+            let etag = format!("\"{body_sha}\"");
             state.objects.insert(key, Stored { bytes: body.to_vec(), etag: etag.clone() });
             etagged(&etag)
         }

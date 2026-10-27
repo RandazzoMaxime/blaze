@@ -10,6 +10,17 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- `blaze lock --fetches [--target <triple>]...` pins what build scripts download, as Nix pins a
+  fixed-output derivation: each download by its sha256 in `Cargo.fetches.lock` beside
+  `Cargo.lock`, kept by the package's name, version and `Cargo.lock` checksum, the bytes in
+  blaze's store (so a remote cache carries them). A build, which has no network, hands each to
+  its build script through the crate's own variable (`RUSTY_V8_ARCHIVE` for `v8`,
+  `ORT_CACHE_DIR` for `ort-sys`, `LK_CUSTOM_WEBRTC` for `webrtc-sys`;
+  `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` for `helix-term`, which then downloads nothing), and a
+  missing or stale entry fails naming the command. A script refused the network that blaze has
+  no override for is told which variable an override would set
+  (`bench/results/2026-10-27-bscache/fetches.md`).
+
 - `cargo blaze build` links a library's `cdylib` (#262): a package whose crate types include
   `cdylib`, such as a napi-rs Node addon or a pyo3 extension, gets its shared library at
   cargo's path (`target/debug/lib<name>.so`, `.dylib` on macOS), exporting its
@@ -711,7 +722,6 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   them from there (#90). `RA_JIT_PROC_MACRO_SERVER=0` goes back to rustc's libraries and the
   toolchain's server. `macroserver.py all` builds each app again over the first store: no
   library linked again, the same 3,465 calls.
-||||||| 0858e8535d
 - The first `cargo blaze build` of a workspace is blaze's, not cargo's: once cargo's build
   succeeds it waits for the daemon to load the workspace ("Waiting for blaze to load the
   workspace") and build the programs, where it handed back cargo's and the next build was the
@@ -1021,11 +1031,41 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- A daemon that patches what rustc linked no longer stops at the first build that reaches a
+  thread-local, or a static written at run time, of a crate edited before any build reached
+  it (``static `__RUST_STD_INTERNAL_VAL` of crate `smid` with state, whose first value is not
+  the one rustc built it with``, `harness/programs.py` on every platform since #527). The first
+  values of a crate's statics with state are noted just before the first edit reaches it, so
+  rustc's copy is still known to start from them, and a change to a file an `include_str!` or
+  `include_bytes!` reads leaves the first values of crates that do not include it known (it
+  had made `alloc`'s `STATIC_INNER_SLICE` unknown after a checkout switch,
+  `worktrees.py --join --together` on macOS).
+- A build that code generation refuses (a static whose first value is not known to be rustc's,
+  a function rustc's copy of is from before the edit) is that build's refusal, with the reason,
+  not the daemon's end: every checkout's daemon had died with it
+  (`worktrees.py --join --together`, "another edited while it is broken"). Nothing is built in
+  its place, and the next build of that program is a whole one.
+- A spliced edit no longer runs a closure's old code (#582). A closure is named by its place
+  among the closures of its body, so after an edit that moves the call of a generic function
+  such as `caught(|| ...)` from one closure into the body, the patch called the base's
+  unchanged copy of `caught::<{closure#N}>`, and through it the base's code of the closure
+  there before: nothing the patch compiled had reached that closure's new code. A patch now
+  compiles what such an unchanged copy reaches that the edit changed, and refuses when that is
+  code which gained or lost a body of its own (`harness/fuzz/found/edits/closure-called-again.rs`;
+  `fuzz/edits.py` seed `push1`, round 27, had 7 wrong checksums and has none).
 - A whole build of other features or flags no longer leaks into the next: every worker linked
   its programs into one `target/ra-jit/whole/<name>`, so after `cargo blaze run --features
   loud` a plain `cargo blaze run`, whose worker had nothing edited to build again, installed
   the loud program (`HELLO WORLD`). Each worker now links in a directory of its own, named by
   what it is loaded with (`harness/cargo_ra_jit.py`, flags group).
+- Three programs that ran differently from rustc now run the same (#73): a diverging type
+  variable falls back to `!` in every edition, as rustc at the pinned nightly does, not to `()`
+  before 2024; `if let` in a closure captures only the places its pattern moves, as `let` and
+  `match` do, not its whole scrutinee; and a value assigned through `*(&mut x)` after a `match`
+  that ruled `x` out is dropped, since a place borrowed `&mut` may hold a value from then on
+  (rust-lang/rust#90752). `tests/ui` `editions/never-type-fallback.rs`,
+  `closures/2229_closure_analysis/run_pass/if-let-capture.rs` and `drop/issue-90752.rs` are
+  pinned.
 - `cargo blaze test --doc` runs an edited library's examples again: it took an example's
   program from the run before while the example's own text was unchanged, since blaze's run
   names no library with `--extern` for the key to stamp, so after an edit that broke them the

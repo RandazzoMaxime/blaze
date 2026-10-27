@@ -28,9 +28,10 @@
 //! A sandboxed run is given only the part of cargo's environment that is the build's
 //! ([`given`]): cargo's own variables for scripts, the toolchain's and ra-jit's, the C
 //! compiler's and pkg-config's, what tests are given, and what the workspace's root manifest
-//! names in `build-script-env`. What it is given is all of what the store keeps its run
-//! under (`script.rs`). A script that says it reads a variable cargo had that it was not
-//! given (`rerun-if-env-changed`) fails, naming it ([`not_given`]).
+//! names in `build-script-env`, and the variables cargo has that the script says it reads
+//! (`rerun-if-env-changed`), as cargo gives them: a run that said it reads one it was not
+//! given ([`not_given`]) saw it unset, and runs again given it ([`Script::declared`]). What
+//! it is given is all of what the store keeps its run under (`script.rs`).
 //!
 //! What a sandboxed run read is recorded ([`Spec::record_reads`]), and kept beside `OUT_DIR`
 //! ([`READS`]) and with the run in the store (`script.rs`'s `Kept`). The rule that uses it,
@@ -74,6 +75,9 @@ pub(crate) struct Script<'a> {
     pub(crate) out_dir: &'a Path,
     /// A directory of the caller's for the sandbox's spec and record: written here, outside.
     pub(crate) scratch: &'a Path,
+    /// The variables of `env` a run of it said it reads (`rerun-if-env-changed`), given to it
+    /// in the sandbox whatever [`given`] says.
+    pub(crate) declared: &'a [String],
 }
 
 impl Script<'_> {
@@ -251,6 +255,9 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     readable.extend(programs.chain(path).filter(|it| {
         it.is_dir() && emptied(it) && std::fs::canonicalize(it).is_ok_and(|real| emptied(&real))
     }));
+    // What it would download, handed to it locked, as `cargo/fetches.rs` says.
+    let handed = super::fetches::hand(&env, script.out_dir, root.as_deref(), &also)?;
+    readable.extend(handed.readable.iter().cloned());
     readable.sort();
     readable.dedup();
     // The innermost is enough: a directory is seen with what is below it.
@@ -277,9 +284,13 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
             env.retain(|it| it.0 != crate::as_rustc::TOOLCHAIN);
             env.push((crate::as_rustc::TOOLCHAIN.to_owned(), rustc));
         }
-        let env = hermetic::env_in(&env, &also, &closure);
+        let mut also = also;
+        also.extend(script.declared.iter().cloned());
+        let mut env = hermetic::env_in(&env, &also, &closure);
+        env.extend(handed.env);
         let deps = hermetic::dep_out_dirs(&env);
         let mut read = deps.clone();
+        read.extend(handed.readable);
         read.extend(script.real.parent().map(Path::to_owned));
         read.push(script.scratch.join(OWN_RUSTC));
         read.extend(std::fs::canonicalize(&exe).ok().and_then(|it| Some(it.parent()?.to_owned())));
@@ -303,7 +314,12 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         let in_view = Some(hermetic::InView { closure, hidden, deps });
         return Ok(Plan::Sandboxed { spec, root_manifest, link_dirs, in_view });
     }
-    let env = env.into_iter().filter(|(name, _)| given(name) || also.contains(name)).collect();
+    let declared = |name: &String| script.declared.contains(name);
+    let mut env: Vec<(String, String)> = env
+        .into_iter()
+        .filter(|(name, _)| given(name) || also.contains(name) || declared(name))
+        .collect();
+    env.extend(handed.env);
     let spec = Spec {
         cwd: script.cwd.to_owned(),
         env,
@@ -408,9 +424,10 @@ pub(crate) fn given(name: &str) -> bool {
 }
 
 /// The variables a run that printed `stdout` said it reads (`rerun-if-env-changed`) which
-/// cargo had in `env` but the run in the sandbox was not given (`plan`): it saw them unset.
-/// A run in its closure is given the closure's C toolchain and pkg-config in place of the
-/// machine's, so those of [`given`] it was not given are not missing.
+/// cargo had in `env` but the run in the sandbox was not given (`plan`): it saw them unset,
+/// and a run given them ([`Script::declared`]) is the one that stands for cargo's. A run in
+/// its closure is given the closure's C toolchain and pkg-config in place of the machine's,
+/// so those of [`given`] it was not given are not missing.
 pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) -> Vec<String> {
     let Plan::Sandboxed { spec, in_view, .. } = plan else { return Vec::new() };
     let had = |name: &str, env: &[(String, String)]| env.iter().any(|it| it.0 == name);
@@ -427,27 +444,6 @@ pub(crate) fn not_given(stdout: &[u8], env: &[(String, String)], plan: &Plan) ->
     names.sort();
     names.dedup();
     names
-}
-
-/// What a script that said it reads `names` and was not given them is told, `root_manifest`
-/// being where to give them.
-pub(crate) fn not_given_error(
-    package: &str,
-    names: &[String],
-    root_manifest: Option<&Path>,
-) -> String {
-    let listed: Vec<String> = names.iter().map(|it| format!("{it:?}")).collect();
-    let root = root_manifest
-        .map_or("the workspace's root manifest".to_owned(), |it| it.display().to_string());
-    format!(
-        "the build script of `{package}` reads {}, set where cargo ran, which a build script in \
-         the sandbox is not given: what it prints and writes would be of {} unset; give it with \
-         `build-script-env = [{}]` under `{}` in {root}, and its value keys the kept run",
-        names.iter().map(|it| format!("`{it}`")).collect::<Vec<_>>().join(", "),
-        if names.len() == 1 { "it" } else { "them" },
-        listed.join(", "),
-        sandboxed::WORKSPACE_TABLE,
-    )
 }
 
 /// Whether `dir` is below a directory a sandbox starts empty: what is there is not seen unless
@@ -531,6 +527,11 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
         && let Some(note) = refused_note(lines, package, root_manifest.as_deref())
     {
         output.stderr.extend(format!("note: {note}\n").into_bytes());
+        let fetches =
+            super::fetches::no_override_note(package, lines, &output.stdout, &output.stderr);
+        if let Some(note) = fetches {
+            output.stderr.extend(format!("note: {note}\n").into_bytes());
+        }
     } else if !output.status.success()
         && let Some(in_view) = in_view
     {
@@ -596,7 +597,8 @@ fn inputs(lines: &[Line], script: &Script<'_>, spec: &Spec) -> Vec<String> {
     };
     let mut paths: Vec<String> = lines
         .iter()
-        .filter(|it| it.reached == Reached::Read && input(Path::new(&it.what)))
+        .filter(|it| matches!(it.reached, Reached::Read | Reached::Looked))
+        .filter(|it| input(Path::new(&it.what)))
         .map(|it| it.what.clone())
         .collect();
     paths.sort();
@@ -721,6 +723,7 @@ mod tests {
             env: &[],
             out_dir,
             scratch: Path::new("/dev/shm/ws/target/debug/build/pkg-1"),
+            declared: &[],
         };
         let spec = Spec {
             writable: vec![out_dir.to_owned()],
@@ -753,8 +756,35 @@ mod tests {
         let stdout = b"cargo:rerun-if-env-changed=CC\ncargo::rerun-if-env-changed=OPENSSL_DIR\n\
             cargo:rerun-if-env-changed=OPENSSL_DIR\ncargo:rerun-if-env-changed=UNSET\n";
         assert_eq!(not_given(stdout, &outside, &plan), ["OPENSSL_DIR"]);
-        let error = not_given_error("openssl-sys", &["OPENSSL_DIR".into()], None);
-        assert!(error.contains("`openssl-sys`") && error.contains("[\"OPENSSL_DIR\"]"), "{error}");
+    }
+
+    #[test]
+    fn a_declared_variable_is_given_and_nothing_else_of_the_shell() {
+        let dir = std::env::temp_dir().join(format!("ra-jit-declared-{}", std::process::id()));
+        let out_dir = dir.join("target/debug/build/pkg-1/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let pair = |name: &str| (name.to_owned(), "x".to_owned());
+        let env = [pair("CARGO_PKG_NAME"), pair("BM_LEVEL"), pair("SECRET")];
+        let declared = ["BM_LEVEL".to_owned()];
+        let script = Script {
+            real: Path::new("/nonexistent/build_script_build"),
+            args: &[],
+            cwd: &dir,
+            env: &env,
+            out_dir: &out_dir,
+            scratch: out_dir.parent().unwrap(),
+            declared: &declared,
+        };
+        let names = |plan: &Plan| plan.env().iter().map(|it| it.0.clone()).collect::<Vec<_>>();
+        let stdout = b"cargo:rerun-if-env-changed=BM_LEVEL\n";
+        let given = plan(&script).unwrap();
+        assert!(matches!(given, Plan::Sandboxed { .. }));
+        assert_eq!(names(&given), ["CARGO_PKG_NAME", "BM_LEVEL"]);
+        assert!(not_given(stdout, &env, &given).is_empty());
+        let unset = plan(&Script { declared: &[], ..script }).unwrap();
+        assert_eq!(names(&unset), ["CARGO_PKG_NAME"]);
+        assert_eq!(not_given(stdout, &env, &unset), ["BM_LEVEL"]);
+        _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

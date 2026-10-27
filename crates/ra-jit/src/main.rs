@@ -3354,11 +3354,13 @@ fn workspace_at(
             (kind, _) => {
                 // ra-jit's own target directory is one per mode of its proc macros
                 // (`own_macro::own_dir`): with them, cargo is given empty files for the
-                // libraries, which rustc would read when they are turned off.
+                // libraries, which rustc would read when they are turned off. blaze's own
+                // build of them (`cargo/compile_time.rs`) reads nothing of cargo's.
                 let own_config;
                 let mut config = cargo_config;
                 if let ProjectWorkspaceKind::Cargo { cargo, .. } = kind
                     && cargo_config.target_dir_config == TargetDirectoryConfig::UseSubdirectory
+                    && cargo_config.own_build_scripts.is_none()
                 {
                     let target = cargo.target_directory();
                     let own = target.join(cargo::own_macro::own_dir());
@@ -4186,6 +4188,41 @@ fn start_from_rustc(
         files.extend(WatchedFile::new(Watched::Included(path), source, source));
     }
     Ok(())
+}
+
+/// Has each program that links with rustc's code note the first values of the statics with
+/// state of the crates `files` are of, which are about to change, and of those that depend on
+/// them (`Rejections::take_first_values`).
+fn take_first_values(db: &RootDatabase, programs: &mut [Program], files: &[vfs::FileId]) {
+    let crates: Vec<_> = files
+        .iter()
+        .flat_map(|&file| ide_db::base_db::relevant_crates(db, file).iter().copied())
+        .collect();
+    take_first_values_of(db, programs, &crates);
+}
+
+fn take_first_values_of(
+    db: &RootDatabase,
+    programs: &mut [Program],
+    crates: &[ide_db::base_db::Crate],
+) {
+    if crates.is_empty() {
+        return;
+    }
+    hir::attach_db(db, || {
+        for program in programs.iter_mut().filter(|it| !it.table.is_empty()) {
+            program.known.take_first_values(db, crates);
+        }
+    });
+}
+
+/// The crates that include one of `paths` with `include!`, `include_str!` or `include_bytes!`.
+fn includers(db: &RootDatabase, paths: &[AbsPathBuf]) -> Vec<ide_db::base_db::Crate> {
+    let all = ide_db::base_db::all_crates(db);
+    let includes = |krate: ide_db::base_db::Crate| {
+        db.included_by(krate).iter().any(|(path, _)| paths.contains(path))
+    };
+    all.iter().copied().filter(|&krate| includes(krate)).collect()
 }
 
 /// Has each program whose edits are patches of what rustc linked take in what rustc compiled
@@ -7876,6 +7913,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("borrowck") {
         return borrowck::command(std::env::args().skip(2));
     }
+    if std::env::args().nth(1).as_deref() == Some("compile-time-deps") {
+        return compile_time_deps(std::env::args().skip(2));
+    }
     if std::env::args().nth(1).as_deref() == Some("weaken") {
         return weaken::command(std::env::args().skip(2));
     }
@@ -8023,6 +8063,11 @@ fn cargo_config(args: &Args) -> CargoConfig {
         only_manifest_package: true,
         executables: executables_of(&args.symbol_files),
         own_metadata: cargo::metadata::own(&args.selection),
+        // The build scripts and proc macros of a load in ra-jit's own target directory are
+        // built and run by blaze (`cargo/compile_time.rs`), not `cargo check
+        // --compile-time-deps`; a build cargo already ran says what its scripts did.
+        own_build_scripts: (args.own_target && !cargo::own_macro::turned_off())
+            .then(|| cargo::compile_time::own(&args.selection)),
         target_dir_config: match args.own_target {
             true => TargetDirectoryConfig::UseSubdirectory,
             false => TargetDirectoryConfig::None,
@@ -8056,6 +8101,42 @@ fn cargo_config(args: &Args) -> CargoConfig {
 }
 
 /// How a workspace is loaded, whichever it is.
+/// `ra-jit compile-time-deps PROJECT [build flags]`: what a build's load in ra-jit's own target
+/// directory reads of the build scripts and proc macros of PROJECT, as blaze built and ran them
+/// (`cargo/compile_time.rs`): a JSON object of each package that has any, by its id, with its
+/// script's `cfgs` and `envs`, its `out_dir`, and `proc_macro`, its library. The flags are the
+/// build's (`--release`, `--features`, `--cfg-test`, ...). `harness/resolve.py ctdeps` holds it
+/// to rust-analyzer's `cargo check --compile-time-deps`.
+fn compile_time_deps(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let fixed = ["--own-target", "--crate", "-", "--out", "/dev/null"].map(str::to_owned);
+    let args = Args::parse(args.chain(fixed))?;
+    let config = cargo_config(&args);
+    let (workspace, _) =
+        workspace_at(&args.project, &config, &load_config(), &args.selection, None, None)?;
+    let ProjectWorkspaceKind::Cargo { cargo, build_scripts, .. } = &workspace.kind else {
+        bail!("{} is not a cargo workspace", args.project.display());
+    };
+    let mut packages = serde_json::Map::new();
+    for package in cargo.packages() {
+        let Some(read) = build_scripts.read_of(package) else { continue };
+        if read == project_model::OwnBuildOutput::default() {
+            continue;
+        }
+        let path = |it: &Option<AbsPathBuf>| it.as_ref().map(ToString::to_string);
+        packages.insert(
+            cargo[package].id.repr.clone(),
+            serde_json::json!({
+                "cfgs": read.cfgs,
+                "envs": read.envs,
+                "out_dir": path(&read.out_dir),
+                "proc_macro": path(&read.proc_macro_dylib),
+            }),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&packages)?);
+    Ok(())
+}
+
 fn load_config() -> LoadCargoConfig {
     LoadCargoConfig {
         load_out_dirs_from_check: true,
@@ -8911,14 +8992,16 @@ fn run_holding(
             // No rustc checked the source of a build with nothing of rustc's: the worker
             // does, all of it the build compiles and the code nothing reaches too, as rustc
             // would. An error fails every build of the checkout until a source is written
-            // (docs/no-rustc.md, D).
+            // (docs/no-rustc.md, D). Only a module of a crate is Rust: the workspace's
+            // `rustfmt.toml` and READMEs are loaded too.
             if nothing_of_rustc && written.is_empty() {
                 let checking = Instant::now();
                 let paths: FxHashMap<vfs::FileId, PathBuf> = files
                     .iter()
                     .filter_map(|it| match it.file {
                         Watched::Source(id)
-                            if args.owns(&db, id, &it.path) && listed.sees(&db, id) =>
+                            if args.owns(&db, id, &it.path)
+                                && !listed.crates_of(&db, id).is_empty() =>
                         {
                             Some((id, it.path.clone()))
                         }
@@ -9869,6 +9952,7 @@ fn run_holding(
         homed.extend(&editing);
         homed.sort_unstable();
         homed.dedup();
+        take_first_values(&db, &mut programs, &homed);
         home_in_rustcs(&db, &listed, &mut programs, &homed);
         outlines.before_edit(&db, &listed, &editing);
         for &index in &gone {
@@ -9906,6 +9990,7 @@ fn run_holding(
         if !texts.is_empty() {
             let roots: Vec<_> = texts.iter().map(|it| it.0).collect();
             untouched = roots.iter().copied().filter(|it| !editing.contains(it)).collect();
+            take_first_values(&db, &mut programs, &untouched);
             home_in_rustcs(&db, &listed, &mut programs, &untouched);
             outlines.before_edit(&db, &listed, &untouched);
             for file in write_harnesses(&mut db, texts) {
@@ -9925,7 +10010,9 @@ fn run_holding(
         }
         // Asked after the change: a file can have joined a crate with it.
         if !included.is_empty() {
-            programs.iter_mut().for_each(|it| it.known.touch(&db, None));
+            let includers = includers(&db, &included);
+            take_first_values_of(&db, &mut programs, &includers);
+            programs.iter_mut().for_each(|it| it.known.touch_included(&db, &includers));
             listed.touch(&db, None);
         }
         for path in included {
@@ -10087,7 +10174,9 @@ fn run_holding(
                 }
                 std::thread::spawn(move || {
                     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer)
+                        let answer =
+                            program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer);
+                        program.refused_in_codegen(answer)
                     }));
                     done.store(true, Ordering::SeqCst);
                     // The write that interrupts waits for this.
@@ -10124,7 +10213,9 @@ fn run_holding(
                         let build = scope.spawn(move || {
                             let answer =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    program.sync(&db, listed, paths, edit, wanted, link, defer)
+                                    let answer =
+                                        program.sync(&db, listed, paths, edit, wanted, link, defer);
+                                    program.refused_in_codegen(answer)
                                 }));
                             end_link();
                             answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -10412,6 +10503,28 @@ impl Program {
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
         eprintln!("{why}");
         Err(Refused::Cargos(why))
+    }
+
+    /// Takes a build that code generation refused (`CodegenError::Refused`: what it would
+    /// link would not be the program the source says) as that build's refusal, not the
+    /// worker's error, as [`Program::panicked`] does: the clients are told why and the worker
+    /// stays. Nothing else is built in its place.
+    fn refused_in_codegen(
+        &mut self,
+        answer: anyhow::Result<Result<String, Refused>>,
+    ) -> anyhow::Result<Result<String, Refused>> {
+        let why = match &answer {
+            Err(error) => match error.downcast_ref::<CodegenError>() {
+                Some(CodegenError::Refused(why)) => why.clone(),
+                _ => return answer,
+            },
+            Ok(_) => return answer,
+        };
+        self.known.start_again();
+        self.unbuilt.stale = true;
+        (self.wrote, self.whole) = (None, None);
+        eprintln!("refused: {why}");
+        Ok(Err(Refused::Cargos(why)))
     }
 
     /// Notes the crates rustc did not compile from the files this program is of, when it joins
