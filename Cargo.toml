@@ -5,6 +5,10 @@ members = ["crates/*"]
 exclude = ["crates/ra-jit-wasm", "demo", "harness", "vendor/proc-macro-srv", "vendor/rust-analyzer"]
 resolver = "2"
 
+# hir-ty-codegen's build script checks the pinned LLVM `nix develop` names (its `llvm` feature).
+[workspace.metadata.blaze.sandbox]
+build-script-env = ["LLVM_SYS_231_PREFIX"]
+
 [workspace.package]
 version = "0.1.0"
 rust-version = "1.101"
