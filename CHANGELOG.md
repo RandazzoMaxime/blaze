@@ -862,6 +862,12 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- A macro call in parentheses or brackets with no `;` after it has to expand to one
+  expression, as rustc parses it ([#154](https://github.com/indexable-inc/blaze/issues/154)):
+  `twice!(twice!(n += 1;));`, whose outer call expands to two such calls with nothing between,
+  built and ran where rustc reports an error. A function with such a call whose expansion is
+  statements is now refused with the reason, as one with a call that failed to expand is.
+
 - `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
   ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
   before compiling anything: for a git source cargo checks that every package is a member of
