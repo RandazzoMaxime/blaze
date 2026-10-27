@@ -8680,16 +8680,14 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         if !self.classify(ty, 0, &mut classes)? {
             return Ok(on_stack);
         }
-        // An upper half whose lower half is not an `Sse` eightbyte's is an `Sse` one itself;
-        // an `f128` alone is a vector register's 16 bytes.
-        match classes {
-            [Some(RegClass::Sse), Some(RegClass::SseUp)] => return Ok(PassMode::Cast(types::I64X2)),
-            _ => {
-                for class in &mut classes {
-                    if *class == Some(RegClass::SseUp) {
-                        *class = Some(RegClass::Sse);
-                    }
-                }
+        // An `f128` alone is a vector register's 16 bytes. An upper half whose lower half is
+        // not an `Sse` eightbyte's is an `Sse` one itself.
+        if classes == [Some(RegClass::Sse), Some(RegClass::SseUp)] {
+            return Ok(PassMode::Cast(types::I64X2));
+        }
+        for class in &mut classes {
+            if *class == Some(RegClass::SseUp) {
+                *class = Some(RegClass::Sse);
             }
         }
         let reg = |class: Option<RegClass>, bytes: u64| match (class, bytes) {
