@@ -8,6 +8,7 @@ mod clean;
 mod manifest;
 mod new;
 mod tree;
+mod uninstall;
 
 use args::Args;
 
@@ -91,7 +92,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("rustdoc", A_BUILD, "document a package with extra rustdoc flags"),
     sub("fix", A_BUILD, "apply the compiler's suggestions"),
     sub("install", A_BUILD, "build and install a program"),
-    sub("uninstall", Status::Not("not written yet"), "remove an installed program"),
+    sub("uninstall", Status::Own, "remove an installed program"),
     sub("package", A_BUILD, "make the `.crate` of a package"),
     sub("publish", REGISTRY_API, "upload a package to a registry"),
     sub("search", REGISTRY_API, "search a registry"),
@@ -102,7 +103,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("logout", REGISTRY_API, "forget a registry's token"),
     sub("report", Status::Not("not written yet"), "reports cargo keeps of builds"),
     sub("config", Status::Not("not written yet"), "the configuration cargo reads"),
-    sub("read-manifest", Status::Not("not written yet"), "the manifest as JSON (deprecated)"),
+    sub("read-manifest", Status::Own, "the manifest as JSON (deprecated)"),
 ];
 
 /// The subcommand `name` is, by its name or an alias.
@@ -131,6 +132,8 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "verify-project" => manifest::verify_project(Args::new(rest)),
         "tree" => tree::command(Args::new(rest)),
         "pkgid" => manifest::pkgid(Args::new(rest)),
+        "read-manifest" => manifest::read_manifest(Args::new(rest)),
+        "uninstall" => uninstall::command(Args::new(rest)),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
         "new" | "init" => new::command(subcommand.name, Args::new(rest)),

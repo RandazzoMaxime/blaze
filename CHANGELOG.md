@@ -17,6 +17,11 @@ All notable changes to ra-jit are written here. The format follows
   and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
   too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
   793; the rest are those refusals).
+- `cargo blaze uninstall` and `cargo blaze read-manifest` are blaze's own. `uninstall` is cargo
+  1.99's, with its install tracker: `.crates.toml` and `.crates2.json` are written byte for
+  byte as cargo writes them (`harness/own_uninstall.py`, 18 of 18 cases equal to cargo's).
+  `read-manifest` is the package's entry of `metadata --no-deps` (`harness/own_commands.py`,
+  now 130 of 130 over ripgrep, fd, helix, nushell and biome).
 - `enable` makes plain `cargo fmt` and `cargo clippy` blaze's, for each of the two that is
   blaze's own: links named `cargo-fmt` and `cargo-clippy` in `~/.cargo/bin`, which cargo looks
   in before `PATH`, to `cargo-blaze`. What they replace, rustup's proxies, is kept and

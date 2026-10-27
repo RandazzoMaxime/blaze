@@ -249,6 +249,36 @@ pub(super) fn verify_project(args: Args<'_>) -> anyhow::Result<i32> {
     }
 }
 
+/// `cargo read-manifest`: the package of the manifest, as `cargo metadata --no-deps` prints it.
+pub(super) fn read_manifest(args: Args<'_>) -> anyhow::Result<i32> {
+    let flags = [valued(&["-m", "--manifest-path"])];
+    let usage = "cargo blaze read-manifest [--manifest-path <PATH>]";
+    let read = match read_or_refuse(&args, &flags, usage) {
+        Ok(read) => read,
+        Err(code) => return Ok(code),
+    };
+    let printed = (|| {
+        let ctx = Context::new(config("read-manifest", &read)?);
+        let manifest_path = read.value("--manifest-path").map(PathBuf::from);
+        let root = root_manifest(manifest_path.as_deref(), &ctx)?;
+        let ws = Workspace::new(&root, &ctx)?;
+        let Some((path, manifest)) = ws.members().find(|(path, _)| *path == root) else {
+            anyhow::bail!(
+                "manifest path `{}` is a virtual manifest, but this command requires running against an actual package in this workspace",
+                root.display()
+            );
+        };
+        Ok(serde_json::to_string(&blaze_manifest::metadata::export_package(path, manifest))?)
+    })();
+    match printed {
+        Ok(json) => {
+            println!("{json}");
+            Ok(0)
+        }
+        Err(err) => Ok(failed(&err)),
+    }
+}
+
 /// `cargo pkgid`: the full spec of the package `SPEC` (or `-p`) names in the lock file, or of
 /// the package of the working directory.
 pub(super) fn pkgid(args: Args<'_>) -> anyhow::Result<i32> {

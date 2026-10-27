@@ -823,7 +823,7 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | Command | blaze's | What it is, and what it waits for |
 |---|---|---|
 | `build` (`b`), `run` (`r`), `test` (`t`), `check` (`c`) | the build | [above](#commands) |
-| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix, nushell and biome print the same JSON for each form (`harness/own_commands.py`, with `locate-project`, `verify-project`, `pkgid`, `fetch` and `clean`: 120 of 120 cases over the five). A package's `hints` has cargo 1.101's `"min-opt-level"`, always `null`: blaze-manifest does not read a value of it yet. Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
+| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix, nushell and biome print the same JSON for each form (`harness/own_commands.py`, with `locate-project`, `verify-project`, `pkgid`, `read-manifest`, `fetch` and `clean`: 130 of 130 cases over the five). A package's `hints` has cargo 1.101's `"min-opt-level"`, always `null`: blaze-manifest does not read a value of it yet. Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
 | `locate-project` | yes | `--workspace`, `--message-format plain\|json`, `--manifest-path` |
 | `verify-project` | yes | `{"success":"true"}`, or `{"invalid":...}` and status 1 |
 | `version`, `help` | yes | blaze's version and help |
@@ -839,7 +839,9 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | `add`, `update`, `generate-lockfile` | not yet | they choose versions, which blaze-resolve does not do yet ([#321](https://github.com/indexable-inc/blaze/issues/321)) |
 | `bench`, `rustc`, `rustdoc`, `fix`, `install`, `package` | not yet | builds blaze does not do yet ([no-rustc.md](no-rustc.md)) |
 | `publish`, `search`, `info`, `owner`, `yank`, `login`, `logout` | not yet | blaze has no client of a registry's web API yet |
-| `uninstall`, `report`, `config`, `read-manifest` | not yet | not written yet |
+| `uninstall` | yes | cargo 1.99's `cargo_uninstall.rs` and install tracker: removes the programs from the install root's `bin` (`--root`, `CARGO_INSTALL_ROOT`, `install.root`, cargo's home) and their entries in `.crates.toml` and `.crates2.json`, written byte for byte as cargo writes them; specs, `-p`, `--bin`, the package of the directory, cargo's `Summary` of several. Held equal to cargo's by `harness/own_uninstall.py`: 18 of 18 cases, what each prints and the files it leaves |
+| `read-manifest` | yes | the package's entry of `metadata --no-deps`, as cargo prints it |
+| `report`, `config` | not yet | not written yet |
 | any other | no | `error: no such command`; blaze runs no cargo plugin |
 
 ### Plain `cargo <command>` after `enable`
