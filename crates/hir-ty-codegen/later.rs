@@ -429,7 +429,9 @@ impl<'db> Keeper<'_, 'db> {
                 // rustc's copy of a function of the checkout is of the checkout as rustc
                 // built it, and uses rustc's copies of the statics.
                 let symbol = decl.linkage_name(id).into_owned();
-                let checked = self.symbols.defines(&symbol);
+                // Checked too when it is one of an object ra-jit built before, the standard
+                // library's unit: a build that compiles std's crates itself has no such symbol.
+                let checked = self.symbols.provides(&symbol);
                 // An item of an `extern` block is the symbol it links to, whoever declares it.
                 let foreign = |callee: &Instance| match callee.def {
                     InstanceDef::Fn(func) => link_name(db, func).is_some(),
