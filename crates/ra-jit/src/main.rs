@@ -8780,6 +8780,7 @@ fn run_holding(
     }
     let sysroot = checkouts.loaded.workspaces().first().and_then(|it| it.sysroot.root());
     let _ = SYSROOT.set(sysroot.map(|it| AsRef::<Path>::as_ref(it).to_owned()));
+    let mut from_manifest = false;
     let cold = match rustcs_to_patch(&args, written.is_empty() && !harnessed) {
         Some(rustcs) => {
             let start = Instant::now();
@@ -8813,7 +8814,7 @@ fn run_holding(
             let manifest_mode = manifest::mode();
             let manifest_key =
                 manifest_mode.and_then(|_| manifest::key(&db, &args, table.is_empty()));
-            let from_manifest = match (manifest_mode, &manifest_key) {
+            let files_of_manifest = match (manifest_mode, &manifest_key) {
                 (Some(manifest::Mode::Use), Some(key)) => match manifest::lookup(&db, &args, key) {
                     Ok(files) => Some(files),
                     Err(why) => {
@@ -8823,8 +8824,9 @@ fn run_holding(
                 },
                 _ => None,
             };
-            let served = from_manifest.is_some();
-            let cold = match from_manifest {
+            let served = files_of_manifest.is_some();
+            from_manifest = served;
+            let cold = match files_of_manifest {
                 Some(files) => {
                     let mut cold = Build::of_manifest(files);
                     cold.keep(&mut known)?;
@@ -9090,7 +9092,10 @@ fn run_holding(
         over_budget: Vec::new(),
         given_up: FxHashSet::default(),
     };
-    if programs[0].dehydrate() {
+    if from_manifest {
+        programs[0].build_from_store();
+        builds.unasked.push(0);
+    } else if programs[0].dehydrate() {
         builds.unasked.push(0);
     }
     // How many times running each checkout that is read as a loaded one has been long to turn
@@ -10329,6 +10334,17 @@ impl Program {
         );
         self.unbuilt.stale = true;
         true
+    }
+
+    /// Has the next build be the one a start makes without a manifest, while nobody asks: a
+    /// start from a manifest wrote the program with nothing analysed and holds no base, so
+    /// the first edit would be a full build.
+    fn build_from_store(&mut self) {
+        eprintln!(
+            "taking the program's code from the store, for the first edit to patch: {}",
+            self.args.krate
+        );
+        self.unbuilt.stale = true;
     }
 
     /// Has the next build be one in full of the program, for edits to patch from then on
