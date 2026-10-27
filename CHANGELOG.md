@@ -1032,6 +1032,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Fixed
 
+- An integration test that names a program (`env!("CARGO_BIN_EXE_app")`) builds when its
+  build starts the daemon's worker: the worker was started with the variables of its build
+  but not the places cargo set, so its load, which compiles before the first request is read,
+  failed `` `env!("CARGO_BIN_EXE_app")` in it names a variable that is not set ``. A cold
+  `cargo ra-jit test --test it` failed every time; under plain cargo after `ra-jit enable`, the
+  `cargo test` after an edit failed when the edit's load won the race (the release train's
+  plain-cargo row "`cargo test`, edited").
 - A spliced edit no longer runs a closure's old code (#582). A closure is named by its place
   among the closures of its body, so after an edit that moves the call of a generic function
   such as `caught(|| ...)` from one closure into the body, the patch called the base's
