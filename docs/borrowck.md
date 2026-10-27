@@ -77,6 +77,14 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
 - Unaligned references (E0793): a `&` or `&mut` of a field a `#[repr(packed)]` struct may
   leave less aligned than its type needs, as rustc's `check_packed_ref` (not `&raw`, nor
   behind a pointer; a field of a type parameter or of a `dyn` tail may be unaligned).
+- Builtin derives are checked as rustc expands them (`rustc_builtin_macros/src/deriving`;
+  `ra-jit borrowck` expands them, as `ra-jit check` and builds do). The methods derived for
+  a `#[repr(packed)]` struct copy each field out of it, `{ self.x }` at the field, rather
+  than borrow it, so one that is not `Copy` is E0507 where the field is written; `Debug`
+  takes the last field by one more reference, so an unsized one still becomes a
+  `&dyn Debug`, and every derive but `Copy` and `Default` bounds the struct's type
+  parameters by `Copy` too (`needs_copy_as_bound_if_packed`). A derived impl has the
+  struct's lifetime parameters, so its self type elides none (E0726).
 - Conflicting borrows: shared, mutable, two-phase (`vec.push(vec.len())`), shallow borrows of
   match scrutinees, and fake reads (E0499, E0500, E0501, E0502, E0503, E0506, E0524). The drop
   of the old value before an assignment is the assignment's write, so assigning to a borrowed
