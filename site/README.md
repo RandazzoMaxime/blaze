@@ -63,13 +63,25 @@ bun run deploy   # build + wrangler deploy
 
 ## Hosting (ix.dev/blaze)
 
-The site is the Cloudflare Worker `ra-jit` (account Indexable), deployed by `.github/workflows/site.yaml` on a push to
-main (`wrangler deploy`). It is reached three ways, all declared in `wrangler.jsonc` `routes`, so `wrangler deploy`
-creates them:
+The site is the Cloudflare Worker `ra-jit` (account Indexable). `.github/workflows/site.yaml` deploys it on a push
+to main once the repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set (the token needs Workers
+Scripts, Workers Routes and D1 edit on the account and the ix.dev zone); until then it only builds, and the site is
+deployed by hand from an up-to-date main, logged in with `wrangler login`:
 
-- `ix.dev/blaze` and `ix.dev/blaze/*`: zone routes on ix.dev. The rest of ix.dev (its `ix.dev/*` route to the
-  `ix-web` worker, DNS, the other routes) is terraform in indexable-inc/ix (`nix/terraform/cloudflare`); Cloudflare
-  picks the most specific route, so these two win over `ix.dev/*` without touching that config.
+```
+cd site && uv run --script renderer/fetch.py && SITE_AUDIO_REMOTE=1 bunx wrangler deploy
+```
+
+(`wrangler deploy` runs the build itself, so `SITE_AUDIO_REMOTE=1` has to be in its environment, or the pages lose
+their narration players.) The move to ix.dev/blaze was deployed that way on 2026-10-27 (version
+2f7138f1-5ae3-42cf-b417-8538770f446e); nothing was changed in the Cloudflare dashboard or API by hand.
+
+It is reached three ways, all declared in `wrangler.jsonc` `routes`, so `wrangler deploy` creates them:
+
+- `ix.dev/blaze*`: a zone route on ix.dev. The rest of ix.dev (its `ix.dev/*` route to the `ix-web` worker, DNS,
+  the other routes) is terraform in indexable-inc/ix (`nix/terraform/cloudflare`); Cloudflare picks the most specific
+  route, so this one wins over `ix.dev/*` without touching that config. It ends in `*` because a pattern without one
+  does not match a URL with a query.
 - `ra-jit.ix.dev` (the old home) and `blaze.ix.dev`: Workers custom domains (Cloudflare makes their DNS records and
   certificates). The worker answers every request on them with a 301 (308 for a non-GET, which keeps a form post) to
   the same path and query under https://ix.dev/blaze.

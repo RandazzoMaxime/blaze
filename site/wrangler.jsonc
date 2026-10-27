@@ -23,12 +23,12 @@
   // The deployed version's id is part of the cache key of anonymous discussable pages (worker/pages.ts), so a deploy
   // (new code or new vars) never serves pages rendered by the one before.
   "version_metadata": { "binding": "CF_VERSION" },
-  // ix.dev/blaze and ix.dev/blaze/* on the ix.dev zone: more specific than ix-web's ix.dev/* (indexable-inc/ix,
-  // nix/terraform/cloudflare/template.json), so they win. ra-jit.ix.dev (the old home) and blaze.ix.dev are custom
+  // ix.dev/blaze* on the ix.dev zone: more specific than ix-web's ix.dev/* (indexable-inc/ix,
+  // nix/terraform/cloudflare/template.json), so it wins. One pattern with the trailing *, because a pattern without
+  // one does not match a query (`ix.dev/blaze` missed /blaze?x=1); /blazefoo also lands here and gets a 404. ra-jit.ix.dev (the old home) and blaze.ix.dev are custom
   // domains of this worker, which answers them with a 301 to the same path under https://ix.dev/blaze.
   "routes": [
-    { "pattern": "ix.dev/blaze", "zone_name": "ix.dev" },
-    { "pattern": "ix.dev/blaze/*", "zone_name": "ix.dev" },
+    { "pattern": "ix.dev/blaze*", "zone_name": "ix.dev" },
     { "pattern": "ra-jit.ix.dev", "custom_domain": true },
     { "pattern": "blaze.ix.dev", "custom_domain": true }
   ],
