@@ -648,18 +648,6 @@ impl Unit {
             .then(|| format!("{name}={}", Path::new(path).with_extension("rlib").display()))
     }
 
-    /// `--extern`'s value `named` with the metadata rustc's check wrote of the crate, when
-    /// the value is the library that stands in for one.
-    fn checked_against(&self, named: &str) -> Option<String> {
-        let (name, path) = named.split_once('=')?;
-        let id = Record::id_of_file(&self.cwd.join(path), "lib", ".rlib")?;
-        self.records
-            .join(id)
-            .join(STANDS_IN)
-            .exists()
-            .then(|| format!("{name}={}", Path::new(path).with_extension("rmeta").display()))
-    }
-
     /// Says in one line why rustc links the program and not the daemon, and counts it.
     fn left_to_rustc(&self, why: &str) {
         say::fallback(why, &format!("rustc links `{}`", self.crate_name));

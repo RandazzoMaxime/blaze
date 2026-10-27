@@ -37,12 +37,6 @@ impl<'a> UnitDir<'a> {
     pub(crate) fn profile(&self) -> Option<&'a Path> {
         self.dir.parent()?.parent()?.parent()
     }
-
-    /// The name cargo gives the unit in the first layout, and which ra-jit keeps it by:
-    /// `<package>-<hash>`.
-    pub(crate) fn name(&self) -> String {
-        format!("{}-{}", self.package, self.hash)
-    }
 }
 
 /// Whether `text` is a hash cargo names a unit by: sixteen hexadecimal digits.
@@ -90,15 +84,6 @@ pub(crate) fn profile_of(path: &Path) -> Option<&Path> {
         .ancestors()
         .find(|it| it.file_name().and_then(|it| it.to_str()).is_some_and(|it| FIRST.contains(&it)));
     first.and_then(Path::parent)
-}
-
-/// The hash cargo names the unit that rustc writes to `out_dir` by: the one of its
-/// `-C extra-filename`, or, for one the second layout gives none, its directory's.
-pub(crate) fn unit_hash<'a>(extra_filename: &'a str, out_dir: &'a Path) -> Option<&'a str> {
-    match extra_filename.strip_prefix('-') {
-        Some(hash) if !hash.is_empty() => Some(hash),
-        _ => unit_dir(out_dir).map(|it| it.hash),
-    }
 }
 
 /// The name a unit is kept by, `<crate>-<hash>` as its files are named in the first layout,
@@ -198,9 +183,6 @@ mod tests {
             format!("build_script_build-{HASH}")
         );
         assert_eq!(unit_name("app", "", first), "app");
-        assert_eq!(unit_hash(&extra, first), Some(HASH));
-        assert_eq!(unit_hash("", second), Some(HASH));
-        assert_eq!(unit_hash("", first), None);
         assert_eq!(unit_of_file(&format!("ct-{HASH}"), second), format!("ct-{HASH}"));
         assert_eq!(unit_of_file("shared", second), format!("shared-{HASH}"));
         assert_eq!(unit_of_file("ct-1", first), "ct-1");

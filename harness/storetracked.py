@@ -178,6 +178,11 @@ class Logs:
     def links(self):
         return re.findall(r"^link: \S+ \((.*)\)$", self.text(), re.M)
 
+    def full_builds(self):
+        """How many builds were in full, as a splice declined: the patch calls what blaze's
+        link took out as unreached."""
+        return len(re.findall(r"^the patch was not spliced into the program.*: built in full$", self.text(), re.M))
+
     def anew(self):
         """How many instances each patch compiled that the base had no code for."""
         return [int(n) for n in re.findall(r"^patch: (\d+) instances the base has no code for$", self.text(), re.M)]
@@ -233,17 +238,21 @@ def restart(ws, env, label, steps):
             assert old in text, (what, old)
             open(path, "w").write(text.replace(old, new, 1))
         seen, seen_anew, seen_unchanged = len(logs.links()), len(logs.anew()), len(logs.unchanged())
+        full = logs.full_builds()
         said = build(ws, env, what)
         printed = program(ws)
         made = logs.links()[seen:]
         anew = logs.anew()[seen_anew:]
         unchanged = logs.unchanged()[seen_unchanged:]
         how = made[-1] if made else "no link"
+        in_full = not how.startswith("spliced") and logs.full_builds() > full
         verdict = "ok"
         if printed != expected:
             verdict = f"PRINTED {printed!r}, NOT {expected!r}"
         elif "[ra-jit]" not in said:
             verdict = "NOT SERVED BY THE DAEMON"
+        elif in_full:
+            how = f"built in full; {how}"
         elif not how.startswith("spliced"):
             verdict = "NOT SPLICED"
         elif what in KEEPING and (not anew or anew[-1]):

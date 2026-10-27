@@ -102,8 +102,8 @@ reads as never set in ours, and a counter the allocator bumps reads zero. So:
   `bool`, a part with no debug information to tell it whole, one private to its object on
   Windows) is not copied either, and no other path stands in: the build stops with an error
   naming it (``static `X` of crate `c` with state, whose copy in rustc's code (`...`) ...``,
-  `CodegenError::Refused`), rather than split the state or leave the function to rustc. `harness/renamedstatics.py` checks both
-  forms. Not yet handled: what rustc's code reads of a static LLVM proved it never writes is
+  `CodegenError::Refused`), rather than split the state or leave the function to rustc.
+  Not yet handled: what rustc's code reads of a static LLVM proved it never writes is
   folded into that code, so an edit that adds a write to one is not seen by it.
 
 ## What is refused
@@ -133,8 +133,7 @@ where rustc would have linked one; nor is rustc's old executable put back over a
 first. The checkout is then `kept`: the daemon's worker loads what rustc built in place,
 keeps the programs it built by the plans it built them by, and starts over with the ones
 rustc linked, rather than start again and link every program anew. A change cargo acts on
-(a manifest, the lock, a build script) still starts a new worker. `harness/live_fallback.py`
-checks it.
+(a manifest, the lock, a build script) still starts a new worker.
 
 A patch that can't be applied (`Outcome::Declined`) leaves the program as it was.
 

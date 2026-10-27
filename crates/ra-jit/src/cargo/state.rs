@@ -113,6 +113,40 @@ pub(crate) struct Program {
     pub(crate) default_run: bool,
 }
 
+impl Program {
+    /// A test the daemon built whole, the program `asked_as` of its checkouts, which runs in
+    /// `package_dir` with `env`.
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn of_whole(
+        name: String,
+        kind: Kind,
+        package: String,
+        source: PathBuf,
+        package_dir: PathBuf,
+        executable: PathBuf,
+        asked_as: (usize, usize),
+        env: Vec<(String, String)>,
+    ) -> Program {
+        Program {
+            name,
+            kind,
+            package,
+            test: true,
+            source,
+            package_dir,
+            executable,
+            names: Vec::new(),
+            cargos: PathBuf::new(),
+            unit: None,
+            asked_as: Some(asked_as),
+            left_to_cargo: None,
+            inputs: Vec::new(),
+            env,
+            default_run: false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Kind {
     Lib,
@@ -863,6 +897,32 @@ impl State {
     }
 
     /// The directory the daemon builds `program` in, when it is asked for it.
+    /// What a whole build of the tests `programs` by the daemon's `checkouts` leaves for their
+    /// run: nothing of it is cargo's.
+    pub(crate) fn of_whole(
+        key: String,
+        root: PathBuf,
+        profile: String,
+        programs: Vec<Program>,
+        checkouts: Vec<Checkout>,
+        configured: Vec<Configured>,
+    ) -> State {
+        State {
+            version: daemon::version(),
+            key,
+            root,
+            built_at: 0,
+            profile,
+            programs,
+            guards: Vec::new(),
+            checkouts,
+            refusal: None,
+            doc_tests: false,
+            counts: Counts::default(),
+            configured,
+        }
+    }
+
     pub(crate) fn plan_dir(&self, program: &Program) -> Option<&Path> {
         let (checkout, at) = program.asked_as?;
         self.checkouts.get(checkout)?.programs.get(at)?.object.parent()

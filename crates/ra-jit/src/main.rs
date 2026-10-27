@@ -539,6 +539,33 @@ fn library_unit(db: &RootDatabase, program: &[Crate]) -> FxHashSet<ide_db::base_
     unit
 }
 
+/// What a program of tests compiles of the standard library's crates beside its own:
+/// `test`, and what only it links, which [`library_unit`] leaves out. None for another.
+fn tests_linked(
+    db: &RootDatabase,
+    program: &[Crate],
+    tests: bool,
+) -> FxHashSet<ide_db::base_db::Crate> {
+    use ide_db::base_db::LangCrateOrigin::Test;
+    let library = library_unit(db, program);
+    let unlinked = unlinked_panic_runtime(db, program);
+    let deps = |it: ide_db::base_db::Crate| it.data(db).dependencies.iter().map(|dep| dep.crate_id);
+    let mut next: Vec<ide_db::base_db::Crate> = match tests {
+        true => program.iter().flat_map(|&it| deps(it.into())).collect(),
+        false => Vec::new(),
+    };
+    next.retain(|it| matches!(it.data(db).origin, CrateOrigin::Lang(Test)));
+    let mut tested = FxHashSet::default();
+    while let Some(krate) = next.pop() {
+        let name = Crate::from(krate).display_name(db);
+        let unlinked = name.is_some_and(|it| it.crate_name().as_str() == unlinked);
+        if !library.contains(&krate) && !unlinked && tested.insert(krate) {
+            next.extend(deps(krate));
+        }
+    }
+    tested
+}
+
 /// The panic runtime a program does not link: `panic_unwind` when its crate is built with
 /// `panic = "abort"`, which the profile gives it as `cfg(panic = "abort")`, else
 /// `panic_abort`. std depends on both, and rustc links the one the strategy names.
@@ -2912,30 +2939,6 @@ fn pause_after_load() {
     }
 }
 
-/// Whether [`lower_until`] has begun compiling ahead: what [`pause_before_symbols`] waits for.
-static AHEAD_BEGUN: AtomicBool = AtomicBool::new(false);
-
-/// How long [`pause_before_symbols`] waits for compiling ahead to begin, where it never does
-/// (a load beside cargo's build compiles ahead by what cargo has built, not until the symbols).
-const AHEAD_BEGUN_WAIT: Duration = Duration::from_secs(120);
-
-/// Waits for `RA_JIT_SYMBOLS_PAUSE_MS` before the symbols rustc built are read, and says so:
-/// what `harness/aheadready.py` has functions compiled ahead in. The pause starts once
-/// compiling ahead has begun, not when the symbols' thread does: a fixed pause from then
-/// raced loading and resolving the workspace, which took longer than it on a slow macOS
-/// runner, and nothing was compiled ahead.
-fn pause_before_symbols() {
-    let pause = std::env::var("RA_JIT_SYMBOLS_PAUSE_MS").ok().and_then(|it| it.parse().ok());
-    if let Some(pause) = pause {
-        eprintln!("symbols: paused");
-        let start = Instant::now();
-        while !AHEAD_BEGUN.load(Ordering::SeqCst) && start.elapsed() < AHEAD_BEGUN_WAIT {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        std::thread::sleep(Duration::from_millis(pause));
-    }
-}
-
 /// The directory cargo put the executables of the build in: the profile's directory the
 /// libraries of the build are written below, `deps` in cargo's first layout and
 /// `build/<package>/<hash>/out` in its second (`cargo::layout`). The standard library's,
@@ -4276,21 +4279,6 @@ thread_local! {
     static PROBING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Has the thread be one that probes for as long as it lives.
-pub(crate) struct Probing(bool);
-
-impl Probing {
-    pub(crate) fn new() -> Probing {
-        Probing(PROBING.replace(true))
-    }
-}
-
-impl Drop for Probing {
-    fn drop(&mut self) {
-        PROBING.set(self.0);
-    }
-}
-
 /// Whether the edits of the build are patches of an object that has the standard library in
 /// it. A whole build's (`--exe`) are patched over the library it links as a unit of its own.
 fn patches_its_library(args: &Args) -> bool {
@@ -4640,10 +4628,12 @@ fn build(
     // standard library is built apart ([`std_unit`]) or asked for by name.
     if table.is_empty() {
         let asked: FxHashSet<Crate> = local.iter().copied().collect();
+        let tested = tests_linked(db, &local, of_tests(args));
         let linked: FxHashSet<Crate> = local
             .iter()
             .flat_map(|&it| ide_db::base_db::Crate::from(it).transitive_deps(db))
             .filter(|it| !it.data(db).origin.is_lang() && !resolver.prebuilt(*it))
+            .chain(tested)
             .map(Crate::from)
             .filter(|it| !asked.contains(it))
             .collect();
@@ -5007,13 +4997,29 @@ impl std::fmt::Display for RustcLinkedLost {
 
 impl std::error::Error for RustcLinkedLost {}
 
+/// Why a patch was not spliced into the executable whose link line does not have it: the
+/// program is built in full and linked instead.
+#[derive(Debug)]
+struct PatchUnlinked {
+    why: String,
+}
+
+impl std::fmt::Display for PatchUnlinked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the patch was not spliced into the program{}", self.why)
+    }
+}
+
+impl std::error::Error for PatchUnlinked {}
+
 /// Brings an executable up to date with its objects. An edit that left the whole object alone
 /// is spliced into the executable at `splice`, which `--binary` names, when that is known from
 /// its last link; anything else, and whatever the splice declines, runs the link command, whose
 /// result is then known. `RA_JIT_SPLICE=0` has every edit linked in full. A patch of what rustc
 /// linked (`over_rustc`) is spliced or fails with [`RustcLinkedLost`], and so is an object
 /// that names what only that executable has (`onto`, [`ONTO_RUSTCS`]). With `packs` the object
-/// is kept packed after the link ([`whole`]).
+/// is kept packed after the link ([`whole`]). A patch the splice declines whose line is the
+/// worker's own (`own_line`, [`own_link_line`]) fails with [`PatchUnlinked`].
 #[expect(clippy::too_many_arguments)]
 fn link(
     cmd: Option<&str>,
@@ -5025,6 +5031,7 @@ fn link(
     onto: bool,
     defer: bool,
     packs: bool,
+    own_line: bool,
 ) -> anyhow::Result<()> {
     let rustcs = splice.is_some_and(|it| lock(&RUSTC_LINKED).contains(it));
     if let Some(binary) = splice.filter(|_| !patched) {
@@ -5201,6 +5208,10 @@ fn link(
     if let Some(binary) = splice.filter(|_| onto) {
         lock(&ONTO_RUSTCS).remove(binary);
         return Err(RustcLinkedLost { why: declined, onto: true }.into());
+    }
+    // The worker's own line has the object and not the patch, which alone has the edit.
+    if own_line && patched && patch.is_some() {
+        return Err(PatchUnlinked { why: declined }.into());
     }
     let reading = whole::read(object)?;
     if let Some(binary) = splice {
@@ -7302,9 +7313,6 @@ fn main() -> anyhow::Result<()> {
     {
         return ask(request, Path::new(&socket), Target::from_flags(std::env::args().skip(3))?);
     }
-    if std::env::var_os(doctest::ENABLED).is_some() {
-        return doctest::command(std::env::args_os().skip(1));
-    }
     trace::install();
     run(Args::parse(std::env::args().skip(1))?, None)
 }
@@ -7324,7 +7332,6 @@ fn lower_until(
     if done() {
         return Ok(());
     }
-    AHEAD_BEGUN.store(true, Ordering::SeqCst);
     let start = Instant::now();
     let mut functions = Vec::new();
     let mut crates = Vec::new();
@@ -7981,7 +7988,6 @@ fn run_holding(
         let whole = whole.map(|it| it.recv()?).transpose()?;
         let symbol_files = whole.as_ref().map_or(&symbol_files, |it| &it.symbol_files);
         let start = Instant::now();
-        pause_before_symbols();
         let table = SymbolTable::load(symbol_files, &root)?;
         eprintln!("symbols: {} in {:.1?}", table.len(), start.elapsed());
         Ok::<_, anyhow::Error>((table, whole))
@@ -8263,6 +8269,7 @@ fn run_holding(
                 known.stats.onto_rustcs,
                 false,
                 packs_whole(&args),
+                args.exe.is_some(),
             )?;
             if let Some(exe) = &args.exe {
                 // A daemon's link line linked it already.
@@ -9455,6 +9462,7 @@ fn run_holding(
             let from = Settled::of(&files, &db, base, over, patch, link_cmd.clone());
             let (as_built, object) = (as_built.clone(), out.clone());
             let packs = packs_whole(&programs[at].args);
+            let own_line = programs[at].args.exe.is_some();
             let read_as = (over != base).then(|| (over.clone(), unlinked.clone()));
             let linked = std::thread::spawn(move || {
                 let failed = link(
@@ -9467,6 +9475,7 @@ fn run_holding(
                     onto,
                     defer,
                     packs,
+                    own_line,
                 )
                 .err();
                 if failed.is_none() {
@@ -10009,8 +10018,11 @@ impl Program {
             let (over_rustc, onto) = (known.stats.over_rustc, known.stats.onto_rustcs);
             begin_link();
             let packs = packs_whole(args);
-            let unlinked =
-                link(cmd, splice, patch, &args.out, patched, over_rustc, onto, defer, packs).err();
+            let own_line = args.exe.is_some();
+            let unlinked = link(
+                cmd, splice, patch, &args.out, patched, over_rustc, onto, defer, packs, own_line,
+            )
+            .err();
             if let Some(lost) =
                 unlinked.as_ref().and_then(|it| it.downcast_ref::<RustcLinkedLost>())
             {
@@ -10019,6 +10031,12 @@ impl Program {
                     true => known.start_again(),
                     false => known.forget_rustc(),
                 }
+                return self.sync(db, listed, paths, edit, wanted, link_it, defer);
+            }
+            if let Some(lost) = unlinked.as_ref().and_then(|it| it.downcast_ref::<PatchUnlinked>())
+            {
+                eprintln!("{lost}: built in full");
+                known.start_again();
                 return self.sync(db, listed, paths, edit, wanted, link_it, defer);
             }
             failed = failed.or(unlinked.map(|it| Refused::Cargos(it.to_string())));

@@ -348,6 +348,42 @@ impl Invocation {
         Some(reason.to_owned())
     }
 
+    /// The first flag typed that picks targets of a kind, tests or benches: `--bin` and
+    /// `--example` name a program, `--lib` picks none or, of `cargo test`, the library's unit
+    /// tests, and `--test` names an integration test there.
+    pub(crate) fn kinds_of_targets(&self) -> Option<&str> {
+        let one: &[&str] = match self.subcommand {
+            Subcommand::Test => &["--lib", "--bin", "--example", "--test"],
+            _ => &["--lib", "--bin", "--example"],
+        };
+        let typed = self.build_args.iter().map(|it| it.split('=').next().unwrap_or(it));
+        typed.into_iter().find(|it| TARGET_SELECTION.contains(it) && !one.contains(it))
+    }
+
+    /// The values typed for `flag`, as `flag value` or `flag=value`.
+    pub(crate) fn values_of(&self, flag: &str) -> Vec<&str> {
+        let mut values = Vec::new();
+        let mut words = self.build_args.iter();
+        while let Some(word) = words.next() {
+            match word.strip_prefix(flag) {
+                Some("") => values.extend(words.next().map(String::as_str)),
+                Some(value) if value.starts_with('=') => values.push(&value[1..]),
+                _ => {}
+            }
+        }
+        values
+    }
+
+    /// Why blaze does not link programs for the target of the build.
+    pub(crate) fn target_not_linked(&self) -> Option<String> {
+        self.target().and_then(|it| unsupported_target(&it))
+    }
+
+    /// Whether `flag` was typed.
+    pub(crate) fn typed(&self, flag: &str) -> bool {
+        self.build_args.iter().any(|it| it == flag)
+    }
+
     /// The profile, as cargo's `Finished` line names it.
     pub(crate) fn profile(&self) -> &str {
         let of_command = if self.subcommand == Subcommand::Test { "test" } else { "dev" };
