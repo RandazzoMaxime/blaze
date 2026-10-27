@@ -25,6 +25,7 @@ cases![
     future_states,
     macro_item_location,
     clmul,
+    crc_ternlog,
     cast_then_shift,
     xgetbv,
     prefetch,
