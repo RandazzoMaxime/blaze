@@ -20,9 +20,19 @@ sandbox and `RA_JIT_TESTS=affected`).
   key (a function's key, a dependency unit's key, a test's key) to the blob that is its output.
   The CAS cannot lie: every blob is hashed after it is fetched. The index can, so every entry is
   under an Ed25519 signature that clients check, and only CI on main holds the key.
-- **Backend: Cloudflare R2.** Writes go to its S3 API with a token only main's CI has. Reads go
-  through an R2 custom domain on Cloudflare's CDN: no egress charge, served from the nearest
-  point of presence, cached at the edge. A user can stack a private tier of their own above it.
+- **A gateway in front of R2.** No client ever touches the bucket. A Cloudflare Worker on the
+  cache's domain holds the only R2 binding (no egress charge) and serves a small API: `/has`,
+  `/get` (one streamed response of many blobs), ranged single gets, `/put` (it hashes every blob
+  again before storing it, so the CAS cannot be poisoned), and per-tenant index reads and
+  writes. It does auth, rate limits, metering and the edge cache, and the storage behind it can
+  be swapped. Index entries belong to a tenant (`blaze` is the public one CI on main fills).
+- **Public and private blobs.** Public blobs (CI of open projects, crates.io dependencies) are
+  shared, and anyone may get one by its hash. A private tenant's blobs dedupe only within that
+  tenant and are stored under `HMAC(tenant key, hash)`, so even the bucket's object names say
+  nothing about their content. A tenant reads public blobs and its own, never another
+  tenant's. "Not found" and "not yours" are the same 404 from the same code path, and a private
+  upload is always uploaded in full. This closes the dedup side channels of
+  [Harnik et al. 2010](#threat-model).
 - **The key stops naming the blaze binary.** Today an entry is keyed by what blaze was built from
   (or, for the published crate, the bytes of its executable), so every release, several a day,
   misses everything. The dev-aws-14 store shows it: seven near-identical 227 MB packs written in
@@ -30,20 +40,24 @@ sandbox and `RA_JIT_TESTS=affected`).
   version that changes only when output would, and a CI check on a fixed corpus keeps it honest.
 - **Fetch time.** blaze's own workspace is about 270 to 320 MB in the store (**read**, below). At
   the measured 210 to 225 MiB/s from R2 to a GitHub runner over 16 streams that is about 1.3 s,
-  against about 8 s on one stream (**unverified** arithmetic on **reported** rates). The fetch
-  starts when the daemon starts and overlaps the workspace load.
-- **Sans-IO.** Hashing, chunking, packing, the index, signatures and the protocol are pure state
-  machines in their own crates. Requests and responses cross one trait, with tokio over HTTP/1.1
-  and HTTP/2 as the default backend, and io_uring and HTTP/3 as backends behind measurements.
+  against about 8 s on one stream (**unverified** arithmetic on **reported** rates, measured to
+  R2 directly; the rate through the Worker is measured in slice 1). The fetch starts when the
+  daemon starts and overlaps the workspace load.
+- **Sans-IO.** Hashing, chunking, packing, the index, signatures, the gateway's API and both
+  sides of it are pure state machines in their own crates. The client's requests cross one
+  trait, with tokio over HTTP/1.1 and HTTP/2 as the default backend, and io_uring and HTTP/3 as
+  backends behind measurements. The gateway's logic is one crate run by the Worker (workers-rs)
+  and by a native server for tests and self-hosting.
 - **Chunking** with VectorCDC (the SIMD form of AE, a hashless content-defined chunker) for large
   opaque files: rlibs, dependency units, the toolchain. Compiled functions are not chunked; their
   key already deduplicates them. **Compression** is zstd per blob, a high level on CI's upload,
   with trained dictionaries for the small function blobs.
-- **GC is R2's lifecycle rules, no job**: the index expires 30 days after upload, blobs 90, and
-  CI on main copies onto itself any blob it used that is older than 45 days, so a blob always
-  outlives every entry that names it.
-- **Rollout** in nine slices; the first two (R2 behind today's remote, then the codegen version)
-  give most of the speed.
+- **GC is R2's lifecycle rules, no job**: heads expire 28 days after upload, segments 32, blobs
+  90. When a head is written, the gateway copies onto itself every segment the head names that is
+  more than two days old and every pack holding a named blob that is more than 45 days old, so a
+  blob always outlives every entry that names it.
+- **Rollout** in nine slices; the first two (the gateway over R2 serving today's remote, then
+  the codegen version) give most of the speed.
 
 ## Goals and non-goals
 
@@ -52,9 +66,15 @@ Goals:
 - CI on any branch, and a user's first build of a project, take every function, dependency unit
   and test pass that main's CI already made, and compile or run only what differs.
 - Anyone can read the shared tier with no account and no token, from anywhere, at no cost to them
-  or to us beyond storage.
+  and about a hundredth of a cent per cold fetch to us (see [cost](#cost-and-latency)).
 - Nobody but CI on main can make a client run code the shared tier serves, whatever they do to
-  the bucket, the CDN or the network. A user's own tier is trusted by that user's keys only.
+  the bucket, the gateway or the network. A user's own tenant is trusted by that user's keys
+  only.
+- No client holds a storage credential. The gateway is the one door: it authenticates, limits,
+  meters and checks every write, and the storage behind it can change without any client
+  changing.
+- No request tells a tenant whether some content exists, unless the content is public or the
+  tenant stored it itself.
 - A new blaze release that does not change what blaze compiles keeps every entry.
 - Every part that decides what to fetch, how to check it and how to write it can be tested
   without a network, and the transport can be replaced.
@@ -69,6 +89,8 @@ Non-goals:
 - Keeping every main commit forever. What main has not used for a month or three expires.
 - Sharing between different codegen versions or toolchains. A different version is a different
   key, by design.
+- Encrypting a private tenant's blobs against the gateway. The gateway and Cloudflare see what
+  is stored; encryption on the client would end sharing blobs with the public tier.
 
 ## What exists today
 
@@ -97,8 +119,8 @@ identity and an empty cache.
 
 | System | What it does | What we take, or not |
 |---|---|---|
-| Bazel REAPI ([remote_execution.proto](https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto)) | CAS of `Digest{hash, size}` plus an ActionCache from action digest to result. AC entries carry no signature; trust is the server's access control. Recently `GetChunkMapping`/`SpliceBlob` with FastCDC 2020 (avg 512 KiB recommended) | The CAS/AC split. Not its unsigned AC (we serve from a public CDN, so the index must carry its own proof), and not its per-entry unary lookups: 165,752 functions would be 165,752 calls (**read**, [ci-runner.md](ci-runner.md)) |
-| [Attic](https://github.com/zhaofengli/attic) | Nix cache on S3: FastCDC 16/64/256 KiB for NARs of 64 KiB and up, zstd, narinfo signed by the server, GC by retention then orphans | Same chunk sizes as a start; the index expiring before the blobs it names. Not server-side signing: our server is a bucket |
+| Bazel REAPI ([remote_execution.proto](https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto)) | CAS of `Digest{hash, size}` plus an ActionCache from action digest to result. AC entries carry no signature; trust is the server's access control. Recently `GetChunkMapping`/`SpliceBlob` with FastCDC 2020 (avg 512 KiB recommended) | The CAS/AC split. Not its unsigned AC (our gateway is not trusted for integrity, so the index must carry its own proof), and not its per-entry unary lookups: 165,752 functions would be 165,752 calls (**read**, [ci-runner.md](ci-runner.md)) |
+| [Attic](https://github.com/zhaofengli/attic) | Nix cache on S3: FastCDC 16/64/256 KiB for NARs of 64 KiB and up, zstd, narinfo signed by the server, GC by retention then orphans | Same chunk sizes as a start; the index expiring before the blobs it names. Not server-side signing: our gateway checks signatures but holds no signing key, so a compromised gateway cannot forge an entry |
 | casync / [desync](https://github.com/folbricht/desync) | Chunk stores `<4 hex>/<id>.cacnk`, chunks 16:64:256 KB, zstd, SHA-512/256 or SHA-256, index files listing chunks | A chunk list per large file; over S3, HTTP and OCI alike |
 | Nix binary cache ([narinfo](https://nix.dev/manual/nix/2.35/protocols/binary-cache/narinfo.html)) | Ed25519 over a fingerprint, `trusted-public-keys = name:key`, keys named `cache.example.org-1` and incremented to revoke; rotation signs with both keys ([nix#12976](https://github.com/NixOS/nix/pull/12976)) | Named, numbered keys and an overlap when rotating |
 | sccache 0.19 ([S3.md](https://github.com/mozilla/sccache/blob/main/docs/S3.md)) | S3 and R2 (`SCCACHE_ENDPOINT`, `SCCACHE_REGION=auto`), `SCCACHE_S3_NO_CREDENTIALS` for public read-only PR builds. Keys by BLAKE3 over the sysroot's shared libraries, arguments, sources and env ([Caching.md](https://github.com/mozilla/sccache/blob/main/docs/Caching.md)) | Read-only anonymous access for PRs. Not the tool (AGENTS.md forbids it), and not keying by the compiler's bytes, which is the problem this design removes. Whether it hashes the rustc binary itself we did not confirm (**reported**) |
@@ -157,7 +179,7 @@ linked into one program. So the version is checked, not trusted.
   The corpus is large on purpose, and slice 2 measures how many keys it has against a typical
   project.
 - **Dev builds.** A blaze built from a dirty tree, or not by CI, reads the shared tier and writes
-  only the local store and private tiers. The shared tier is written only by CI on main, after
+  only the local store and private tenants. The shared tier is written only by CI on main, after
   the golden check passed on that commit.
 
 ### Other keys
@@ -179,24 +201,214 @@ linked into one program. So the version is checked, not trusted.
 - **Proc-macro expansions and build-script runs**, as cache.md keys them, under `EXPAND` and
   `SCRIPT`.
 
+## The gateway
+
+Clients never get the bucket. A Cloudflare Worker, `blaze-gateway`, answers on the cache's
+domain (`cache.<domain>` below) and is the only holder of an R2 binding to the bucket. Reads
+through a binding cost no egress, and no client, CI job included, holds an R2 credential. The
+Worker authenticates, applies the access rule, hashes every uploaded blob again, rate-limits,
+meters, and keeps hot objects in the edge cache. Everything it decides is in a sans-IO crate
+behind a `Store` trait, so R2 can be swapped for S3 or a disk without a client noticing.
+
+### Tenants, namespaces and tokens
+
+A **tenant** owns index entries: heads and segments. A tenant is either **public** (`blaze`,
+filled by CI on main; later other open projects) or **private** (a user or a company). Blobs live
+in **namespaces**: one public namespace, shared by every public tenant, and one private namespace
+per private tenant.
+
+- A **public blob** is named in storage by its SHA-256. Anyone may get it by that hash, with no
+  token. Only public tenants' write tokens may put one.
+- A **private blob** is named in storage by `HMAC-SHA256(k_t, sha256)`, where
+  `k_t = HKDF(gateway secret, tenant id)` is the tenant's store key. It dedupes only within its
+  tenant: two tenants that upload the same bytes store them twice. Neither the object names in
+  the bucket nor the location table reveal a private blob's hash, so someone who lists the bucket
+  (a leaked R2 credential, an operator) cannot test a guess against them without the gateway's
+  secret. The gateway itself does see the content, so this protects against the bucket, not
+  against the gateway ([non-goals](#goals-and-non-goals)).
+- A private tenant reads public blobs and its own private ones; its index may name both. It never
+  reads another tenant's private blobs, and nothing it can do tells it whether another tenant
+  stored something.
+
+A **token** is a 256-bit random bearer secret. Workers KV maps `SHA-256(token)` to
+`{tenant, scope: read | write, expiry}`; revoking deletes the entry, and since KV is eventually
+consistent that reaches every location in about 60 s (**reported**,
+[KV](https://developers.cloudflare.com/kv/concepts/how-kv-works/)). A request with no token is
+anonymous: it reads public blobs and public tenants' index. CI on main holds a `blaze` write
+token, `BLAZE_CACHE_TOKEN`, in the `cache-writer` environment.
+
+### The API
+
+Bodies are deterministic CBOR, as everywhere in blaze ([AGENTS.md](../AGENTS.md), no-mcp).
+
+| request | does |
+|---|---|
+| `GET /t/<tenant>/trust` | the tenant's signed key list |
+| `POST /t/<tenant>/heads {names}` | the heads among `names` that exist, signed, with their ETags; one request for 50 ancestors or 500 unit keys |
+| `GET /t/<tenant>/seg/<sha256>` | one index segment |
+| `POST /has {hashes}` | for each hash: present in the caller's private namespace, present in the public namespace, or absent |
+| `POST /get {hashes}` | one streamed response of the blobs, as a pack stream: per blob its hash, dictionary, lengths and zstd frame, in the order the Worker reads them |
+| `GET /blob/<sha256>` with `Range` | one blob's stored frame, or a range of it: for the lazy mode and to resume |
+| `POST /put` (a pack stream, at most 32 MB) | stores the blobs into the caller's namespace; answers with each blob's place |
+| `PUT /t/<tenant>/seg` | writes one segment, after checking every blob it names is readable by the tenant |
+| `PUT /t/<tenant>/head/<name>` | writes one signed head, after checking its signature, tenant and turn, and refreshing what it names ([GC](#gc)); `If-Match` for `latest` |
+| `PUT /t/<tenant>/trust` | the key list, signed by the tenant's root key |
+
+The Worker finds a blob through a location table in D1:
+`blobs(ns, key, object, offset, length, ulength, dict)`, with `key` the hash for the public
+namespace and the HMAC for a private one, and `objects(object, uploaded)` for refresh. A `/get`
+or `/has` of thousands of hashes is one query per about 30,000 hashes (a JSON array bound as one
+parameter: D1 allows 100 parameters and 2 MB per value, **reported**,
+[limits](https://developers.cloudflare.com/d1/platform/limits/)).
+
+### The access rule, and how it is applied
+
+The namespaces a request may look in are fixed from its token **before** any lookup: the public
+namespace, plus the caller's own private namespace when the token names a private tenant. The
+gateway then derives each key (`sha256` for public, `HMAC(k_t, sha256)` for private) and looks
+only there. So:
+
+- **One 404.** "Absent" and "stored by another tenant" give the same answer from the same code
+  path: there is no lookup in another tenant's namespace to take a different time or return a
+  different code. The same holds for index reads: a private tenant's head or segment fetched with
+  another tenant's token is the 404 a missing one is.
+- **No upload shortcut.** `/put` into a private namespace stores the whole body, every time.
+  Within the tenant a blob already present is not stored twice, but the bytes were sent and the
+  answer and its timing do not depend on what other tenants have. A client skips uploading what
+  `/has` or its own index says its tenant already has, which reveals only its own data to it.
+- **Public reads reveal public data.** That a public blob exists is not a secret: it was built
+  from open source by CI.
+- **Rate limits** per tenant on `/has` and `/get` (and per IP for anonymous requests) cap how many
+  guesses anyone can test, even against their own or public data. They use the Workers Rate
+  Limiting binding, which counts per Cloudflare location and is approximate (**reported**,
+  [rate limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)).
+
+### Checks on write
+
+- **Every blob is hashed by the gateway.** `/put` decompresses each frame (pure-Rust `ruzstd`,
+  which runs in the Worker's WebAssembly; dictionaries come from the caller's readable
+  namespaces) and refuses the whole request when one does not hash to the name it came with, or
+  when its uncompressed length exceeds what its header says or 4 MiB. Then the frames are written
+  as one `.bpk` into the caller's namespace and recorded in D1. So the CAS cannot be poisoned,
+  even by a stolen write token.
+- **Every index write is checked**: a segment names only blobs the tenant can read (one D1 query);
+  a head's signature verifies against the tenant's current key list, its signed `tenant` field is
+  the token's tenant, its turn is above the stored one, and every segment it names exists in that
+  tenant's index. The gateway checks signatures to keep junk out; clients check them again,
+  because the gateway is trusted for confidentiality and availability, never for integrity
+  ([Trust and signing](#trust-and-signing)).
+- **No delete** in the API. Objects leave only by the lifecycle rules.
+
+### Abuse, metering and billing
+
+Every request writes a data point to Workers Analytics Engine: tenant, operation, bytes in and
+out, storage reads and writes, D1 rows, CPU time. That is the meter future billing reads; it costs
+nothing per request at this volume (**unverified**). Denial of wallet is bounded by the rate
+limits, a per-invocation CPU limit in the Worker's configuration, the 32 MB `/put` body, and the
+4 MiB cap on a frame's uncompressed size.
+
+### Cost and latency
+
+Cloudflare's prices (**reported**, [Workers](https://developers.cloudflare.com/workers/platform/pricing/),
+[R2](https://developers.cloudflare.com/r2/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/)):
+Workers $0.30 per million requests and $0.02 per million CPU milliseconds beyond the $5 plan's
+allowance, calls from the Worker to its bindings not billed as requests; R2 $0.36 per million
+reads, $4.50 per million writes, $0.015 per GB-month, no egress; D1 $0.001 per million rows read
+and $1 per million rows written. Per request (**unverified** arithmetic):
+
+| request | what it costs us |
+|---|---|
+| a head, segment or trust list from the edge cache | about $0.32 per million |
+| the same on an edge miss | plus an R2 read: about $0.68 per million |
+| a `/get` of 20 MB, cold at that location | 1 request, about 20 R2 reads of 1 MiB windows, one D1 query, tens of CPU ms: about $0.000008 |
+| the same, hot | about $0.000001 |
+| a cold CI fetch of blaze's workspace (300 MB) | about 40 requests and 300 R2 reads: about $0.00013 |
+| a `/put` of 32 MB | about a second of CPU (hashing and decompressing in WebAssembly), one R2 write, and one D1 row per blob, about 80,000 rows: about $0.08 |
+| a main commit's push (10 to 30 MB of new blobs) | about $0.03 to $0.08, nearly all D1 rows |
+| a cold fill after a `CODEGEN` bump (about 800,000 blobs) | about $0.80 |
+
+The D1 rows are the cost that matters, and it is per new blob, not per read. If it proves too
+much, one row per run of consecutive blobs in a pack, with the run's hashes in the pack's own
+index, cuts it by the run length; slice 3 measures it.
+
+Latency, from a runner or a developer near a Cloudflare location (**unverified**, slice 1
+measures all of it): a Worker isolate starts in a few milliseconds; a head or segment from the
+edge cache is about 10 to 30 ms to the first byte; an edge miss adds the trip to R2's region,
+about 30 to 150 ms; a D1 query adds the trip to its primary, the same order. A `/get` streams as
+its R2 reads arrive: a Worker keeps at most 6 subrequests waiting for headers
+(**reported**, [limits](https://developers.cloudflare.com/workers/platform/limits/)), so the
+client gets parallelism from 16 `/get` requests in flight, not from one. The rate of one
+streamed Worker response is not known to us and is the first number slice 1 takes.
+
+## Threat model
+
+The gateway is a shared store, so what one tenant uploads must not become an oracle for
+another. Harnik, Pinkas and Shulman-Peleg showed that cross-user deduplication in cloud storage
+lets anyone test whether a given file exists (confirmation of a file) and, for files with a few
+unknown bits, find those bits by uploading every candidate and watching whether the service
+already has it (learn the remaining information) ("Side channels in cloud services:
+deduplication in cloud storage", IEEE Security & Privacy 8(6), 2010,
+[doi:10.1109/MSP.2010.187](https://doi.org/10.1109/MSP.2010.187), **reported**). The signals were
+whether an upload was skipped, its bytes on the wire, and its time. Build outputs are
+deterministic, which makes guessing easier: the attacker can build each candidate exactly.
+
+Examples, and what stops each:
+
+- **A build script bakes a low-entropy secret into an output.** A company's `build.rs` writes a
+  4-digit region code or a license key with 20 bits of freedom into a generated `.rs` file whose
+  function is then compiled. An attacker builds the same crate for each of the 10,000 candidates
+  and asks whether the cache has the result. Stopped: the company's blobs are in its private
+  namespace under HMAC names; the attacker's `/has` and `/put` look only in the public namespace
+  and the attacker's own, so every candidate is absent, by the same path.
+- **A test fixture holds a Social Security number.** The fixture file is a blob, and a test pass
+  record names its digest. Nine digits are 10^9 guesses, far fewer once the area and group are
+  known. Stopped the same way; on top, the per-tenant rate limit on `/has` makes even probing
+  one's own data slow.
+- **Confirming that a company uses a library at a given commit.** A dependency unit's key is
+  computable from a `Cargo.lock`, so a unit head or unit blob for `acme-internal-fork` at commit
+  `abc123` would prove that the company builds it. Stopped: index reads are per tenant, a
+  private tenant's heads 404 to everyone else exactly like absent ones, and its units' blobs are
+  private. crates.io units built by the public tier are public by design: they say what blaze's
+  CI built, not who else uses it.
+
+What remains, stated rather than solved:
+
+- **Edge-cache timing of public blobs.** The edge cache is per location. A fast answer for a
+  public blob tells the asker that someone near that location fetched it lately. It reveals use
+  of open-source code near a city, not which tenant. Accepted; an open question if a tenant
+  needs more.
+- **Which units a machine asks for**, seen by Cloudflare and us (open questions).
+- **The gateway sees private content.** A compromised gateway or Cloudflare can read and withhold
+  private data, never make a client run code (signatures and hashes are checked by the client).
+
 ## Object layout in the bucket
 
-The bucket exists: `blaze-cache`, in Indexable's Cloudflare account, one tier. The repository
-has the secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`, from an object
-read and write token scoped to that bucket alone, checked with `aws s3 ls` (**reported**, by the
-coordinator, 2026-10-27). Its one lifecycle rule so far aborts multipart uploads left incomplete
-after a day. Everything except heads and the trust list is immutable and named by a SHA-256.
+The bucket exists: `blaze-cache`, in Indexable's Cloudflare account. The repository has the
+secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`, from an object read and
+write token scoped to that bucket alone, checked with `aws s3 ls` (**reported**, by the
+coordinator, 2026-10-27). With the gateway they leave GitHub: the Worker reads and writes through
+its binding, and keeps an R2 S3 token as a Worker secret only for the server-side copies of the
+[refresh](#gc), which the binding lacks. Its one lifecycle rule so far aborts multipart uploads
+left incomplete after a day. Only the gateway reads or writes these names; everything except
+heads and trust lists is immutable.
 
-    trust/keys                            the signing keys, signed by the root key; never expires
-    index/heads/p/<project>/<commit>      a signed head: one main commit of one project
-    index/heads/p/<project>/latest        a signed head: the newest of the above
-    index/heads/u/<unit-key>              a signed head: what any project reuses of one dependency unit
-    index/seg/<sha256>                    an index segment (sorted entries, deterministic CBOR)
-    cas/packs/<sha256>.bpk                a pack of blobs: frames, then its index
-    cas/dict/<sha256>                     a zstd dictionary
+    trust/<tenant>/keys                          the tenant's signing keys, signed by its root key; never expires
+    index/heads/<tenant>/p/<project>/<commit>    a signed head: one main commit of one project
+    index/heads/<tenant>/p/<project>/latest      a signed head: the newest of the above
+    index/heads/<tenant>/u/<unit-key>            a signed head: what any project reuses of one dependency unit
+    index/seg/<tenant>/<sha256>                  an index segment (sorted entries, deterministic CBOR)
+    cas/pub/<sha256>.bpk                         a pack of public blobs, named by the SHA-256 of its bytes
+    cas/t/<tenant id>/<hmac>.bpk                 a pack of one private tenant's blobs, named by HMAC(k_t, its SHA-256)
 
-The two top prefixes are the two lifetimes of [GC](#gc): `index/` lives about 30 days from its
-upload, `cas/` about 90.
+For a private tenant the gateway also replaces every name after `<tenant>` (project, commit,
+unit key, segment hash) with its HMAC under `k_t`, and `<tenant id>` is an opaque number, so a
+listing of the bucket shows that some tenant has some heads and packs, and nothing of what they
+are.
+
+The kind comes before the tenant in every name because lifecycle rules match literal prefixes,
+and the three prefixes are the three lifetimes of [GC](#gc): `index/heads/` about 28 days from
+upload, `index/seg/` about 32, `cas/` about 90. The location table and the token map are in D1
+and KV, not in the bucket.
 
 A `<project>` is a name CI picks (`blaze`, `ripgrep`, the bench apps). A `<commit>` is a main
 commit's id. A `<unit-key>` is the hex of a dependency unit's key.
@@ -229,21 +441,25 @@ that needs most of a crate reads one contiguous range.
 
 A segment is a sorted table of entries, `(kind, key) → value`, encoded as deterministic CBOR (the
 same encoding the agent API uses, [AGENTS.md](../AGENTS.md), no-mcp). A value names blobs by
-SHA-256 and, for each, where it is: pack, offset, length. A segment is named by the SHA-256 of
-its bytes and holds at most about 4 MB, so a project is tens of segments.
+SHA-256 and uncompressed length only; where a blob is stored is the gateway's business (its
+location table), so storage can be repacked or moved without an index change. A segment is
+named by the SHA-256 of its bytes and holds at most about 4 MB, so a project is tens of
+segments.
 
 A head says what one main commit of one project used:
 
     head {
-      name: "p/blaze/9f3c...", turn: 1834, created: 2026-10-27T03:40:00Z,
+      tenant: "blaze", name: "p/blaze/9f3c...", turn: 1834, created: 2026-10-27T03:40:00Z,
       versions: { store: 4, codegen: 41, expand: 7, script: 3, unit: 2, tests: 5 },
       toolchain: "nightly-2026-10-25", target: "x86_64-unknown-linux-gnu",
       segments: [ sha256, ... ],
       signer: "blaze-ci-1", signature: ed25519(over everything above)
     }
 
-A project head names every segment that main's build at that commit read or wrote: it is the
-prefetch list. A unit head (`index/heads/u/<unit-key>`) names the segments holding what any build has
+The signed `tenant` field means a head cannot be replayed into another tenant's index: the
+gateway refuses it on write and a client refuses it on read. A project head names every segment
+that main's build at that commit read or wrote: it is the prefetch list. A unit head
+(`index/heads/<tenant>/u/<unit-key>`) names the segments holding what any build has
 of that dependency unit: its rlib chunks, its functions, its non-generic code. A user's project
 that depends on `serde 1.0.228` with the same features finds those by the unit key, computed from
 its own `Cargo.lock` before any request. That is how people other than us benefit: every
@@ -303,13 +519,15 @@ tool. The Rust crate is `sha2` 0.11, which picks SHA-NI or the ARMv8 extensions 
   zstd to find much in on its own. CI trains a dictionary (`zstd::dict::from_samples`, 112 KiB)
   per (codegen version, target, blob kind) from a sample of main's blobs, and compresses each
   small blob with it.
-- **How dictionaries are named and versioned.** A dictionary is a blob like any other: stored at
-  `cas/dict/<sha256 of its bytes>`, immutable, and named in each pack's index by that hash. The zstd
+- **How dictionaries are named and versioned.** A dictionary is a blob like any other, in the
+  same namespace as the blobs compressed with it, named by the SHA-256 of its bytes, and named
+  in each pack's index and in every segment whose entries use it, so it is fetched, checked and
+  refreshed with them. The gateway needs it to check an upload, so it is put before the blobs
+  that use it. The zstd
   frame also carries a 32-bit dictionary id, which is a hint only: we set it from the hash's first
   bytes, mapped into the range zstd leaves for private use (over 32,767 and under 2^31,
   [format](https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md)). A new
-  dictionary is a new hash; packs written with the old one keep naming it, and a pack's refresh
-  refreshes the dictionaries it names. Retraining happens on a `CODEGEN` bump and when slice 6's
+  dictionary is a new hash; packs and segments written with the old one keep naming it. Retraining happens on a `CODEGEN` bump and when slice 6's
   measurement says the ratio has drifted.
 - **Large chunks** are compressed without a dictionary, and kept as they are when compression
   saves less than an eighth.
@@ -330,27 +548,31 @@ verifications for nushell, several seconds of one core at tens of microseconds e
 
 ### The keys
 
-- **Root key** `blaze-root-1`: offline, held by Andrew. Its public half is compiled into blaze.
-  It signs only `trust/keys`.
-- **`trust/keys`**: a list of signing keys, each with a name (`blaze-ci-1`), its public key, its
-  role (signs project and unit heads of this tier), not-before and not-after times, and a turn
+- **Root key** `blaze-root-1`: offline, held by Andrew. Its public half is compiled into blaze
+  and registered with the gateway as the `blaze` tenant's root. It signs only the key list.
+- **The key list** (`GET /t/blaze/trust`): a list of signing keys, each with a name (`blaze-ci-1`), its public key, its
+  role (signs project and unit heads of this tenant), not-before and not-after times, and a turn
   number. Signed by the root key. Clients fetch it at daemon start (it is small and cached for a
-  minute at the edge) and remember its highest turn.
+  minute at the edge) and remember its highest turn. A private tenant has the same structure with
+  its own root key, which it gives the gateway when it registers and its clients in their
+  configuration.
 - **CI signing key** `blaze-ci-N`: an Ed25519 secret in a GitHub environment, `cache-writer`,
-  that only workflows on `refs/heads/main` can enter. The R2 write token sits in the same
-  environment. Today `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT` are repository
-  secrets, which every workflow run on a branch of this repository can read (not a fork's); slice 1
-  moves them into `cache-writer` before any workflow uses them. The job that signs and uploads is a separate job from the build: it receives the
+  that only workflows on `refs/heads/main` can enter. The gateway write token
+  `BLAZE_CACHE_TOKEN` sits in the same environment; no R2 credential is in GitHub at all. Today
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT` are repository secrets, which every
+  workflow run on a branch of this repository can read (not a fork's); slice 1 moves them into
+  the Worker's secrets and deletes them from the repository before any workflow uses the cache.
+  The job that signs and uploads is a separate job from the build: it receives the
   build's new blobs and entries as an artifact, so build scripts, proc macros and tests (which run
   sandboxed in the build job, [cargo.md](cargo.md#every-test-runs-in-a-sandbox)) never run in a
   process that can read the key.
 
 ### Rotation and revocation
 
-- **Rotation**, every few months or at will: add `blaze-ci-(N+1)` to `trust/keys` (root-signed,
+- **Rotation**, every few months or at will: add `blaze-ci-(N+1)` to the key list (root-signed,
   turn + 1), switch CI to it, and keep `blaze-ci-N` until its not-after date, so heads it signed
   stay valid while they are still live. This is the overlap Nix uses ([nix#12976](https://github.com/NixOS/nix/pull/12976)).
-- **Revocation**: publish `trust/keys` without the key (turn + 1). A client refuses any head
+- **Revocation**: publish the key list without the key (turn + 1). A client refuses any head
   signed by a key the current list does not have, so revocation reaches each client at its next
   daemon start and the heads the key signed stop being read. CI then signs fresh heads for the
   live main commits with the new key.
@@ -361,19 +583,27 @@ verifications for nushell, several seconds of one core at tens of microseconds e
 
 | who | reads | writes |
 |---|---|---|
-| CI on main, `cache-writer` job | shared tier | shared tier: packs, segments, dictionaries, heads |
-| CI on a branch of the repository, a merge-queue run | shared tier | nothing (no environment, no token) |
-| CI on a pull request from a fork | shared tier | nothing: GitHub gives fork runs no secrets |
-| any user | shared tier, anonymously | their own private tier, with their own keys |
+| CI on main, `cache-writer` job | public | the `blaze` tenant and public blobs, with `BLAZE_CACHE_TOKEN` and the signing key |
+| CI on a branch of the repository, a merge-queue run | public, anonymously | nothing (no environment, no token) |
+| CI on a pull request from a fork | public, anonymously | nothing: GitHub gives fork runs no secrets |
+| any user | public, anonymously; their own tenant with its token | their own tenant, with its token and their keys |
+| the gateway | everything | locations, refresh copies; never a head, since it holds no signing key |
 
 ### What it guarantees, and what not
 
-- Tampering with the bucket, the CDN or the network: caught. Blobs fail their hash; entries fail
-  their signature or are absent.
-- A stolen R2 write token without the signing key: can delete (caught as missing objects) and
-  upload unsigned junk (refused). Cannot make a client run anything.
+- Tampering with the bucket, the gateway, the edge cache or the network: caught. Blobs fail their
+  hash; entries fail their signature or are absent. The gateway is trusted to keep private data
+  private and to serve what it has, not to tell the truth: a client checks every hash and
+  signature itself.
+- A stolen gateway write token without the signing key: can upload blobs that hash correctly
+  (storage, metered and rate-limited) and segments no signed head names. Cannot delete, since the
+  API has no delete, and cannot write a head. Cannot make a client run anything. Revoked by
+  deleting its KV entry.
+- A stolen R2 credential (the Worker's copy secret): can delete or overwrite objects, which
+  clients see as 404s and hash failures, and can list names, which show nothing of private
+  content (HMAC names). Cannot make a client run anything.
 - A replayed older head or key list: refused by its turn, as `signed.rs` does for manifests now. A
-  CDN that serves a stale `latest` makes a client miss, never run the wrong code.
+  stale `latest` from the edge cache makes a client miss, never run the wrong code.
 - A compromised main build: not caught by signatures. CI signs what main's build produced. If a
   dependency's build script escaped the sandbox and changed an output before it was hashed, the
   signed entry is wrong. Two mitigations, neither complete: the signer is not reachable from the
@@ -383,38 +613,40 @@ verifications for nushell, several seconds of one core at tens of microseconds e
 - Users' assumption, as today ([cache.md](cache.md#trust-and-signing)): two builds of blaze with
   the same versions compile the same key to equivalent code.
 
-### Private tiers
+### Private tiers are tenants
 
-`RA_JIT_REMOTE` becomes a list, read in order; the shared tier is the default last entry:
+`RA_JIT_REMOTE` becomes a list of tenants, read in order; the shared one is the default last
+entry:
 
-    RA_JIT_REMOTE="s3://acme-blaze/cache?endpoint=...&trust=acme-ci-1:<pubkey>,shared"
+    RA_JIT_REMOTE="https://cache.<domain>/t/acme?token=env:ACME_CACHE_TOKEN&trust=acme-root-1:<pubkey>,shared"
 
-Each tier has its own trust: the shared tier's is the root key compiled into blaze; a private
-tier names its keys in the address (`trust=`) or in `RA_JIT_REMOTE_TRUST`. A machine writes only
-to tiers it holds a signing key and credentials for. An entry in a tier names only blobs of that
-same tier, so one tier's GC never breaks another's entries; a push to a private tier uploads the
-blobs it lacks even when the shared tier has them. `shared` alone is the default for released
-blaze builds (see the open questions on whether reading it is on by default), and `off` turns
-every tier off.
+Each entry has its own trust: `shared` is the `blaze` tenant with the root key compiled into
+blaze; a private tenant names its root key in the address (`trust=`) or in `RA_JIT_REMOTE_TRUST`,
+and its token by the environment variable that holds it, never inline. The address can be
+another gateway (`blaze-gateway-server`, self-hosted) as well as ours. A machine writes only to a
+tenant it holds a write token and a signing key for. A private tenant's segments may name public
+blobs, which it then neither uploads nor stores again; GC keeps them alive for it like for anyone
+([GC](#gc)). `off` turns every entry off.
 
 ## The fetch path
 
 ### What happens when the daemon starts
 
-1. **Before the workspace loads**: fetch `trust/keys` and the project head. The project is the
-   checkout's `RA_JIT_PROJECT`, else a name derived from its git remote; the head is that of the
-   merge base of `HEAD` with main (`index/heads/p/<project>/<merge-base>`), else the newest head of the
-   first 50 first-parent ancestors, else `latest`. Two requests at a CDN round trip each (tens of
-   milliseconds, **unverified**).
-2. **Segments**, all at once: tens of objects of up to 4 MB, from the edge.
-3. **Units**: from the checkout's `Cargo.lock`, compute every dependency unit key and fetch those
-   unit heads the project head does not already cover, so a project with no head of its own
-   (any user's) still gets its dependencies.
-4. **Plan**: the union of blobs the segments name, minus what the local store has, grouped by pack
-   and offset, ranges closer than 1 MiB merged, split into parts of 4 to 8 MB.
-5. **Fetch**: 16 parts in flight (`RA_JIT_REMOTE_JOBS`, default 16 for R2). Each part is
-   decompressed frame by frame, each blob hashed against its name, and written into the local
-   store. A whole pack that arrives is put in the store as a pack.
+1. **Before the workspace loads**: fetch the tenant's key list and the project head. The project
+   is the checkout's `RA_JIT_PROJECT`, else a name derived from its git remote; the head is that
+   of the merge base of `HEAD` with main, else the newest of the first 50 first-parent ancestors,
+   else `latest`: one `POST /t/<tenant>/heads` with all 52 names. Two requests, each a round trip
+   to the nearest Cloudflare location (tens of milliseconds, **unverified**).
+2. **Segments**, all at once: tens of `GET /t/<tenant>/seg/...` of up to 4 MB, from the edge.
+3. **Units**: from the checkout's `Cargo.lock`, compute every dependency unit key and ask for the
+   unit heads the project head does not already cover, in one `POST /t/blaze/heads`, so a project
+   with no head of its own (any user's) still gets its dependencies.
+4. **Plan**: the union of blobs the segments name, minus what the local store has, in the
+   segments' order (which is crate and walk order), cut into batches of about 4 to 20 MB of
+   expected compressed size.
+5. **Fetch**: 16 `POST /get` in flight (`RA_JIT_REMOTE_JOBS`, default 16). Each response is
+   decompressed frame by frame as it streams, each blob hashed against its name, and written
+   into the local store.
 6. **Meanwhile** rust-analyzer loads the workspace (5 s for ripgrep, 37 to 52 s cold for nushell,
    **read**, [ci-runner.md](ci-runner.md)). Store lookups during the load and the first build
    find what has arrived; a key whose blob is still in flight waits on that part rather than
@@ -437,6 +669,9 @@ higher level and dictionaries it may be 15 to 25% smaller (**unverified**, slice
 
 Rates from R2 to a GitHub `ubuntu` runner: about 38 MiB/s on one stream, 210 to 225 MiB/s with 16
 in parallel (**reported**, [cloud-cache-action](https://xsavikx.github.io/cloud-cache-action/guide/performance.html)).
+Those were measured against R2 directly, not through a Worker. A `/get` adds a Worker between the
+two, on the same edge; whether one streamed Worker response reaches 38 MiB/s, and whether 16 reach
+the aggregate, is what slice 1 measures first. The table assumes they do.
 
 | what | size | 1 stream (38 MiB/s) | 16 streams (215 MiB/s) |
 |---|---|---|---|
@@ -457,61 +692,60 @@ turning store records back into the daemon's values ([research/warm-start.md](re
 
 ### HTTP versions
 
-- R2's S3 endpoint answered no HTTP/3, and HTTP/2 was disabled on it in 2023 (**reported**,
+- The client speaks only to the gateway's domain, a Cloudflare zone: HTTP/1.1, HTTP/2 and, with
+  the zone's switch on, HTTP/3 between the client and Cloudflare
+  ([HTTP/3](https://developers.cloudflare.com/speed/optimization/protocol/http3/), **reported**).
+  Worker routes are served on all of them.
+- The gateway reaches R2 through its binding, not over HTTP the client sees. So R2's S3
+  endpoint, which answered no HTTP/3 and had HTTP/2 disabled in 2023 (**reported**,
   [answeroverflow](https://www.answeroverflow.com/m/971611340068245504),
-  [community](https://community.cloudflare.com/t/cloudflare-r2-http-2-error/441326)). Writes are
-  HTTP/1.1, many connections.
-- The custom domain is a Cloudflare zone: HTTP/2 and, with the zone's switch on, HTTP/3 between
-  the client and Cloudflare (not to the origin) ([HTTP/3](https://developers.cloudflare.com/speed/optimization/protocol/http3/),
-  **reported**). Reads go there.
+  [community](https://community.cloudflare.com/t/cloudflare-r2-http-2-error/441326)), matters only
+  for the gateway's server-side copies.
 - The 16-stream figure was measured with parallel connections. Sixteen streams on one HTTP/2
   connection share one TCP congestion window and may not reach it; the default backend opens
-  several connections and slice 2 measures how many.
+  several connections and slice 1 measures how many.
 
 ### Edge caching
 
-The custom domain needs a Cache Rule ("cache everything") for `cas/` and `index/seg/` with an
-edge TTL of a week: objects there never change while they exist (a week, not longer, so the edge
-does not keep serving an object long after its expiry). `index/heads/` and `trust/` are cached
-for 60 s.
-Cloudflare serves range requests from cached files and fills them with 1 MiB-aligned origin
-ranges ([range requests](https://developers.cloudflare.com/cache/reference/range-requests/),
-**reported**). The bucket's `r2.dev` address is rate-limited to hundreds of requests a second and
-is never used ([limits](https://developers.cloudflare.com/r2/reference/limits/), **reported**).
+The Worker caches with the Cache API, which is per Cloudflare location. Segments and trust lists
+are cached for a week and 60 s; heads for 60 s, and a head write purges its entry at the
+location that took the write (other locations may serve a stale head for up to a minute, which
+is a miss, never wrong code). Packs are cached in 1 MiB-aligned windows keyed by the object's
+storage name, so one window serves every `/get` that touches it; objects never change while they
+exist, and a refresh copies the same bytes. Cached windows are internal: the cache is consulted
+only after the access rule has said which namespaces the request may read, so it adds no path by
+which another tenant's data could answer. The cache's one signal, a faster answer for a public
+blob someone near the same location fetched lately, is in the [threat model](#threat-model).
+Cloudflare caches objects up to 512 MB; our packs are at most 64 MB.
 
 ## The write path
 
-Only the `cache-writer` job on main. After the build and test job of a main commit passes the
-golden check and finishes:
+Only the `cache-writer` job on main writes the `blaze` tenant. After the build and test job of a
+main commit passes the golden check and finishes:
 
-1. **Refresh** what the head will name that is old: every segment it reuses that was uploaded
-   before today, and every pack (and the dictionaries its frames name) holding a blob the build
-   used that was uploaded more than 45 days ago, is copied onto itself (a server-side
-   `CopyObject` to the same name), which sets its upload date to now (**reported**, coordinator).
-   A copy moves no bytes through the runner and costs one write.
-2. **Collect** what the build wrote to its store that the shared tier lacks: the build job lists
-   the keys it wrote, and the latest head's segments say what the tier already has.
-3. **Pack**: compress each new blob at the upload level, with the dictionary for its kind, into
-   packs of up to 64 MB, ordered by crate and walk order. Large files are chunked first.
-4. **Upload packs and dictionaries** with `If-None-Match: *`. R2 evaluates it atomically
-   ([consistency](https://developers.cloudflare.com/r2/reference/consistency/), **reported**); a
-   412 means another writer put the same bytes there, which is success.
-5. **Upload segments** the same way: entries for the new blobs, and for the project head a full
-   list of segments its build used (old segments reused by hash).
-6. **Sign and upload heads**: `index/heads/p/<project>/<commit>` with `If-None-Match: *`, every
-   touched `index/heads/u/<unit-key>`, then `index/heads/p/<project>/latest` with `If-Match` on the
-   ETag read before,
-   retried a few times when another writer moved it, as `extend_list` does today.
-7. **Test passes and flakes** of the commit's test run go into a segment of the same head.
+1. **Collect** what the build wrote to its store that the tenant lacks: the build job lists the
+   keys it wrote, and the latest head's segments say what is there already. `/has` answers for
+   any hash the segments do not settle.
+2. **Pack**: compress each new blob at the upload level, with the dictionary for its kind, into
+   pack streams of up to 32 MB, ordered by crate and walk order. Large files are chunked first.
+   New dictionaries go first.
+3. **Put**: `POST /put`, 4 to 8 at a time. The gateway hashes each blob, writes a `.bpk` and its
+   D1 rows, and answers. A retried `/put` stores a second copy of what it already stored, harmless
+   and expired like the rest.
+4. **Segments**: `PUT /t/blaze/seg`, entries for the new blobs, and for the project head a full
+   list of the segments its build used (old segments reused by hash). The gateway refuses a
+   segment that names a blob the tenant cannot read.
+5. **Sign and write heads**: `PUT /t/blaze/head/p/<project>/<commit>`, every touched unit head,
+   then `latest` with `If-Match` on the ETag read before, retried a few times when another writer
+   moved it, as `extend_list` does today. Before it stores a head, the gateway refreshes what the
+   head names ([GC](#gc)); the request returns when the head is stored.
+6. **Test passes and flakes** of the commit's test run go into a segment of the same head.
 
 Readers never see a head naming an object not yet written, because objects go up before the
-heads that name them, and anything old a head names is refreshed before the head goes up. A
-job killed midway leaves unnamed objects, which expire with their prefix. A push of a main commit that fails fails main's train run: a broken writer is seen
-the same day.
-
-Writes cost little: R2 bills $4.50 per million writes and $0.015 per GB-month, egress free
-([pricing](https://developers.cloudflare.com/r2/pricing/), **reported**). A main commit is tens of
-writes; a 100 GB tier is $1.50 a month.
+segments and heads that name them, and the gateway refreshes anything old a head names before it
+stores the head. A job killed midway leaves unnamed objects, which expire with their prefix. A
+push of a main commit that fails fails main's train run: a broken writer is seen the same day.
+What a push costs is in [Cost and latency](#cost-and-latency).
 
 ## Failure modes
 
@@ -522,10 +756,13 @@ is a different matter: that is a bug or an attack, and must be seen and fixed.
 
 | failure | what blaze does |
 |---|---|
-| a tier cannot be reached (DNS, connect, timeout, 5xx after retries) | locally: the build goes on without that tier, and **every** build's `Finished` line says so (`[ra-jit, remote down: cache.<domain>: timed out]`), not one line in a log. With `RA_JIT_REMOTE_REQUIRED=1`, which blaze's own CI sets, it is an error and the job fails |
-| a blob that does not hash to its name | error, naming the object, the tier and the head; after one retry that bypasses the edge cache. Today the build compiles those functions instead; that changes to an error |
+| a tier cannot be reached (DNS, connect, timeout, a 5xx from the gateway after retries) | locally: the build goes on without that tier, and **every** build's `Finished` line says so (`[ra-jit, remote down: cache.<domain>: timed out]`), not one line in a log. With `RA_JIT_REMOTE_REQUIRED=1`, which blaze's own CI sets, it is an error and the job fails |
+| a blob that does not hash to its name | error, naming the object, the tier and the head; after one retry that asks the gateway to bypass its edge cache. Today the build compiles those functions instead; that changes to an error |
 | a head or key list with a bad signature, an unknown or revoked key, or an older turn | error, naming the head and the key |
 | a head names an object the tier does not have (404) | error: by the invariant of [GC](#gc) a blob outlives every entry that names it, so this is a bug |
+| 401 or 403: a token unknown, expired, revoked or without the scope | error naming the tenant, the operation and the token's variable; never a quiet fall back to anonymous |
+| 429 from a rate limit | wait the `Retry-After` the gateway gives, a bounded number of times; then as an unreachable tier (the status line, or an error in CI) |
+| the gateway refuses a write: a blob that does not hash to its name, a segment naming a blob the tenant cannot read, a bad signature, a wrong tenant, an older turn | error in the write job, with the gateway's reason; main's train run fails |
 | no head for this project, or none for this codegen version | not an error: the tier has nothing for this build yet. The `Finished` line says `remote: nothing for codegen 41` |
 | the local disk fills while fetching | as today: `store: nothing more is kept of this build`, and the build goes on |
 | the write job fails | main's train run fails, with the step and the request |
@@ -541,110 +778,141 @@ treats it as an error. This is the one choice here Andrew may want the other way
 ## GC
 
 There is no GC job. R2's lifecycle rules expire an object by its age since upload, not since its
-last read, so the design makes upload age mean "last used by main":
+last read, so the design makes upload age mean "last used by a head":
 
 | prefix | expires after | what keeps it |
 |---|---|---|
-| `index/` (heads and segments) | about 30 days | CI on main writes a new head for each commit, and refreshes the segments it reuses |
-| `cas/` (packs and dictionaries) | about 90 days | CI on main copies onto itself any pack it used that is older than about 45 days |
-| `trust/` | never | written by hand with the root key |
+| `index/heads/` | about 28 days | CI on main writes a new head for each commit and rewrites `latest` and the unit heads it touches |
+| `index/seg/` | about 32 days | the gateway copies onto itself every segment a new head names that is more than 2 days old |
+| `cas/` (public and private packs) | about 90 days | the gateway copies onto itself every pack holding a blob a new head's segments name that is more than about 45 days old |
+| `trust/` | never | written by hand with a root key |
 
-**The invariant: a blob always outlives every index entry that points to it.** An index object
-written at time `t` expires at about `t + 30 days`. Every pack it names was refreshed if it was
-older than 45 days at `t`, so it expires no earlier than `t + 45 days`. Every segment a head names
-is new or was refreshed on the day the head was written, so it expires with the head or after it.
-The margins (45 against 30 days, a day for segments) absorb the lifecycle's day granularity and a
-write job that runs for hours. Readers check nothing of it: a 404 for a named object is a bug and
-an error ([Failure modes](#failure-modes)).
+**The refresh** runs inside `PUT .../head/...`, before the head is stored. The gateway reads the
+segments the head names (from the edge cache), looks up their blobs' objects in D1, and copies
+each one that is too old onto itself with the S3 API's `CopyObject`, which sets its upload date
+to now and moves no bytes through the Worker (**reported**, coordinator; the R2 binding has no
+copy, so this one call uses the S3 API with a Worker secret, signed by `rusty-s3`). Then it
+updates `objects.uploaded` in D1. The copies are tens per main commit; the request takes as long
+as they do.
+
+**The invariant: a blob always outlives every index entry that points to it.** A head stored at
+time `t` expires no earlier than `t + 28 days`. Every segment it names was uploaded or copied at
+`t - 2 days` or later, so it expires no earlier than `t + 30 days`, after the head. Every pack
+holding a blob one of those segments names was uploaded or copied at `t - 45 days` or later, so
+it expires no earlier than `t + 45 days`, after the segment. A later head that names the same
+segment refreshes it and its packs again by the same rule, so the chain holds for every head
+that is still live. The margins absorb the lifecycle's day granularity (a rule deletes at or
+after its age, never before) and a write job that runs for hours. Readers check nothing of it: a
+404 for a named object is a bug and an error ([Failure modes](#failure-modes)).
+
+The same rule keeps private tenants' data, and the public packs a private tenant's segments name:
+the refresh is per object, so a public pack the `blaze` tenant stopped naming stays as long as some
+live private head names it.
 
 What follows from it:
 
 - A head nobody writes again (a project not built on main for a month, an old commit) disappears
-  after 30 days, and then a branch based on that commit misses. The merge-base lookup goes back 50
-  commits, so this matters only for branches over a month old.
-- A pack main stopped using expires 90 days after its last refresh. A pack with one used blob and
-  many dead ones is refreshed whole; the write job writes a new pack of the used blobs instead when
-  under half of a pack's blobs are used, and names that one.
-- Unit heads are rewritten when CI touches the unit; one untouched for 30 days expires, and a
+  after 28 days, and then a branch based on that commit misses. The merge-base lookup goes back 50
+  commits, so this matters only for branches about a month old.
+- A pack no live head uses expires 90 days after its last refresh. A pack with one used blob and
+  many dead ones is refreshed whole; the write job puts the used blobs again into a new pack
+  when under half of a pack's blobs are used, and the location table moves to the new one.
+- Unit heads are rewritten when CI touches the unit; one untouched for 28 days expires, and a
   user's next build of that dependency misses until CI builds it again.
 - Released blaze versions' std projects are heads like any other: kept while the release train
-  writes them, expired 30 days after the last write.
+  writes them, expired 28 days after the last write.
+- D1 rows of expired objects: a row whose object's `uploaded` is more than about 80 days old is
+  treated as absent, and the gateway deletes such rows in the background of the writes that
+  touch the table, a bounded number per request. No separate job.
 - Cost of the refreshes: a copy per old pack and per reused segment per main commit, tens of
   writes at $4.50 a million.
 
-The rules are added with `wrangler r2 bucket lifecycle add blaze-cache ...` (one per prefix, by
-age) once the layout is final, which is the last step of slice 4; until then nothing expires but the
-incomplete multipart uploads. A private tier on R2 uses the same rules; one on S3 the same with S3
-lifecycle rules; a directory remote keeps today's `ra-jit cache gc --remote`.
+The rules are added with `wrangler r2 bucket lifecycle add blaze-cache ...`, one per prefix
+(`index/heads/`, `index/seg/`, `cas/`) by age, once the layout is final, which is the last step of
+slice 4; until then nothing expires but the incomplete multipart uploads. A self-hosted
+`blaze-gateway-server` over S3 uses S3 lifecycle rules with the same prefixes; over a disk it
+expires by the same ages itself.
 
 ## Crate layout
 
-Sans-IO throughout: every crate below `blaze-remote-io` takes bytes and events and returns bytes
-and requests, with no sockets, files or clocks of its own. Each can be tested, fuzzed and
-simulated with a fake transport that drops, reorders, truncates and corrupts.
+Sans-IO throughout: every crate below the IO crates takes bytes and events and returns bytes and
+requests, with no sockets, files or clocks of its own. Each can be tested, fuzzed and simulated
+with a fake transport that drops, reorders, truncates and corrupts. The gateway's logic is the
+same kind of crate, so the client's tests run against the real gateway in one process.
 
 | crate | what it is | depends on |
 |---|---|---|
 | `blaze-semver` | the version constants, nothing else | none |
 | `blaze-cas` | `Digest` (SHA-256), streaming verification (`Verifier::push(&[u8])`, `finish() -> Result`), chunk lists | `sha2` |
 | `blaze-cdc` | VectorCDC AE: scalar reference, AVX-512, AVX2, NEON; a streaming chunker that is fed bytes and yields cut points | none. Ported from ix's `crates/storage/cdc` (below) |
-| `blaze-pack` | the `.bpk` format: writer and reader over byte slices, the frame index, dictionary references, the range planner (wanted blobs to coalesced byte ranges) | `blaze-cas`, `zstd` |
-| `blaze-index` | entry kinds, segments (deterministic CBOR), heads, `trust/keys`, Ed25519 signing and checking, turns | `blaze-cas`, `ed25519-dalek`, a CBOR crate |
-| `blaze-remote-proto` | the protocol as state machines: `Fetch` (trust, head, segments, plan, parts), `Push` (collect, pack, conditional uploads in order), `Refresh` (which old packs and segments a head needs copied onto themselves). Each emits `Request { op: Get{range} \| Put{if_none_match \| if_match} \| Copy{onto_itself} \| List, name }` and consumes `Response` events. SigV4 signing of S3 requests is sans-IO too (`rusty-s3`) | the four above, `rusty-s3` |
+| `blaze-pack` | the `.bpk` format and the pack stream: writer and reader over byte slices, the frame index, dictionary references | `blaze-cas`, `ruzstd` to read, `zstd` (feature) to write |
+| `blaze-index` | entry kinds, segments (deterministic CBOR), heads with their tenant, key lists, Ed25519 signing and checking, turns | `blaze-cas`, `ed25519-dalek`, a CBOR crate |
+| `blaze-gateway-api` | the wire API: request and response types, their CBOR, status codes. The one contract between client and gateway | `blaze-index`, `blaze-pack` |
+| `blaze-remote-proto` | the client as state machines: `Fetch` (trust, heads, segments, plan, `/get` batches) and `Push` (collect, `/has`, pack, `/put`, segments, heads). Each emits `blaze-gateway-api` requests and consumes responses | the above |
 | `blaze-remote-io` | `trait Transport { fn send(&self, Request) -> impl Future<Output = Response> }` with body streaming, plus the backends below | `blaze-remote-proto` |
-| `ra-jit` (`remote.rs`, `keeper.rs`) | drives a `Fetch` at daemon start and a `Push` when told; owns policy (tiers, env vars, status lines) | `blaze-remote-io` |
+| `blaze-gateway-core` | the gateway as state machines: token to tenant and namespaces, the access rule, `/put` checking, index-write checks, refresh planning, cache keys, meter events. Emits `Store` operations (`get` with range, `head`, `put` with conditions, `copy_onto_itself`), `Locations` queries and `Meter` events, and consumes their results | `blaze-gateway-api`, `blaze-index`, `blaze-pack`, `hmac`, `hkdf` |
+| `blaze-gateway` | the Worker: runs `blaze-gateway-core` with the R2 binding, D1, KV, the Cache API, the Rate Limiting binding and Analytics Engine, and the S3 `CopyObject` signed by `rusty-s3`. Built for `wasm32-unknown-unknown` with workers-rs | `blaze-gateway-core`, `worker` |
+| `blaze-gateway-server` | the same core natively (hyper, tokio) over a disk or S3 `Store` and SQLite locations: for tests, CI's own end-to-end check and self-hosting | `blaze-gateway-core`, `rusty-s3` |
+| `ra-jit` (`remote.rs`, `keeper.rs`) | drives a `Fetch` at daemon start and a `Push` when told; owns policy (tenants, env vars, status lines) | `blaze-remote-io` |
 | `ra-jit-store` | reads and writes format 4 packs through `blaze-pack` | `blaze-pack` |
 
 Backends of `blaze-remote-io`:
 
 - **tokio, HTTP/1.1 and HTTP/2** (hyper 1 and rustls): the default everywhere.
-- **directory**: a mounted path, for tests and for today's `Dir` remote.
+- **in-process**: `blaze-gateway-core` over a directory, for tests and for today's `Dir` remote.
 - **io_uring on Linux**, with compio (active; monoio's and tokio-uring's last releases are from
-  2024, **reported**). Only for the bulk part reads into the store, behind a measurement in slice
+  2024, **reported**). Only for the bulk `/get` reads into the store, behind a measurement in slice
   8 showing it beats tokio on a GitHub runner. The daemon is not inside the test sandbox, whose
   seccomp filter refuses `io_uring_setup` ([cargo.md](cargo.md#every-test-runs-in-a-sandbox)), so
   nothing stops it there.
-- **HTTP/3**, for reads from the custom domain, with tokio-quiche (open-sourced 2025-11, now
-  0.20, over quiche 0.30, **reported**). Its `ClientH3Driver` is a building block, not an HTTP
-  client, so this is real work; worth it only if slice 8 shows it helps on lossy or long links
-  (users far from a point of presence), since a datacenter runner is unlikely to gain.
+- **HTTP/3** to the gateway's domain, with tokio-quiche (open-sourced 2025-11, now 0.20, over
+  quiche 0.30, **reported**). Its `ClientH3Driver` is a building block, not an HTTP client, so
+  this is real work; worth it only if slice 8 shows it helps on lossy or long links (users far
+  from a Cloudflare location), since a datacenter runner is unlikely to gain.
 
 Crates to reuse, and not:
 
-- **Reuse**: `sha2` 0.11; `zstd` 0.14 with `zdict_builder`; `ed25519-dalek` 3 (already used by
-  `signed.rs`); `rusty-s3` 0.10 (sans-IO S3 request signing, which fits the design better than the
-  AWS SDK); hyper and rustls; compio and tokio-quiche behind their slices.
+- **Reuse**: `sha2` 0.11; `zstd` 0.14 with `zdict_builder` for writing and training; `ruzstd` for
+  reading inside the Worker, where the C library is awkward in WebAssembly (whether it reads every
+  frame `zstd` writes with a dictionary is checked by a property test, **unverified**);
+  `ed25519-dalek` 3 (already used by `signed.rs`); `hmac` and `hkdf`; workers-rs (`worker`) for
+  the Worker; `rusty-s3` 0.10 (sans-IO S3 request signing) for the copies and the self-hosted S3
+  store; hyper and rustls; compio and tokio-quiche behind their slices.
 - **VectorCDC**: no crate on crates.io (**reported**). ix has one, `crates/storage/cdc` in
   indexable-inc/ix: AE with VectorCDC's SIMD, AVX-512, AVX2, NEON and a scalar reference that the
   tests compare against, defaults 16/64/256 KiB, no dependencies beyond `bytes` and `parking_lot`
   (**read**). Port it as `blaze-cdc` rather than depend on the ix workspace.
 - **Not `fastcdc`**: a good crate (5.0, used by Attic and REAPI's reference), but the decision is
   VectorCDC, and AE needs no table. **Not `gearhash`**: VectorCDC is not a gear hash.
-- **Not `aws-sdk-s3`** in the new crates: it does its own IO and cannot sit behind the transport
-  trait. Today's `s3.rs` keeps it until slice 3 replaces it.
+- **Not `aws-sdk-s3`** in the new crates: it does its own IO, and no client talks S3 any more.
+  Today's `s3.rs` keeps it until slice 3 replaces it.
 - **Not `object_store`**: it does its own IO as well.
 
 ## Rollout
 
 Ranked by what each gives. Each slice lands on its own and is measured.
 
-1. **R2 behind today's remote.** The bucket (made), a custom domain with the cache rules above,
-   the secrets moved into the `cache-writer` environment, CI on main pushing to
-   `s3://blaze-cache/v3` (today's layout, under a prefix of its own) with today's `ra-jit cache push` (the AWS SDK with R2's endpoint and `region=auto`,
-   which sccache documents) and every CI run reading over `https://`. The `https` place learns
-   real paths beside its release-asset names. First run of a real object store; measures the
-   single and 16-stream rates on our own runners. No format change, and no expiry: `v3/` is
-   removed by hand once slice 4 has replaced it.
+1. **The gateway over R2, serving today's remote.** The bucket (made); the Worker v0 on the
+   custom domain, holding the R2 binding and the R2 secrets (deleted from the repository); a
+   `blaze` write token in `cache-writer`. v0 serves today's layout under `v3/`: `GET` of packs,
+   key lists and manifests for anyone, and `PUT` for the write token, where it hashes each pack
+   and key list against its name. A new `Place::Gateway` in `remote.rs` reads and writes it; CI
+   on main pushes with today's `ra-jit cache push`, and every CI run reads. Metering from the
+   first request. First run of a real object store; measures one stream and 16 through a Worker
+   on our runners, and the latencies of [Cost and latency](#cost-and-latency). No format change,
+   and no expiry: `v3/` is removed by hand once slice 4 has replaced it.
 2. **The codegen version.** `blaze-semver`, `Identity` without `build`, the golden check and the
    determinism check in the merge gate. Removes the per-release miss. Measures the corpus's keys
    against nushell's.
-3. **Sans-IO crates and the new packs.** `blaze-cas`, `blaze-pack`, `blaze-remote-proto`,
-   `blaze-remote-io` with the tokio backend; store format 4; ranged parallel reads; the prefetch
-   at daemon start. Measures fetch time against slice 1.
-4. **The signed index.** Segments, project and unit heads, `trust/keys`, the root and CI keys;
-   manifests and key lists retired. Unit heads let other projects use what blaze's CI built. The
-   write job's refresh step, then the lifecycle rules for `index/` and `cas/` with `wrangler r2
-   bucket lifecycle add`.
+3. **Sans-IO crates, the new packs and the API.** `blaze-cas`, `blaze-pack`, `blaze-gateway-api`,
+   `blaze-remote-proto`, `blaze-remote-io` with the tokio backend, `blaze-gateway-core` with the
+   Worker and the native server; `/has`, `/get`, `/put`, the location table, public and private
+   namespaces; store format 4; the prefetch at daemon start. Measures fetch time and D1 cost
+   against slice 1.
+4. **The signed index.** Segments, project and unit heads, key lists, the root and CI keys, the
+   tenant field and the index-write checks; manifests and key lists of today retired. Unit heads
+   let other projects use what blaze's CI built. The refresh inside head writes, then the
+   lifecycle rules with `wrangler r2 bucket lifecycle add`.
 5. **Large files.** `blaze-cdc` from ix; dependency units and the toolchain as chunk lists;
    measures dedup across consecutive main commits.
 6. **Compression.** The upload level and the dictionaries, measured against level 3 in 128 KB
@@ -652,7 +920,10 @@ Ranked by what each gives. Each slice lands on its own and is measured.
 7. **Test passes.** Slice R2 of [ci-runner.md](ci-runner.md) writes its records into this index;
    flake entries; `RA_JIT_TESTS=affected` reads them, so a branch skips what main passed.
 8. **Backends.** io_uring and HTTP/3, each kept only if it measures faster where it is meant to.
-9. **Private tiers.** The tier list and per-tier trust.
+9. **Private tenants.** Registration (tenant id, root key), tokens, per-tenant limits, the
+   tenant list in `RA_JIT_REMOTE`, and the threat model's examples as end-to-end tests: a second
+   tenant probing the first's planted secret, fixture and unit head gets only 404s, with timing
+   that does not separate them.
 
 The refresh (slice 4) must ship before the lifecycle rules are added (its last step), or the
 first rule would expire what a head names.
@@ -661,7 +932,7 @@ first rule would expire what a head names.
 
 - **Is reading the shared tier on by default** for released blaze builds? On by default is what
   makes everyone benefit; it also tells Cloudflare and us which dependency units a machine
-  builds (the unit keys it asks for). Proposed: on, with `RA_JIT_REMOTE=off`, and said in the
+  builds (the unit keys it asks for, and the address it asks from). Proposed: on, with `RA_JIT_REMOTE=off`, and said in the
   install docs.
 - **Should an unreachable tier stop a local build**, as it stops CI? Proposed: no, with the status
   on every `Finished` line; the no-fallback rule could be read either way.
@@ -669,6 +940,21 @@ first rule would expire what a head names.
   Per-entry signatures would let one entry be served alone, at 64 bytes and one verification each.
   Is per-head what you meant by "each entry signed"?
 - **The cache's domain**: which name, and on which Cloudflare account (`cache.<domain>` above).
+- **Who deploys the Worker**: by hand with `wrangler deploy`, or a `cache-deploy` environment on
+  main holding a Cloudflare API token. Proposed: the environment, so the Worker's code is what
+  main says.
+- **D1 cost**: one row per new blob is about $0.03 to $0.08 per main commit and $0.80 per cold
+  fill (above). Is that acceptable, or should slice 3 go straight to one row per run of blobs?
+- **Anonymous limits for GitHub runners**: fork pull requests read anonymously, and GitHub's
+  runners share address ranges, so a per-IP limit may throttle many unrelated runs at once. Fork
+  runs get no secrets and no OIDC token to tell us who they are. Proposed: a generous per-IP
+  byte limit, watched through the meter.
+- **Which projects are public tenants** besides `blaze`, and who may create one: public blobs are
+  readable by anyone, so a tenant must only be public if everything it builds is open source.
+- **Edge-cache timing for public blobs** ([threat model](#threat-model)): accepted as is, or
+  should a private tenant's reads of public blobs bypass the edge cache?
+- **Billing**: what a private tenant is charged for (bytes stored, bytes served, D1 rows), read
+  from the meter.
 - **Who holds the root key**, and where (a hardware key, a printed backup).
 - **Dev builds and the version**: should a blaze built from a dirty tree salt its local keys with
   a hash of the codegen crates, so a developer's codegen experiment never lands in their own
