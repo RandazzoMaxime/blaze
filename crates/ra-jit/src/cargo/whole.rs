@@ -21,7 +21,7 @@ use super::{
     FAILED,
     cli::{Invocation, Subcommand, worker_env},
     client::{self, Start},
-    daemon::{Checkout, Reply, Request, WorkerConfig},
+    daemon::{Checkout, NotBuilt, Reply, Request, WorkerConfig},
     plan::Plan as Linked,
     run, say,
     state::{as_built, configured_env, library_path, place, repository, run_env},
@@ -118,7 +118,7 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<i32> {
     compiling(asked, &programs);
     let checkout = checkout(asked, &cwd, &metadata, &programs, false, BTreeMap::new());
     if let Err(why) = whole(&cwd, &checkout, &programs) {
-        say::error(&why);
+        why.say();
         return Ok(FAILED);
     }
     finished(asked, asked.profile(), started);
@@ -239,7 +239,7 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
             }
         }
         if let Err(why) = whole(&cwd, checkout, programs) {
-            say::error(&why);
+            why.say();
             return Ok(FAILED);
         }
     }
@@ -363,21 +363,62 @@ fn finished(asked: &Invocation, profile: &str, started: Instant) {
     say::status(asked.flags.quiet, "Finished", &finished);
 }
 
+/// Why a whole build failed: the errors the daemon found in the source, written as rustc
+/// and cargo write them, or what else kept a program from being built.
+enum Unbuilt {
+    Said(String),
+    Why(String),
+}
+
+impl From<String> for Unbuilt {
+    fn from(why: String) -> Unbuilt {
+        Unbuilt::Why(why)
+    }
+}
+
+impl Unbuilt {
+    fn say(self) {
+        match self {
+            Unbuilt::Said(written) => eprintln!("{written}"),
+            Unbuilt::Why(why) => say::error(&why),
+        }
+    }
+}
+
+/// The errors `said` of `program`, as cargo ends a build rustc turned down: with the target
+/// that did not compile.
+fn turned_down(program: &Program, said: &crate::errors::Said) -> String {
+    let name = &program.name;
+    let target = match (program.kind, program.test) {
+        (Kind::Lib | Kind::Cdylib | Kind::Staticlib, false) => "lib".to_owned(),
+        (Kind::Lib | Kind::Cdylib | Kind::Staticlib, true) => "lib test".to_owned(),
+        (Kind::Bin, false) => format!("bin \"{name}\""),
+        (Kind::Bin, true) => format!("bin \"{name}\" test"),
+        (Kind::Example, _) => format!("example \"{name}\""),
+        (Kind::Test, _) => format!("test \"{name}\""),
+    };
+    super::state::turned_down(said, &program.package.name.to_string(), &target)
+}
+
 /// Has the daemon build the `programs` of `checkout` whole, and puts each where cargo would.
 /// A worker of the daemon loads the workspace and links each program before it answers, and
 /// builds them again on what it has loaded when asked next. `Err` says why not.
-fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), String> {
+fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), Unbuilt> {
     let reply = client::ask(Request::Build(super::asking(checkout)), Start::IfMissing)
         .map_err(|it| format!("{it:#}"))?;
     let built = match reply {
         Some(Reply::Synced { programs, .. }) => programs,
-        Some(Reply::Cold { reason }) => return Err(not_loaded(cwd, checkout, &reason)),
-        None => return Err(client::why_none()),
-        Some(other) => return Err(format!("the daemon answered {other:?}")),
+        Some(Reply::Cold { reason }) => return Err(not_loaded(cwd, checkout, &reason).into()),
+        None => return Err(client::why_none().into()),
+        Some(other) => return Err(format!("the daemon answered {other:?}").into()),
     };
     for ((program, plan), built) in std::iter::zip(programs, &checkout.programs).zip(built) {
-        if let Err(why) = built {
-            return Err(format!("could not build `{}`: {}", program.name, why.why()));
+        match built {
+            Ok(_) => {}
+            Err(NotBuilt::Error(said)) => return Err(Unbuilt::Said(turned_down(program, &said))),
+            Err(why) => {
+                return Err(format!("could not build `{}`: {}", program.name, why.why()).into());
+            }
         }
         let _unwritten = crate::splice::unwritten(&plan.binary);
         let stand_ins = crate::link::stand_ins(&plan.binary).map_err(|it| format!("{it:#}"))?;
@@ -395,7 +436,8 @@ fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), St
                 "`{}` can reach functions blaze could not compile, so it is not built:\n  {}",
                 program.name,
                 reached.join("\n  ")
-            ));
+            )
+            .into());
         }
         if let Some(parent) = program.executable.parent() {
             std::fs::create_dir_all(parent)

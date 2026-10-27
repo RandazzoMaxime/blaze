@@ -8638,6 +8638,39 @@ fn run_holding(
             if let Some(why) = cold.refused_reached(&args) {
                 bail!("{why}");
             }
+            // No rustc checked the source of a build with nothing of rustc's: the worker
+            // does, all of it the build compiles and the code nothing reaches too, as rustc
+            // would. An error fails every build of the checkout until a source is written
+            // (docs/no-rustc.md, D).
+            if nothing_of_rustc && written.is_empty() {
+                let checking = Instant::now();
+                let paths: FxHashMap<vfs::FileId, PathBuf> = files
+                    .iter()
+                    .filter_map(|it| match it.file {
+                        Watched::Source(id)
+                            if args.owns(&db, id, &it.path) && listed.sees(&db, id) =>
+                        {
+                            Some((id, it.path.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut all: Vec<_> = paths.keys().copied().collect();
+                all.sort_unstable();
+                let sources = Sources { paths };
+                let within = listed.programs(&db);
+                let lints = !args.lints_capped;
+                let broken = broken_in(&db, &all, &sources, &args.checkout, within, lints);
+                let why =
+                    hir::attach_db(&db, || refusal(&db, &all, &sources, &args.checkout, broken, None));
+                eprintln!("check: {} files in {:.1?}", all.len(), checking.elapsed());
+                if let Some(why) = why {
+                    if let Refused::Error(said) = &why {
+                        errors_for_the_daemon(&args, said)?;
+                    }
+                    bail!("{why}");
+                }
+            }
             memory::report(&mut db, "build")?;
             report_stats(&known.stats);
             link(

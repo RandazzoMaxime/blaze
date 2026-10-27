@@ -1391,6 +1391,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   ready at 116.2 s instead of 142.3 s (Linux x86-64, 16 cores, medians of three). Nothing is
   left to rustc for it, and `harness/norustc` counts the same functions left to rustc on
   ripgrep (53) and nushell (534) (#37, no-rustc step E).
+- A whole build (`cargo blaze build`, `run`, `test`) that the source's errors fail writes them
+  as rustc and cargo do: each error, then `error: could not compile `app` (bin "app") due to 1
+  previous error`, and the note naming blaze's toolchain when the project pins another, where
+  it said `error: could not build `app`: ` before the first error.
+- An error in code nothing reaches, written while no daemon ran, fails the first whole build:
+  with no rustc to check the source, the worker checks every file of the crates the build
+  compiles once it has loaded them (`check: N files in ...` in its log), and every build of the
+  checkout fails with the error until a source is written. It built the program before.
 - A `#[global_allocator]` in an inline `#[cfg(test)] mod test { .. }` of a library (ureq's)
   gave the library's stand-in an allocator outside the test build, whose functions nothing
   defined: every allocation of the program reached the stand-in's trap, so nushell, which links
