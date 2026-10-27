@@ -187,9 +187,9 @@ pub(crate) const OVERRIDES: &[Override] = &[
 /// The features of ort-sys that pick its download (resolve.rs:55): each a part of the
 /// feature set its `dist.tsv` names, but `cuda`, whose part is `cuda12` or `cuda13`.
 const ORT_FEATURES: &[&str] = &[
-    "training", "tensorrt", "openvino", "onednn", "directml", "nnapi", "coreml", "xnnpack",
-    "rocm", "acl", "armnn", "tvm", "migraphx", "rknpu", "vitis", "cann", "qnn", "webgpu",
-    "azure", "nvrtx", "vsinpu", "cuda",
+    "training", "tensorrt", "openvino", "onednn", "directml", "nnapi", "coreml", "xnnpack", "rocm",
+    "acl", "armnn", "tvm", "migraphx", "rknpu", "vitis", "cann", "qnn", "webgpu", "azure", "nvrtx",
+    "vsinpu", "cuda",
 ];
 
 fn v8(of: &Of<'_>) -> anyhow::Result<Option<Download>> {
@@ -261,7 +261,8 @@ fn ort(of: &Of<'_>) -> anyhow::Result<Option<Download>> {
 fn webrtc(of: &Of<'_>) -> anyhow::Result<Option<Download>> {
     let build = (of.dependency)("webrtc-sys-build").context("it has no webrtc-sys-build")?;
     let lib = build.join("src/lib.rs");
-    let text = std::fs::read_to_string(&lib).with_context(|| format!("reading {}", lib.display()))?;
+    let text =
+        std::fs::read_to_string(&lib).with_context(|| format!("reading {}", lib.display()))?;
     let tag = between(&text, "pub const WEBRTC_TAG: &str = \"", "\"")
         .with_context(|| format!("{} has no `WEBRTC_TAG`", lib.display()))?;
     let end = text.find("/{}/{}.zip\"");
@@ -294,7 +295,11 @@ fn target_os(target: &str) -> &str {
         [_, "apple", "ios", ..] => "ios",
         [_, _, "windows", ..] => "windows",
         [_, _, "linux", ..] | [_, "linux", ..] => {
-            if target.contains("android") { "android" } else { "linux" }
+            if target.contains("android") {
+                "android"
+            } else {
+                "linux"
+            }
         }
         [_, _, os, ..] => os,
         _ => target,
@@ -407,7 +412,9 @@ impl Lock {
     fn of_root(root: &Path) -> anyhow::Result<Option<Lock>> {
         let path = root.join(FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => Lock::read(&text).with_context(|| format!("reading {}", path.display())).map(Some),
+            Ok(text) => {
+                Lock::read(&text).with_context(|| format!("reading {}", path.display())).map(Some)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -438,8 +445,10 @@ pub(crate) fn cargo_lock(path: &Path) -> anyhow::Result<Vec<Locked>> {
         #[serde(default)]
         package: Vec<Locked>,
     }
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let file: File = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let file: File =
+        toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
     Ok(file.package)
 }
 
@@ -522,7 +531,9 @@ fn hand_with(
              copy of, which a build is not to download"
         );
         let found = root.map(Path::to_owned).or_else(|| locked_dir(out_dir, var("PWD")));
-        let root = found.as_deref().with_context(|| format!("{what}, and no Cargo.lock is above {}", out_dir.display()))?;
+        let root = found
+            .as_deref()
+            .with_context(|| format!("{what}, and no Cargo.lock is above {}", out_dir.display()))?;
         let locked = cargo_lock(&root.join("Cargo.lock")).with_context(|| what.clone())?;
         let locked = locked_at(&locked, package, version, dir)?.pin();
         let Some(lock) = Lock::of_root(root)? else {
@@ -530,20 +541,31 @@ fn hand_with(
         };
         let on: Vec<String> = features
             .iter()
-            .filter(|it| var(&format!("CARGO_FEATURE_{}", it.to_uppercase().replace('-', "_"))).is_some())
+            .filter(|it| {
+                var(&format!("CARGO_FEATURE_{}", it.to_uppercase().replace('-', "_"))).is_some()
+            })
             .map(|it| (*it).to_owned())
             .collect();
-        let of_package = |it: &&Entry| it.package == package && it.var == name && it.target == target;
+        let of_package =
+            |it: &&Entry| it.package == package && it.var == name && it.target == target;
         let entries: Vec<&Entry> = lock.fetches.iter().filter(of_package).collect();
         let entry = match entries.iter().find(|it| it.version == version && it.locked == locked) {
             None if entries.is_empty() => anyhow::bail!(
                 "{what}, and {FILE} has none of it for {target}: `{COMMAND}` records it{}",
-                if var("HOST") == Some(target) { String::new() } else { format!(" (`--target {target}`)") }
+                if var("HOST") == Some(target) {
+                    String::new()
+                } else {
+                    format!(" (`--target {target}`)")
+                }
             ),
             None => anyhow::bail!(
                 "{what}, and {FILE} has it for {}, not for `{package}` {version} as Cargo.lock \
                  locks it ({locked}): `{COMMAND}` records it again",
-                entries.iter().map(|it| format!("{} ({})", it.version, it.locked)).collect::<Vec<_>>().join(", ")
+                entries
+                    .iter()
+                    .map(|it| format!("{} ({})", it.version, it.locked))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Some(entry) => *entry,
         };
@@ -570,7 +592,8 @@ fn hand_with(
 /// `out_dir` is in, else above `pwd`.
 fn locked_dir(out_dir: &Path, pwd: Option<&str>) -> Option<PathBuf> {
     let has = |it: &&Path| it.join("Cargo.lock").is_file() && it.join("Cargo.toml").is_file();
-    let above_target = profile_dir(out_dir).ok().and_then(|it| it.ancestors().find(has).map(Path::to_owned));
+    let above_target =
+        profile_dir(out_dir).ok().and_then(|it| it.ancestors().find(has).map(Path::to_owned));
     above_target.or_else(|| Path::new(pwd?).ancestors().find(has).map(Path::to_owned))
 }
 
@@ -588,7 +611,8 @@ fn key(sha256: &str) -> anyhow::Result<[u8; 32]> {
         .step_by(2)
         .map(|at| u8::from_str_radix(sha256.get(at..at + 2)?, 16).ok())
         .collect();
-    let bytes = bytes.filter(|it| it.len() == 32).with_context(|| format!("`{sha256}` is no sha256"))?;
+    let bytes =
+        bytes.filter(|it| it.len() == 32).with_context(|| format!("`{sha256}` is no sha256"))?;
     let mut key = super::keyed::Key::new("a download by its sha256");
     key.field(&bytes);
     Ok(key.done())
@@ -599,16 +623,20 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn open_store(store: Option<&Path>) -> anyhow::Result<ra_jit_store::Store> {
-    let dir = store.context(
-        "blaze keeps downloads in its store, which `RA_JIT_CACHE=off` turns off",
-    )?;
+    let dir =
+        store.context("blaze keeps downloads in its store, which `RA_JIT_CACHE=off` turns off")?;
     ra_jit_store::Store::open_by_content(dir)
         .with_context(|| format!("opening blaze's store in {}", dir.display()))
 }
 
 /// Writes the download of `entry` out below `dir`, in a directory named by its sha256, as
 /// `hand` says, unless it is there; the result is what the variable names.
-fn write_out(entry: &Entry, hand: Hand, dir: &Path, store: Option<&Path>) -> anyhow::Result<PathBuf> {
+fn write_out(
+    entry: &Entry,
+    hand: Hand,
+    dir: &Path,
+    store: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
     let at = dir.join(&entry.sha256);
     let named = match hand {
         Hand::File => at.join(file_name(&entry.url)),
@@ -633,8 +661,12 @@ fn write_out(entry: &Entry, hand: Hand, dir: &Path, store: Option<&Path>) -> any
     _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
     let written = match hand {
-        Hand::File => std::fs::write(staging.join(file_name(&entry.url)), &bytes).map_err(Into::into),
-        Hand::Unpacked { archive, into } => unpack(archive, &bytes, &staging.join(placed(into, entry))),
+        Hand::File => {
+            std::fs::write(staging.join(file_name(&entry.url)), &bytes).map_err(Into::into)
+        }
+        Hand::Unpacked { archive, into } => {
+            unpack(archive, &bytes, &staging.join(placed(into, entry)))
+        }
     };
     if let Err(e) = written {
         _ = std::fs::remove_dir_all(&staging);
@@ -676,7 +708,8 @@ fn download(url: &str) -> anyhow::Result<Vec<u8>> {
     let web = Https::open(&base, PATIENCE, Arc::new(Traffic::new(1)))?;
     let runtime = remote::runtime()?;
     runtime.block_on(async {
-        let mut body = web.read_from(name, 0).await?.with_context(|| format!("{url} is not there"))?;
+        let mut body =
+            web.read_from(name, 0).await?.with_context(|| format!("{url} is not there"))?;
         let mut bytes = Vec::new();
         loop {
             let next = tokio::time::timeout(PATIENCE, remote::https_next(&mut body)).await;
@@ -731,7 +764,10 @@ fn lock(
                 };
                 let what = || format!("the download of `{name}` {} for {target}", of.version);
                 let Some(found) = download(&of).with_context(what)? else {
-                    super::say::note(&format!("`{name}` {} downloads nothing for {target}", of.version));
+                    super::say::note(&format!(
+                        "`{name}` {} downloads nothing for {target}",
+                        of.version
+                    ));
                     continue;
                 };
                 let mut entry = Entry {
@@ -746,10 +782,15 @@ fn lock(
                     size: 0,
                     names: found.names,
                 };
-                let before = old.fetches.iter().find(|it| Entry { sha256: String::new(), size: 0, ..(*it).clone() } == entry);
+                let before = old
+                    .fetches
+                    .iter()
+                    .find(|it| Entry { sha256: String::new(), size: 0, ..(*it).clone() } == entry);
                 let (sha256, size) = match (before, downloaded.get(&entry.url)) {
                     (_, Some(done)) => done.clone(),
-                    (Some(before), None) if store.has(&key(&before.sha256)?) => (before.sha256.clone(), before.size),
+                    (Some(before), None) if store.has(&key(&before.sha256)?) => {
+                        (before.sha256.clone(), before.size)
+                    }
                     (before, None) => {
                         super::say::status(false, "Downloading", &entry.url);
                         let bytes = fetch(&entry.url).with_context(what)?;
@@ -805,7 +846,9 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
             "--target" => targets.extend(value()),
             "--manifest-path" => manifest_path = value().map(PathBuf::from),
             "-h" | "--help" => {
-                println!("{usage}\n\nWrites {FILE} beside Cargo.lock: each download a build script of the workspace needs, for each target (the host's when none is given), by its sha256.");
+                println!(
+                    "{usage}\n\nWrites {FILE} beside Cargo.lock: each download a build script of the workspace needs, for each target (the host's when none is given), by its sha256."
+                );
                 return Ok(0);
             }
             _ => {
@@ -821,7 +864,8 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
         return Ok(super::FAILED);
     }
     let cwd = std::env::current_dir()?;
-    let start = manifest_path.as_deref().and_then(Path::parent).map_or(cwd.clone(), |it| cwd.join(it));
+    let start =
+        manifest_path.as_deref().and_then(Path::parent).map_or(cwd.clone(), |it| cwd.join(it));
     let lone = || start.ancestors().find(|it| it.join("Cargo.toml").is_file()).map(Path::to_owned);
     let root = super::sandboxed::workspace_root(&start)?
         .or_else(lone)
@@ -829,8 +873,14 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
     let locked = cargo_lock(&root.join("Cargo.lock"))?;
     let path = root.join(FILE);
     let old = Lock::of_root(&root)?.unwrap_or_default();
-    let lock = if !locked.iter().any(|it| OVERRIDES.iter().any(|o| o.package == it.name && matches!(o.give, Give::Fetch { .. }))) {
-        super::say::status(false, "Locked", "no build script of the workspace downloads what blaze hands it");
+    let lock = if !locked.iter().any(|it| {
+        OVERRIDES.iter().any(|o| o.package == it.name && matches!(o.give, Give::Fetch { .. }))
+    }) {
+        super::say::status(
+            false,
+            "Locked",
+            "no build script of the workspace downloads what blaze hands it",
+        );
         if old.system.is_empty() {
             return match std::fs::remove_file(&path) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
@@ -844,15 +894,21 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
         }
         let mut resolved = BTreeMap::new();
         for target in &targets {
-            resolved.insert(target.clone(), resolve(&cwd, manifest_path.as_deref(), target, &locked)?);
+            resolved
+                .insert(target.clone(), resolve(&cwd, manifest_path.as_deref(), target, &locked)?);
         }
         let store = open_store(super::daemon::store().as_deref())?;
         lock(OVERRIDES, &resolved, &old, &store, &download)?
     };
     let writing = path.with_extension("lock.writing");
-    std::fs::write(&writing, lock.text()).and_then(|()| std::fs::rename(&writing, &path))
+    std::fs::write(&writing, lock.text())
+        .and_then(|()| std::fs::rename(&writing, &path))
         .with_context(|| format!("writing {}", path.display()))?;
-    super::say::status(false, "Locked", &format!("{} downloads in {}", lock.fetches.len(), path.display()));
+    super::say::status(
+        false,
+        "Locked",
+        &format!("{} downloads in {}", lock.fetches.len(), path.display()),
+    );
     Ok(0)
 }
 
@@ -881,8 +937,11 @@ fn resolve(
     let json = blaze_metadata::metadata(&asked)?;
     let metadata: cargo_metadata::Metadata = serde_json::from_str(&json)?;
     let resolve = metadata.resolve.context("`cargo metadata` resolved nothing")?;
-    let package_of = |id: &cargo_metadata::PackageId| metadata.packages.iter().find(|it| it.id == *id);
-    let dir_of = |it: &cargo_metadata::Package| it.manifest_path.parent().map(|it| it.as_std_path().to_owned());
+    let package_of =
+        |id: &cargo_metadata::PackageId| metadata.packages.iter().find(|it| it.id == *id);
+    let dir_of = |it: &cargo_metadata::Package| {
+        it.manifest_path.parent().map(|it| it.as_std_path().to_owned())
+    };
     let mut found = Vec::new();
     for node in &resolve.nodes {
         let Some(package) = package_of(&node.id) else { continue };
@@ -891,16 +950,17 @@ fn resolve(
         }
         let version = package.version.to_string();
         let source = package.source.as_ref().map(|it| it.repr.clone());
-        let Some(locked) = locked
-            .iter()
-            .find(|it| it.name == package.name.as_str() && it.version == version && it.source == source)
-        else {
+        let Some(locked) = locked.iter().find(|it| {
+            it.name == package.name.as_str() && it.version == version && it.source == source
+        }) else {
             continue;
         };
         let dependencies = node
             .deps
             .iter()
-            .filter_map(|dep| Some((package_of(&dep.pkg)?.name.to_string(), dir_of(package_of(&dep.pkg)?)?)))
+            .filter_map(|dep| {
+                Some((package_of(&dep.pkg)?.name.to_string(), dir_of(package_of(&dep.pkg)?)?))
+            })
             .collect();
         found.push(Resolved {
             locked: locked.clone(),
@@ -935,17 +995,19 @@ pub(crate) fn no_override_note(
             let scheme = printed[..at].rsplit(|c: char| !c.is_ascii_alphabetic()).next()?;
             matches!(scheme, "http" | "https").then_some(())?;
             let rest = &printed[at + 3..];
-            let end = rest.find(|c: char| c == '/' || c == ':' || c.is_whitespace() || "\"'`)>".contains(c));
+            let end = rest
+                .find(|c: char| c == '/' || c == ':' || c.is_whitespace() || "\"'`)>".contains(c));
             Some(&rest[..end.unwrap_or(rest.len())]).filter(|it| !it.is_empty())
         })
         .collect();
     hosts.sort();
     hosts.dedup();
-    let tried = [tried.join(", "), hosts.iter().map(|it| format!("`{it}`")).collect::<Vec<_>>().join(", ")]
-        .into_iter()
-        .filter(|it| !it.is_empty())
-        .collect::<Vec<_>>()
-        .join("; it names ");
+    let tried =
+        [tried.join(", "), hosts.iter().map(|it| format!("`{it}`")).collect::<Vec<_>>().join(", ")]
+            .into_iter()
+            .filter(|it| !it.is_empty())
+            .collect::<Vec<_>>()
+            .join("; it names ");
     if OVERRIDES.iter().any(|it| it.package == package) {
         return Some(format!(
             "the build script of `{package}` tried the network ({tried}) though blaze's override \
@@ -1002,9 +1064,15 @@ mod tests {
         let mut quoted = entry("z\"q", "x86_64-unknown-linux-gnu");
         quoted.features = vec!["a".to_owned(), "b".to_owned()];
         quoted.names = "linux-x64-release".to_owned();
-        let them = [quoted, entry("b", "aarch64-apple-darwin"), entry("b", "aarch64-unknown-linux-gnu"), entry("a", "x")];
+        let them = [
+            quoted,
+            entry("b", "aarch64-apple-darwin"),
+            entry("b", "aarch64-unknown-linux-gnu"),
+            entry("a", "x"),
+        ];
         let text = Lock { fetches: them.to_vec(), system: Vec::new() }.text();
-        let reversed = Lock { fetches: them.iter().rev().cloned().collect(), system: Vec::new() }.text();
+        let reversed =
+            Lock { fetches: them.iter().rev().cloned().collect(), system: Vec::new() }.text();
         assert_eq!(text, reversed, "the same text whatever the order it was made in");
         let read = Lock::read(&text).unwrap();
         assert_eq!(read.text(), text);
@@ -1013,10 +1081,16 @@ mod tests {
         let with_system = Lock::read(&format!("{text}{system}")).unwrap();
         assert_eq!(with_system.system.len(), 1);
         assert_eq!(Lock::read(&with_system.text()).unwrap(), with_system);
-        let order: Vec<(&str, &str)> = read.fetches.iter().map(|it| (&*it.package, &*it.target)).collect();
+        let order: Vec<(&str, &str)> =
+            read.fetches.iter().map(|it| (&*it.package, &*it.target)).collect();
         assert_eq!(
             order,
-            [("a", "x"), ("b", "aarch64-apple-darwin"), ("b", "aarch64-unknown-linux-gnu"), ("z\"q", "x86_64-unknown-linux-gnu")]
+            [
+                ("a", "x"),
+                ("b", "aarch64-apple-darwin"),
+                ("b", "aarch64-unknown-linux-gnu"),
+                ("z\"q", "x86_64-unknown-linux-gnu")
+            ]
         );
         assert!(Lock::read(&text.replace("version = 1", "version = 2")).is_err());
         assert!(Lock::read(&format!("{text}unknown = 1\n")).is_err());
@@ -1026,15 +1100,19 @@ mod tests {
     fn each_override_names_the_download_of_its_crate() {
         let none = |_: &str| None;
         let of = |version, target, features: &[String]| -> String {
-            let of = Of { version, target, features, source: Path::new("/nowhere"), dependency: &none };
+            let of =
+                Of { version, target, features, source: Path::new("/nowhere"), dependency: &none };
             v8(&of).unwrap().unwrap().url
         };
         assert_eq!(
             of("152.2.0", "x86_64-unknown-linux-gnu", &[]),
             "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
         );
-        assert!(of("152.2.0", "x86_64-pc-windows-msvc", &["v8_enable_sandbox".to_owned()])
-            .ends_with("/v152.2.0/rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz"));
+        assert!(
+            of("152.2.0", "x86_64-pc-windows-msvc", &["v8_enable_sandbox".to_owned()]).ends_with(
+                "/v152.2.0/rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz"
+            )
+        );
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("build/src")).unwrap();
         std::fs::write(
@@ -1045,7 +1123,13 @@ mod tests {
         .unwrap();
         let build = dir.path().join("build");
         let dependency = |name: &str| (name == "webrtc-sys-build").then(|| build.clone());
-        let of = Of { version: "0.3.23", target: "aarch64-unknown-linux-gnu", features: &[], source: dir.path(), dependency: &dependency };
+        let of = Of {
+            version: "0.3.23",
+            target: "aarch64-unknown-linux-gnu",
+            features: &[],
+            source: dir.path(),
+            dependency: &dependency,
+        };
         let found = webrtc(&of).unwrap().unwrap();
         assert_eq!(
             found.url,
@@ -1064,12 +1148,27 @@ mod tests {
         )
         .unwrap();
         let ort_of = |target, features: &[String]| {
-            let of = Of { version: "2.0.0-rc.15", target, features, source: dir.path(), dependency: &none };
+            let of = Of {
+                version: "2.0.0-rc.15",
+                target,
+                features,
+                source: dir.path(),
+                dependency: &none,
+            };
             ort(&of).map(|it| it.map(|it| it.url))
         };
-        assert_eq!(ort_of("aarch64-unknown-linux-gnu", &[]).unwrap().as_deref(), Some("https://cdn/a"));
-        assert_eq!(ort_of("aarch64-apple-darwin", &["webgpu".to_owned()]).unwrap().as_deref(), Some("https://cdn/x+coreml,webgpu"));
-        assert_eq!(ort_of("aarch64-apple-darwin", &[]).unwrap().as_deref(), Some("https://cdn/x+coreml"));
+        assert_eq!(
+            ort_of("aarch64-unknown-linux-gnu", &[]).unwrap().as_deref(),
+            Some("https://cdn/a")
+        );
+        assert_eq!(
+            ort_of("aarch64-apple-darwin", &["webgpu".to_owned()]).unwrap().as_deref(),
+            Some("https://cdn/x+coreml,webgpu")
+        );
+        assert_eq!(
+            ort_of("aarch64-apple-darwin", &[]).unwrap().as_deref(),
+            Some("https://cdn/x+coreml")
+        );
         assert!(ort_of("aarch64-unknown-linux-gnu", &["webgpu".to_owned()]).is_err());
         assert_eq!(ort_of("riscv64gc-unknown-linux-gnu", &[]).unwrap(), None);
     }
@@ -1085,7 +1184,10 @@ mod tests {
                 let Ok(mut stream) = stream else { continue };
                 let mut asked = [0; 4096];
                 _ = stream.read(&mut asked);
-                let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", bytes.len());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    bytes.len()
+                );
                 _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&bytes));
             }
         });
@@ -1096,15 +1198,26 @@ mod tests {
 
     fn fake(of: &Of<'_>) -> anyhow::Result<Option<Download>> {
         let url = FAKE_URL.get().unwrap();
-        Ok(Some(Download { url: format!("{url}/files/fake-{}-{}.bin", of.version, of.target), names: String::new() }))
+        Ok(Some(Download {
+            url: format!("{url}/files/fake-{}-{}.bin", of.version, of.target),
+            names: String::new(),
+        }))
     }
 
     const FAKE: &[Override] = &[
         Override {
             package: "fake-fetch",
-            give: Give::Fetch { var: "FAKE_ARCHIVE", features: &[], download: fake, hand: Hand::File },
+            give: Give::Fetch {
+                var: "FAKE_ARCHIVE",
+                features: &[],
+                download: fake,
+                hand: Hand::File,
+            },
         },
-        Override { package: "fake-fetch", give: Give::Value { var: "FAKE_NO_DOWNLOAD", value: "1" } },
+        Override {
+            package: "fake-fetch",
+            give: Give::Value { var: "FAKE_NO_DOWNLOAD", value: "1" },
+        },
     ];
 
     #[test]
@@ -1128,7 +1241,12 @@ mod tests {
         let locked = cargo_lock_of(&root);
         let resolved = BTreeMap::from([(
             target.to_owned(),
-            vec![Resolved { locked: locked[0].clone(), source: source.clone(), features: Vec::new(), dependencies: BTreeMap::new() }],
+            vec![Resolved {
+                locked: locked[0].clone(),
+                source: source.clone(),
+                features: Vec::new(),
+                dependencies: BTreeMap::new(),
+            }],
         )]);
         let store = ra_jit_store::Store::open_by_content(&store_dir).unwrap();
         let lock = super::lock(FAKE, &resolved, &Lock::default(), &store, &download).unwrap();
@@ -1154,16 +1272,24 @@ mod tests {
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .to_vec();
         let given = BTreeSet::new();
-        let hand = |given: &BTreeSet<String>| hand_with(FAKE, &env, &out_dir, Some(&root), given, Some(&store_dir));
+        let hand = |given: &BTreeSet<String>| {
+            hand_with(FAKE, &env, &out_dir, Some(&root), given, Some(&store_dir))
+        };
         let said = hand(&given).unwrap_err().to_string();
-        assert!(said.contains("`fake-fetch` 1.0.0") && said.contains(COMMAND) && said.contains(FILE), "{said}");
+        assert!(
+            said.contains("`fake-fetch` 1.0.0") && said.contains(COMMAND) && said.contains(FILE),
+            "{said}"
+        );
         std::fs::write(root.join(FILE), lock.text()).unwrap();
         let handed = hand(&given).unwrap();
         let profile = root.join("target/debug");
         let file = profile.join(WRITTEN).join(&it.sha256).join(format!("fake-1.0.0-{target}.bin"));
         assert_eq!(
             handed.env,
-            [("FAKE_ARCHIVE".to_owned(), file.to_str().unwrap().to_owned()), ("FAKE_NO_DOWNLOAD".to_owned(), "1".to_owned())]
+            [
+                ("FAKE_ARCHIVE".to_owned(), file.to_str().unwrap().to_owned()),
+                ("FAKE_NO_DOWNLOAD".to_owned(), "1".to_owned())
+            ]
         );
         assert_eq!(std::fs::read(&file).unwrap(), bytes);
         assert_eq!(handed.readable, [profile.join(WRITTEN)]);
@@ -1180,7 +1306,12 @@ mod tests {
 
         cargo_lock(&"ef".repeat(32));
         let said = format!("{:#}", hand(&given).unwrap_err());
-        assert!(said.contains("`fake-fetch` 1.0.0") && said.contains(&"ef".repeat(32)) && said.contains(COMMAND), "{said}");
+        assert!(
+            said.contains("`fake-fetch` 1.0.0")
+                && said.contains(&"ef".repeat(32))
+                && said.contains(COMMAND),
+            "{said}"
+        );
         cargo_lock(&checksum);
         std::fs::write(root.join(FILE), Lock::default().text()).unwrap();
         let said = hand(&given).unwrap_err().to_string();
@@ -1196,7 +1327,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut zipped = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(&mut zipped);
-        zip.start_file("linux-x64-release/lib/libwebrtc.a", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.start_file(
+            "linux-x64-release/lib/libwebrtc.a",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
         std::io::Write::write_all(&mut zip, b"!<arch>\n").unwrap();
         zip.finish().unwrap();
         let bytes = zipped.into_inner();
@@ -1210,20 +1345,32 @@ mod tests {
         (it.sha256, it.names) = (sha.clone(), "linux-x64-release".to_owned());
         let hand = Hand::Unpacked { archive: Archive::Zip, into: "dfbin/{target}/{sha256}" };
         let named = write_out(&it, hand, &dir.path().join("w"), Some(&store_dir)).unwrap();
-        let below = dir.path().join("w").join(&sha).join("dfbin/x86_64-unknown-linux-gnu").join(&sha);
+        let below =
+            dir.path().join("w").join(&sha).join("dfbin/x86_64-unknown-linux-gnu").join(&sha);
         assert_eq!(named, below.join("linux-x64-release"));
         assert_eq!(std::fs::read(named.join("lib/libwebrtc.a")).unwrap(), b"!<arch>\n");
     }
 
     #[test]
     fn a_script_refused_the_network_is_told_what_override_it_lacks() {
-        let line = |reached, what: &str| Line { reached, test: String::new(), what: what.to_owned() };
+        let line =
+            |reached, what: &str| Line { reached, test: String::new(), what: what.to_owned() };
         let lines = [line(Reached::Net, "140.82.112.4:443"), line(Reached::Read, "/x")];
         let stdout = b"cargo:rerun-if-env-changed=SOME_SYS_ARCHIVE\n";
-        let stderr = b"Error: failed to GET https://github.com/someone/some-sys/releases/a.zip: refused\n";
+        let stderr =
+            b"Error: failed to GET https://github.com/someone/some-sys/releases/a.zip: refused\n";
         let note = no_override_note("some-sys", &lines, stdout, stderr).unwrap();
-        assert!(note.contains("`some-sys`") && note.contains("140.82.112.4:443") && note.contains("`github.com`"), "{note}");
-        assert!(note.contains("var: \"SOME_SYS_ARCHIVE\"") && note.contains("a patch to read a local file"), "{note}");
+        assert!(
+            note.contains("`some-sys`")
+                && note.contains("140.82.112.4:443")
+                && note.contains("`github.com`"),
+            "{note}"
+        );
+        assert!(
+            note.contains("var: \"SOME_SYS_ARCHIVE\"")
+                && note.contains("a patch to read a local file"),
+            "{note}"
+        );
         assert!(no_override_note("some-sys", &lines[1..], stdout, stderr).is_none());
         assert!(no_override_note("v8", &lines, b"", b"").unwrap().contains("blaze's override"));
     }
@@ -1237,13 +1384,20 @@ mod tests {
             checksum: None,
         };
         let them = [
-            locked("git+https://github.com/zed-industries/livekit-rust-sdks?rev=0a1c#0a1c519cfce9b365229026b55de9b9dbdb6fed3c"),
+            locked(
+                "git+https://github.com/zed-industries/livekit-rust-sdks?rev=0a1c#0a1c519cfce9b365229026b55de9b9dbdb6fed3c",
+            ),
             locked("registry+https://github.com/rust-lang/crates.io-index"),
         ];
         let git = Path::new("/h/.cargo/git/checkouts/livekit-rust-sdks-d281/0a1c519/webrtc-sys");
         assert!(locked_at(&them, "webrtc-sys", "0.3.23", git).unwrap().pin().starts_with("git+"));
         let registry = Path::new("/h/.cargo/registry/src/index/webrtc-sys-0.3.23");
-        assert!(locked_at(&them, "webrtc-sys", "0.3.23", registry).unwrap().pin().starts_with("registry+"));
+        assert!(
+            locked_at(&them, "webrtc-sys", "0.3.23", registry)
+                .unwrap()
+                .pin()
+                .starts_with("registry+")
+        );
         assert!(locked_at(&them, "webrtc-sys", "9.9.9", registry).is_err());
     }
 }

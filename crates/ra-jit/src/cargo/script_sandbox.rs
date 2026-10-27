@@ -485,7 +485,8 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
         && let Some(note) = refused_note(lines, package, root_manifest.as_deref())
     {
         output.stderr.extend(format!("note: {note}\n").into_bytes());
-        let fetches = super::fetches::no_override_note(package, lines, &output.stdout, &output.stderr);
+        let fetches =
+            super::fetches::no_override_note(package, lines, &output.stdout, &output.stderr);
         if let Some(note) = fetches {
             output.stderr.extend(format!("note: {note}\n").into_bytes());
         }
