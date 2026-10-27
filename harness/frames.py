@@ -143,7 +143,7 @@ def table(results, base):
 
 
 async def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description="How much stack each function of a linked program takes.")
     ap.add_argument("builds", nargs="+", metavar="LABEL=BINARY")
     ap.add_argument("--base")
     ap.add_argument("--top", type=int, default=10)

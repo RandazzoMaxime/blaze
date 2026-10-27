@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """The one LLVM blaze's `llvm` feature links: built here, fetched everywhere else.
 
-crates/hir-ty-codegen/llvm.json pins it: the source (a repository, a ref and its commit; today
-LLVM's own llvmorg-23.1.4, the base of the fork wasm-host's ix-aot builds), the release of this
-repository whose assets are the builds, and per target the asset's name and sha256.
+crates/hir-ty-codegen/llvm.json pins it: the source (a repository, a ref and its commit: our
+fork indexable-inc/llvm, branch ix/23.x, LLVM 23.1.4 with our fixes, at the commit wasm-host's
+ix-aot pins, so blaze and ix-aot run one LLVM), the release of this repository whose assets are
+the builds, and per target the asset's name and sha256.
 
-  llvm.py build --target T --work DIR --out DIR   # build the pinned commit, archive it into --out
-                                                    # (named by its sha256, beside a T.json)
+  llvm.py build --target T --work DIR --out DIR [--from REPO]
+                                                    # build the pinned commit, archive it into --out
+                                                    # (named by its sha256, beside a T.json); --from
+                                                    # fetches the commit from a clone or bundle
   llvm.py fetch --target T --dir DIR               # the pinned archive for T, checked and unpacked
                                                     # into DIR (a no-op when DIR already holds it)
   llvm.py pin DIR...                               # llvm.json names the archives in DIR
@@ -20,9 +23,8 @@ macOS for macOS 13 like the release, and on Windows against the static C runtime
 Windows build. The prefix gets `blaze-llvm.json` (version, repository, commit, target), which
 crates/hir-ty-codegen/build.rs reads to refuse any other LLVM.
 
-A private source (blaze's fork, indexable-inc/llvm) is fetched with `GITHUB_TOKEN`, sent as a
-header through the environment, never on a command line. What it builds is public, as the
-release's assets.
+The fork is public: it is fetched anonymously, or with `--from` from a clone or a bundle that
+has the commit.
 
 Every step is bounded; a failure names the step, the command, its exit code and its output's
 tail. Stdlib only; `build` needs Python 3.11+, `fetch` and `pin` 3.10.
@@ -30,7 +32,6 @@ tail. Stdlib only; `build` needs Python 3.11+, `fetch` and `pin` 3.10.
 
 import argparse
 import asyncio
-import base64
 import hashlib
 import json
 import lzma
@@ -94,18 +95,19 @@ async def run(step, *cmd, cwd=None, env=None, limit=3600.0):
     return tail.decode(errors="replace")
 
 
-async def checkout(p, work):
-    """The pinned commit in `work/src`, fetched alone (depth 1)."""
+def source(p, given):
+    """Where the pinned commit is fetched from: `given` (a clone or a bundle), else llvm.json's
+    repository."""
+    return str(Path(given).resolve()) if given else p["repo"]
+
+
+async def checkout(p, work, origin):
+    """The pinned commit in `work/src`, fetched alone (depth 1) from `origin`."""
     src = work / "src"
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.extraHeader",
-                   GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic}")
     if not (src / ".git").exists():
         await run("init", "git", "init", "-q", src, limit=60)
-    await run("fetch", "git", "-C", src, "fetch", "-q", "--depth", "1", p["repo"], p["commit"], env=env, limit=1800)
+    await run("fetch", "git", "-C", src, "fetch", "-q", "--depth", "1", origin, p["commit"], env=env, limit=1800)
     await run("checkout", "git", "-C", src, "-c", "core.autocrlf=false", "-c", "core.longpaths=true", "checkout", "-q", "--force", p["commit"],
               limit=600)
     return src
@@ -166,10 +168,11 @@ def pack(prefix, out, top):
 
 async def build(args):
     p = pin()
+    origin = source(p, args.origin)
     work, out = args.work.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
-    src = await checkout(p, work)
+    src = await checkout(p, work, origin)
     bld, prefix = work / "build", work / "prefix"
     shutil.rmtree(prefix, ignore_errors=True)
     bld.mkdir(exist_ok=True)
@@ -252,13 +255,14 @@ def pin_dirs(dirs):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description="The one LLVM blaze's `llvm` feature links.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
     b.add_argument("--target", required=True)
     b.add_argument("--work", type=Path, required=True)
     b.add_argument("--out", type=Path, required=True)
     b.add_argument("--jobs", type=int)
+    b.add_argument("--from", dest="origin", help="a clone or bundle to fetch the pinned commit from")
     f = sub.add_parser("fetch")
     f.add_argument("--target", required=True)
     f.add_argument("--dir", type=Path, required=True)

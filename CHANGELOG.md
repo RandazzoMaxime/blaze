@@ -469,7 +469,8 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
-- The LLVM backend is on LLVM 23.1.4 (was 20.1.8): inkwell 0.11 and llvm-sys 231. Blaze
+- The LLVM backend is on LLVM 23.1.4 (was 20.1.8), our fork's `ix/23.x` at the commit
+  wasm-host's ix-aot pins, so both run one LLVM: inkwell 0.11 and llvm-sys 231. Blaze
   builds that LLVM itself for each target (`.github/workflows/llvm.yaml`) and pins the
   archives by sha256 in `crates/hir-ty-codegen/llvm.json`; the flake, CI and Windows fetch
   them. It is linked in statically, with libstdc++ on Linux, so a binary built with

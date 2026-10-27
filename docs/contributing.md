@@ -334,7 +334,7 @@ few thousand and before a release after large changes to the daemon.
 
 ## LLVM for `--features llvm`
 
-The LLVM backend builds against one LLVM, 23.1.4, built by blaze for each target it ships on
+The LLVM backend builds against one LLVM, 23.1.4 with our fixes, built by blaze for each target it ships on
 and pinned by its sha256 in `crates/hir-ty-codegen/llvm.json`. The flake's dev shell fetches it:
 
     nix develop -c cargo build -p ra-jit --release --features llvm
@@ -350,7 +350,8 @@ is libstdc++, so a binary built with the feature needs no LLVM where it runs. CI
 fetch the archive the same way (`.github/actions/toolchain`).
 
 The archives are built by the `llvm` workflow (`.github/workflows/llvm.yaml`, recipe
-`.github/scripts/llvm.py build`): LLVM's own `llvmorg-23.1.4`, the X86 and AArch64 targets,
+`.github/scripts/llvm.py build`): our fork `indexable-inc/llvm` at the `ix/23.x` commit
+wasm-host's ix-aot pins (LLVM 23.1.4 and our fixes, so both run one LLVM), the X86 and AArch64 targets,
 no zlib, zstd, libxml2 or terminfo, on the release's runners (Ubuntu 22.04 for an old glibc,
 macOS 13 as the deployment target, the static CRT on Windows). To move the pin, change
 `ref`, `commit` and `version` in `llvm.json`, run the workflow, and write the `targets` its
