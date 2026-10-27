@@ -88,6 +88,7 @@ impl Shape {
             rustc_abi::Primitive::Float(float) => (float.size().bits(), true, true),
             rustc_abi::Primitive::Pointer(_) => return None,
         };
+        let count = count.as_u64();
         (layout.size.bits() == 128 && bits * count == 128)
             .then_some(Shape { bits, float, signed, count, vectors: 1 })
     }
@@ -1565,7 +1566,7 @@ mod tests {
         let name = "vector.insert.nxv4i32.v4i32";
         let text = stub(name, &args, Ret::Vector(S32)).unwrap();
         assert!(
-            text.contains("ldr z0, [x1]\nldr q1, [x2]\nptrue p0.s, vl4\nmov z0.s, p0/m, z1.s\n"),
+            text.contains("ldr z0, [x2]\nldr q1, [x3]\nptrue p0.s, vl4\nmov z0.s, p0/m, z1.s\n"),
             "{text}"
         );
         let past = [Arg::Vector(S32), Arg::Fixed(S32), Arg::Int(64, Some(4))];
