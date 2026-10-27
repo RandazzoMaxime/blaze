@@ -2,8 +2,9 @@
 //! `ra-jit cache pull REMOTE`, and the same done by the daemon when `RA_JIT_REMOTE` names one.
 //! The commands on the local store alone, `ra-jit cache stats|gc|verify`, are here with them.
 //!
-//! A remote is a directory, `s3://bucket/prefix`, or an `https://` address that is read from
-//! only (`https.rs`). It holds sealed packs under the hash of
+//! A remote is a directory, `s3://bucket/prefix`, an `https://` address that is read from
+//! only (`https.rs`), or a tenant of blaze's cache gateway, `blaze+https://` (`gateway.rs`).
+//! It holds sealed packs under the hash of
 //! their bytes, the keys of each pack under the hash of those, and one manifest a project:
 //! the packs its builds were served from. A push sends the packs the manifest lacks and
 //! adds them to it; a pull fetches the ones it lists that are not here. With

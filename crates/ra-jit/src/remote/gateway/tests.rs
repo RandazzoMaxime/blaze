@@ -156,11 +156,11 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
     let method = parts.method.clone();
     if method == hyper::Method::GET || method == hyper::Method::HEAD {
         let readable = public == Some(true) || (public.is_some() && theirs);
-        let Some(stored) = state.objects.get(&(tenant.clone(), name.clone())).filter(|_| readable)
-        else {
+        let stored = state.objects.get(&(tenant.clone(), name.clone())).filter(|_| readable);
+        let Some((stored, etag)) = stored.map(|it| (it.bytes.clone(), it.etag.clone())) else {
             return not_found();
         };
-        let total = stored.bytes.len() as u64;
+        let total = stored.len() as u64;
         let range = header("range").and_then(|it| it.strip_prefix("bytes=")).map(|it| {
             let (from, to) = it.split_once('-').unwrap();
             let from: u64 = from.parse().unwrap();
@@ -177,14 +177,14 @@ async fn answer(state: &Mutex<State>, request: Request<Incoming>) -> Response<Fu
             }
             Some((from, to)) => {
                 state.ranges += 1;
-                (StatusCode::PARTIAL_CONTENT, stored.bytes[from as usize..=to as usize].to_vec())
+                (StatusCode::PARTIAL_CONTENT, stored[from as usize..=to as usize].to_vec())
             }
-            None => (StatusCode::OK, stored.bytes.clone()),
+            None => (StatusCode::OK, stored),
         };
         let mut answer = Response::new(Full::new(Bytes::from(bytes)));
         *answer.status_mut() = status;
         let headers = answer.headers_mut();
-        headers.insert(header::ETAG, stored.etag.parse().unwrap());
+        headers.insert(header::ETAG, etag.parse().unwrap());
         headers.insert("x-blaze-uploaded", "1700000000".parse().unwrap());
         if let Some((from, to)) = range {
             let range = format!("bytes {from}-{to}/{total}");
@@ -498,14 +498,14 @@ fn a_token_that_cannot_do_what_is_asked_is_an_error_that_says_so() {
         let refused = anonymous.may_write().unwrap_err().to_string();
         assert!(refused.contains(TOKEN_VAR), "{refused}");
         let reader = fake.remote(PRIVATE, Some(READER), &dir.join("b"));
-        let refused = reader.write_small("manifests/x", b"x".to_vec(), None).await.unwrap_err();
+        let refused = reader.write_small("manifests/x", b"x".to_vec(), None).await.err().unwrap();
         let refused = format!("{refused:#}");
         for said in ["403", "`rcache-test`", "write", TOKEN_VAR] {
             assert!(refused.contains(said), "{refused} lacks {said}");
         }
         assert!(!refused.contains(READER), "{refused}");
         let unknown = fake.remote(PRIVATE, Some("not-a-token"), &dir.join("c"));
-        let refused = format!("{:#}", unknown.read_small("manifests/x", 10).await.unwrap_err());
+        let refused = format!("{:#}", unknown.read_small("manifests/x", 10).await.err().unwrap());
         assert!(refused.contains("401") && !refused.contains("not-a-token"), "{refused}");
         // A refusal is not asked again.
         assert_eq!(unknown.traffic.operations.load(Ordering::Relaxed), 1);
@@ -531,7 +531,7 @@ fn a_rate_limit_and_an_outage_are_waited_out_a_bounded_number_of_times() {
         assert_eq!(writer.read_small("manifests/x", 10).await.unwrap().unwrap().0, b"one");
         // Past the bound the remote is taken to be down, which a pull says.
         fake.with(|it| it.failing = 100);
-        let down = writer.read_small("manifests/x", 10).await.unwrap_err();
+        let down = writer.read_small("manifests/x", 10).await.err().unwrap();
         assert!(format!("{down:#}").contains("503"), "{down:#}");
         assert!(writer.read_small("manifests/x", 10).await.is_err(), "it is taken to be down");
         _ = std::fs::remove_dir_all(&dir);
