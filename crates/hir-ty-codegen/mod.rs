@@ -1573,6 +1573,14 @@ impl Rejections {
         }
     }
 
+    /// Notes the first value of each static with state of `crates` and those that depend on
+    /// them, which an edit is about to reach: as rustc built them, while no edit has.
+    /// Asked before the edit.
+    pub fn take_first_values(&mut self, db: &dyn HirDatabase, crates: &[Crate]) {
+        let reached = crates.iter().flat_map(|it| it.transitive_rev_deps(db)).collect();
+        self.frozen.take_values(db, reached);
+    }
+
     /// Whether the patches of what rustc linked replace each of rustc's copies of the generic
     /// functions of the modules of `file` named `names`, which [`Self::home`] took in.
     pub fn copies_homed(&self, file: base_db::FileId, names: &[String]) -> bool {
@@ -1653,6 +1661,19 @@ impl Rejections {
         }
         for base in [&mut self.base, &mut self.rustc].into_iter().flatten() {
             base.touch(db, crates);
+        }
+        self.forget();
+    }
+
+    /// [`Rejections::touch`] with `None`, for a change to files that `include!`,
+    /// `include_str!` or `include_bytes!` read: what was compiled of any crate can be of
+    /// them, but a first value of a static only of `includers`, the crates that read them,
+    /// and of what depends on them.
+    pub fn touch_included(&mut self, db: &dyn HirDatabase, includers: &[Crate]) {
+        let values = includers.iter().flat_map(|it| it.transitive_rev_deps(db));
+        self.frozen.edit_apart(base_db::all_crates(db).iter().copied(), values);
+        for base in [&mut self.base, &mut self.rustc].into_iter().flatten() {
+            base.touch(db, None);
         }
         self.forget();
     }

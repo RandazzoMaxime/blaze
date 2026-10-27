@@ -4188,6 +4188,41 @@ fn start_from_rustc(
     Ok(())
 }
 
+/// Has each program that links with rustc's code note the first values of the statics with
+/// state of the crates `files` are of, which are about to change, and of those that depend on
+/// them (`Rejections::take_first_values`).
+fn take_first_values(db: &RootDatabase, programs: &mut [Program], files: &[vfs::FileId]) {
+    let crates: Vec<_> = files
+        .iter()
+        .flat_map(|&file| ide_db::base_db::relevant_crates(db, file).iter().copied())
+        .collect();
+    take_first_values_of(db, programs, &crates);
+}
+
+fn take_first_values_of(
+    db: &RootDatabase,
+    programs: &mut [Program],
+    crates: &[ide_db::base_db::Crate],
+) {
+    if crates.is_empty() {
+        return;
+    }
+    hir::attach_db(db, || {
+        for program in programs.iter_mut().filter(|it| !it.table.is_empty()) {
+            program.known.take_first_values(db, crates);
+        }
+    });
+}
+
+/// The crates that include one of `paths` with `include!`, `include_str!` or `include_bytes!`.
+fn includers(db: &RootDatabase, paths: &[AbsPathBuf]) -> Vec<ide_db::base_db::Crate> {
+    let all = ide_db::base_db::all_crates(db);
+    let includes = |krate: ide_db::base_db::Crate| {
+        db.included_by(krate).iter().any(|(path, _)| paths.contains(path))
+    };
+    all.iter().copied().filter(|&krate| includes(krate)).collect()
+}
+
 /// Has each program whose edits are patches of what rustc linked take in what rustc compiled
 /// of `files`, which are about to change: the functions written in them and the statics
 /// their bodies declare. A static declared outside a body is no edit of bodies alone.
@@ -9871,6 +9906,7 @@ fn run_holding(
         homed.extend(&editing);
         homed.sort_unstable();
         homed.dedup();
+        take_first_values(&db, &mut programs, &homed);
         home_in_rustcs(&db, &listed, &mut programs, &homed);
         outlines.before_edit(&db, &listed, &editing);
         for &index in &gone {
@@ -9908,6 +9944,7 @@ fn run_holding(
         if !texts.is_empty() {
             let roots: Vec<_> = texts.iter().map(|it| it.0).collect();
             untouched = roots.iter().copied().filter(|it| !editing.contains(it)).collect();
+            take_first_values(&db, &mut programs, &untouched);
             home_in_rustcs(&db, &listed, &mut programs, &untouched);
             outlines.before_edit(&db, &listed, &untouched);
             for file in write_harnesses(&mut db, texts) {
@@ -9927,7 +9964,9 @@ fn run_holding(
         }
         // Asked after the change: a file can have joined a crate with it.
         if !included.is_empty() {
-            programs.iter_mut().for_each(|it| it.known.touch(&db, None));
+            let includers = includers(&db, &included);
+            take_first_values_of(&db, &mut programs, &includers);
+            programs.iter_mut().for_each(|it| it.known.touch_included(&db, &includers));
             listed.touch(&db, None);
         }
         for path in included {
@@ -10089,7 +10128,9 @@ fn run_holding(
                 }
                 std::thread::spawn(move || {
                     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer)
+                        let answer =
+                            program.sync(&db, &listed, &paths, &edit, wanted.as_ref(), link, defer);
+                        program.refused_in_codegen(answer)
                     }));
                     done.store(true, Ordering::SeqCst);
                     // The write that interrupts waits for this.
@@ -10126,7 +10167,9 @@ fn run_holding(
                         let build = scope.spawn(move || {
                             let answer =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    program.sync(&db, listed, paths, edit, wanted, link, defer)
+                                    let answer =
+                                        program.sync(&db, listed, paths, edit, wanted, link, defer);
+                                    program.refused_in_codegen(answer)
                                 }));
                             end_link();
                             answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -10414,6 +10457,28 @@ impl Program {
         let why = format!("a build of {} panicked: {}", self.args.krate, panic_message(panic));
         eprintln!("{why}");
         Err(Refused::Cargos(why))
+    }
+
+    /// Takes a build that code generation refused (`CodegenError::Refused`: what it would
+    /// link would not be the program the source says) as that build's refusal, not the
+    /// worker's error, as [`Program::panicked`] does: the clients are told why and the worker
+    /// stays. Nothing else is built in its place.
+    fn refused_in_codegen(
+        &mut self,
+        answer: anyhow::Result<Result<String, Refused>>,
+    ) -> anyhow::Result<Result<String, Refused>> {
+        let why = match &answer {
+            Err(error) => match error.downcast_ref::<CodegenError>() {
+                Some(CodegenError::Refused(why)) => why.clone(),
+                _ => return answer,
+            },
+            Ok(_) => return answer,
+        };
+        self.known.start_again();
+        self.unbuilt.stale = true;
+        (self.wrote, self.whole) = (None, None);
+        eprintln!("refused: {why}");
+        Ok(Err(Refused::Cargos(why)))
     }
 
     /// Notes the crates rustc did not compile from the files this program is of, when it joins
