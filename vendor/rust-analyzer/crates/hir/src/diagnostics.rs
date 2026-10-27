@@ -1561,6 +1561,21 @@ impl<'a, 'db> DiagnosticsCollector<'a, 'db> {
                         _ => None,
                     }
                 }
+                Site::Param(function, index) => {
+                    let (signature, source_map) = FunctionSignature::with_source_map(db, function);
+                    signature
+                        .params
+                        .get(index as usize)
+                        .and_then(|&ty| source_map.type_syntax(ty).ok())
+                }
+                Site::Output(function) => {
+                    let (signature, source_map) = FunctionSignature::with_source_map(db, function);
+                    signature.ret_type.and_then(|ty| source_map.type_syntax(ty).ok())
+                }
+                Site::SelfTy(impl_) => {
+                    let (signature, source_map) = ImplSignature::with_source_map(db, impl_);
+                    source_map.type_syntax(signature.self_ty).ok()
+                }
                 Site::Opaque(function, index) => {
                     use hir_def::{
                         expr_store::StoreVisitor,
@@ -1584,7 +1599,21 @@ impl<'a, 'db> DiagnosticsCollector<'a, 'db> {
                     if let Some(ret_type) = signature.ret_type {
                         find.on_type(ret_type);
                     }
-                    find.found.get(index as usize).and_then(|it| source_map.type_syntax(*it).ok())
+                    let store = &signature.store;
+                    find.found.get(index as usize).and_then(|&it| {
+                        source_map.type_syntax(it).ok().or_else(|| {
+                            // An `async fn`'s future has no syntax: its output, the type
+                            // the function says it returns, has.
+                            let TypeRef::ImplTrait(bounds) = &store[it] else { return None };
+                            let [hir_def::hir::type_ref::TypeBound::Path(path, _)] = &bounds[..]
+                            else {
+                                return None;
+                            };
+                            let args = store[*path].generic_args()?.last()?.as_ref()?;
+                            let output = args.bindings.first()?.type_ref?;
+                            source_map.type_syntax(output).ok()
+                        })
+                    })
                 }
             };
             let Some(source) = source else { continue };
