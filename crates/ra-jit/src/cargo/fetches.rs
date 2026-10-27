@@ -521,7 +521,8 @@ fn hand_with(
             "the build script of `{package}` {version} downloads what `{name}` names a local \
              copy of, which a build is not to download"
         );
-        let root = root.with_context(|| format!("{what}, and it is in no workspace"))?;
+        let found = root.map(Path::to_owned).or_else(|| locked_dir(out_dir, var("PWD")));
+        let root = found.as_deref().with_context(|| format!("{what}, and no Cargo.lock is above {}", out_dir.display()))?;
         let locked = cargo_lock(&root.join("Cargo.lock")).with_context(|| what.clone())?;
         let locked = locked_at(&locked, package, version, dir)?.pin();
         let Some(lock) = Lock::of_root(root)? else {
@@ -562,6 +563,15 @@ fn hand_with(
         handed.readable.push(written);
     }
     Ok(handed)
+}
+
+/// The directory of the `Cargo.lock` of a build of a package in no workspace (a lone
+/// package's `Cargo.lock` is beside its manifest): the nearest above the target directory
+/// `out_dir` is in, else above `pwd`.
+fn locked_dir(out_dir: &Path, pwd: Option<&str>) -> Option<PathBuf> {
+    let has = |it: &&Path| it.join("Cargo.lock").is_file() && it.join("Cargo.toml").is_file();
+    let above_target = profile_dir(out_dir).ok().and_then(|it| it.ancestors().find(has).map(Path::to_owned));
+    above_target.or_else(|| Path::new(pwd?).ancestors().find(has).map(Path::to_owned))
 }
 
 /// The profile's directory `out_dir` is below: what is above its `build` directory.
@@ -812,8 +822,10 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
     }
     let cwd = std::env::current_dir()?;
     let start = manifest_path.as_deref().and_then(Path::parent).map_or(cwd.clone(), |it| cwd.join(it));
+    let lone = || start.ancestors().find(|it| it.join("Cargo.toml").is_file()).map(Path::to_owned);
     let root = super::sandboxed::workspace_root(&start)?
-        .with_context(|| format!("{} is in no workspace", start.display()))?;
+        .or_else(lone)
+        .with_context(|| format!("{} is in no package", start.display()))?;
     let locked = cargo_lock(&root.join("Cargo.lock"))?;
     let path = root.join(FILE);
     let old = Lock::of_root(&root)?.unwrap_or_default();
@@ -1155,6 +1167,10 @@ mod tests {
         );
         assert_eq!(std::fs::read(&file).unwrap(), bytes);
         assert_eq!(handed.readable, [profile.join(WRITTEN)]);
+        // A lone package, in no workspace, has its Cargo.lock beside its manifest.
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"ws\"\n").unwrap();
+        let lone = hand_with(FAKE, &env, &out_dir, None, &given, Some(&store_dir)).unwrap();
+        assert_eq!(lone.env, handed.env);
         // Written out once, it is not read from the store again.
         std::fs::remove_dir_all(&store_dir).unwrap();
         assert_eq!(hand(&given).unwrap().env, handed.env);
