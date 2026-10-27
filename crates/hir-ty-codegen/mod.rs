@@ -4348,7 +4348,31 @@ pub fn link_name(db: &dyn HirDatabase, func: FunctionId) -> Option<String> {
     };
     let name = AttrFlags::link_name(db, func.into())
         .unwrap_or_else(|| FunctionSignature::of(db, func).name.symbol().clone());
-    Some(name.as_str().to_owned())
+    Some(as_declared(name.as_str(), global_prefix()))
+}
+
+/// The prefix the object writer puts in front of every name declared to it for the target:
+/// `_` on Mach-O and on 32-bit Windows, nothing elsewhere.
+fn global_prefix() -> Option<char> {
+    let triple = target().ok()?.triple();
+    let prefixed = triple.binary_format == target_lexicon::BinaryFormat::Macho
+        || triple.binary_format == target_lexicon::BinaryFormat::Coff
+            && matches!(triple.architecture, target_lexicon::Architecture::X86_32(_));
+    prefixed.then_some('_')
+}
+
+/// The name an `extern` item written with `link_name` is declared under. One that starts with
+/// `\u{1}` is the symbol as the object has it, which nothing is put in front of, as rustc
+/// takes it: bindgen writes `"\u{1}_aws_lc_0_44_0_SHA384"` for macOS. The object writer puts
+/// the target's `prefix` in front of what is declared, so it comes off here; declared with it,
+/// the call named `_\u{1}_aws_lc_0_44_0_SHA384`, and the link found nothing of that name. One
+/// that does not start with the prefix is kept whole, and the link says it can't find it.
+fn as_declared(name: &str, prefix: Option<char>) -> String {
+    let Some(written) = name.strip_prefix('\u{1}') else { return name.to_owned() };
+    match prefix {
+        None => written.to_owned(),
+        Some(prefix) => written.strip_prefix(prefix).unwrap_or(name).to_owned(),
+    }
 }
 
 /// The symbol a function that isn't exported takes in a crate rustc built nothing of, for the
@@ -4444,7 +4468,7 @@ fn static_link_name(db: &dyn HirDatabase, id: StaticId) -> Option<String> {
     }
     let name =
         AttrFlags::link_name(db, id.into()).unwrap_or_else(|| signature.name.symbol().clone());
-    Some(name.as_str().to_owned())
+    Some(as_declared(name.as_str(), global_prefix()))
 }
 
 /// Builds the IR of one function and runs Cranelift on it.
@@ -6598,8 +6622,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let exported = exported_static(db, id);
             return Ok(exported.filter(|name| self.symbols.defines(name.as_str())));
         }
-        let name = AttrFlags::link_name(db, id.into());
-        Ok(Some(name.unwrap_or_else(|| signature.name.symbol().clone())))
+        Ok(static_link_name(db, id).map(|it| intern::Symbol::intern(&it)))
     }
 
     /// The name of a static a patch defines that the executable has no copy of: the same for
@@ -17203,6 +17226,18 @@ fn operands_of(rvalue: &Rvalue) -> Vec<&Operand> {
 mod tests {
     use cranelift_codegen::ir::{self, AbiParam, InstBuilder, types};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    /// A `link_name` that starts with `\u{1}` is the object's symbol: the object writer's
+    /// prefix comes off it, so that the symbol is not prefixed twice.
+    #[test]
+    fn a_link_name_written_as_the_symbol_is_not_prefixed_again() {
+        use super::as_declared;
+        let sha = "\u{1}_aws_lc_0_44_0_SHA384";
+        assert_eq!(as_declared(sha, Some('_')), "aws_lc_0_44_0_SHA384");
+        assert_eq!(as_declared("\u{1}aws_lc_0_44_0_SHA384", None), "aws_lc_0_44_0_SHA384");
+        assert_eq!(as_declared("SHA384", Some('_')), "SHA384");
+        assert_eq!(as_declared("\u{1}SHA384", Some('_')), "\u{1}SHA384");
+    }
 
     /// `emit` names the function itself by a placeholder id until it is stitched, and
     /// `FuncId::from_u32` asserts `u32::MAX` away where debug assertions are on, as in
