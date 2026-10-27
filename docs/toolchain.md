@@ -75,6 +75,9 @@ blaze tracks the latest Rust nightly. `.github/workflows/toolchain-bump.yaml` ru
    - **red**: a comment on the pull request with what broke, and the issue
      "Toolchain bump to <date> is blocked", opened or commented on and retitled to the
      newest date, with how many days main's pin is behind. The pull request stays open.
+   - **no verdict** (GitHub's API failing past its retries, a bug in the script): the same
+     issue says so, with `gh workflow run toolchain-bump.yaml -f train=<run id>`, which counts
+     and decides again with main's scripts.
 5. A step before the pull request that fails (a vendoring conflict, no usable nightly in two
    weeks, a conflict merging main into the bump) opens or comments on the same issue with what
    failed, and so does a bump open for a day without merging. Nothing is skipped quietly.
