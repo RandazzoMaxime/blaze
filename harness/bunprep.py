@@ -317,15 +317,26 @@ def prepare(checkout):
 def sources(ws):
     """What `cargo metadata` needs of a checkout without bun's own build: the crates its
     Cargo.toml has under `vendor/`, which that build fetches (scripts/build/deps/<name>.ts) at
-    the commit the file pins. Enough for `ra-jit borrowck --project`, which builds nothing."""
+    the commit the file pins, with the `.patch` files it lists applied as that build applies them
+    (rust-argon2's lifts its memory floor). Enough for `ra-jit borrowck --project`, which builds
+    nothing."""
     for name in re.findall(r'path = "vendor/([^"/]+)"', open(os.path.join(ws, "Cargo.toml")).read()):
         dep = open(os.path.join(ws, "scripts", "build", "deps", f"{name}.ts")).read()
+        if re.search(r'kind: "([^"]+)"', dep)[1] != "github-archive":
+            raise SystemExit(f"bunprep: vendor/{name} is not fetched from a GitHub archive")
         repo = re.search(r'repo: "([^"]+)"', dep)[1]
         commit = re.search(r'commit: (\w+)', dep)[1]
         commit = re.search(rf'const {commit} = "([0-9a-f]{{40}})"', dep)[1]
+        listed = re.search(r"patches: \[([^\]]*)\]", dep)
+        patches = re.findall(r'"([^"]+)"', listed[1]) if listed else []
+        if "patches:" in dep and not listed or any(not it.endswith(".patch") for it in patches):
+            raise SystemExit(f"bunprep: vendor/{name} has patches other than a list of `.patch` files")
+        # The commit and the patches' contents, as bun's build identifies a fetched source.
+        identity = hashlib.sha256("\0".join([commit, *(open(os.path.join(ws, it)).read() for it in patches)])
+                                  .encode()).hexdigest()
         into = os.path.join(ws, "vendor", name)
         stamp = os.path.join(into, ".bunprep-commit")
-        if os.path.exists(stamp) and open(stamp).read().strip() == commit:
+        if os.path.exists(stamp) and open(stamp).read().strip() == identity:
             continue
         shutil.rmtree(into, ignore_errors=True)
         os.makedirs(into)
@@ -335,7 +346,11 @@ def sources(ws):
                 member.name = member.name.partition("/")[2]
                 if member.name:
                     tar.extract(member, into, filter="data")
-        open(stamp, "w").write(f"{commit}\n")
+        # From the checkout's root: in a directory of a repository, `git apply` takes the
+        # patch's paths as the repository's.
+        for patch in patches:
+            subprocess.run(["git", "apply", f"--directory=vendor/{name}", patch], cwd=ws, check=True)
+        open(stamp, "w").write(f"{identity}\n")
 
 
 def in_place(ws):
