@@ -68,7 +68,9 @@ it again from scratch. A program that opts in can take the new code while it kee
 
 ## Good to know
 
-- **macOS on Apple silicon and Linux.** On Windows every build is cargo's.
+- **macOS on Apple silicon and Linux.** Windows x86-64 (MSVC) builds and takes live edits
+  through blaze too, run by hand and not in CI, with no installer and no sandbox yet
+  ([platforms.md](docs/platforms.md#windows-x86-64-msvc)).
 - **blaze is its own toolchain.** It builds every project with its own Rust, `blaze-2026-10-25`
   (today the nightly of that date), whatever the project pins; stable code and
   `#![feature(...)]` code build. Your toolchain and CI stay the final word

@@ -21,7 +21,7 @@ use super::{
     FAILED,
     cli::{Invocation, Subcommand, worker_env},
     client::{self, Start},
-    daemon::{Checkout, Reply, Request, WorkerConfig},
+    daemon::{Checkout, NotBuilt, Reply, Request, WorkerConfig},
     plan::Plan as Linked,
     run, say,
     state::{as_built, configured_env, library_path, place, repository, run_env},
@@ -54,6 +54,9 @@ fn refused(asked: &Invocation) -> Option<String> {
             (Some(flag), _) => not_yet(&format!(
                 "the targets `{flag}` picks; a build of the default programs, or of one named by `--bin` or `--example`, is"
             )),
+            (None, Subcommand::Test) if asked.target().is_some_and(|it| is_wasm(&it)) => {
+                not_yet("or run the tests of a wasm target")
+            }
             (None, _) => asked.target_not_linked(),
         },
     }
@@ -118,7 +121,7 @@ pub(super) fn build(asked: &Invocation) -> anyhow::Result<i32> {
     compiling(asked, &programs);
     let checkout = checkout(asked, &cwd, &metadata, &programs, false, BTreeMap::new());
     if let Err(why) = whole(&cwd, &checkout, &programs) {
-        say::error(&why);
+        why.say();
         return Ok(FAILED);
     }
     finished(asked, asked.profile(), started);
@@ -239,7 +242,7 @@ pub(super) fn test(asked: &Invocation) -> anyhow::Result<i32> {
             }
         }
         if let Err(why) = whole(&cwd, checkout, programs) {
-            say::error(&why);
+            why.say();
             return Ok(FAILED);
         }
     }
@@ -280,7 +283,10 @@ fn doc_tests(
     let asked_in = asked.flags.manifest_path.as_ref().map_or(cwd.to_owned(), |it| cwd.join(it));
     let build = Selection { asked_in: Some(asked_in), ..asked.selection() };
     let build = serde_json::to_string(&build)?;
-    let test_args = shlex::try_join(asked.trailing.iter().map(String::as_str))?;
+    // Cargo's `-q` is the harness's too: it shows the results tersely.
+    let quiet = asked.flags.quiet.then_some("--quiet");
+    let test_args =
+        shlex::try_join(quiet.into_iter().chain(asked.trailing.iter().map(String::as_str)))?;
     for library in libraries {
         let package = &library.package;
         let target = package.targets.iter().find(|it| it.src_path.as_std_path() == library.root);
@@ -363,21 +369,62 @@ fn finished(asked: &Invocation, profile: &str, started: Instant) {
     say::status(asked.flags.quiet, "Finished", &finished);
 }
 
+/// Why a whole build failed: the errors the daemon found in the source, written as rustc
+/// and cargo write them, or what else kept a program from being built.
+enum Unbuilt {
+    Said(String),
+    Why(String),
+}
+
+impl From<String> for Unbuilt {
+    fn from(why: String) -> Unbuilt {
+        Unbuilt::Why(why)
+    }
+}
+
+impl Unbuilt {
+    fn say(self) {
+        match self {
+            Unbuilt::Said(written) => eprintln!("{written}"),
+            Unbuilt::Why(why) => say::error(&why),
+        }
+    }
+}
+
+/// The errors `said` of `program`, as cargo ends a build rustc turned down: with the target
+/// that did not compile.
+fn turned_down(program: &Program, said: &crate::errors::Said) -> String {
+    let name = &program.name;
+    let target = match (program.kind, program.test) {
+        (Kind::Lib | Kind::Cdylib | Kind::Staticlib, false) => "lib".to_owned(),
+        (Kind::Lib | Kind::Cdylib | Kind::Staticlib, true) => "lib test".to_owned(),
+        (Kind::Bin, false) => format!("bin \"{name}\""),
+        (Kind::Bin, true) => format!("bin \"{name}\" test"),
+        (Kind::Example, _) => format!("example \"{name}\""),
+        (Kind::Test, _) => format!("test \"{name}\""),
+    };
+    super::state::turned_down(said, &program.package.name.to_string(), &target)
+}
+
 /// Has the daemon build the `programs` of `checkout` whole, and puts each where cargo would.
 /// A worker of the daemon loads the workspace and links each program before it answers, and
 /// builds them again on what it has loaded when asked next. `Err` says why not.
-fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), String> {
+fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), Unbuilt> {
     let reply = client::ask(Request::Build(super::asking(checkout)), Start::IfMissing)
         .map_err(|it| format!("{it:#}"))?;
     let built = match reply {
         Some(Reply::Synced { programs, .. }) => programs,
-        Some(Reply::Cold { reason }) => return Err(not_loaded(cwd, checkout, &reason)),
-        None => return Err(client::why_none()),
-        Some(other) => return Err(format!("the daemon answered {other:?}")),
+        Some(Reply::Cold { reason }) => return Err(not_loaded(cwd, checkout, &reason).into()),
+        None => return Err(client::why_none().into()),
+        Some(other) => return Err(format!("the daemon answered {other:?}").into()),
     };
     for ((program, plan), built) in std::iter::zip(programs, &checkout.programs).zip(built) {
-        if let Err(why) = built {
-            return Err(format!("could not build `{}`: {}", program.name, why.why()));
+        match built {
+            Ok(_) => {}
+            Err(NotBuilt::Error(said)) => return Err(Unbuilt::Said(turned_down(program, &said))),
+            Err(why) => {
+                return Err(format!("could not build `{}`: {}", program.name, why.why()).into());
+            }
         }
         let _unwritten = crate::splice::unwritten(&plan.binary);
         let stand_ins = crate::link::stand_ins(&plan.binary).map_err(|it| format!("{it:#}"))?;
@@ -395,7 +442,8 @@ fn whole(cwd: &Path, checkout: &Checkout, programs: &[Program]) -> Result<(), St
                 "`{}` can reach functions blaze could not compile, so it is not built:\n  {}",
                 program.name,
                 reached.join("\n  ")
-            ));
+            )
+            .into());
         }
         if let Some(parent) = program.executable.parent() {
             std::fs::create_dir_all(parent)
@@ -604,9 +652,37 @@ fn ran(asked: &Invocation, cwd: &Path, programs: &[Program]) -> anyhow::Result<i
     };
     let shown =
         program.executable.strip_prefix(cwd).unwrap_or(&program.executable).display().to_string();
+    let target = asked.selection().target;
+    let runner = match &target {
+        Some(triple) => runner(asked, cwd, triple)?,
+        None => None,
+    };
+    let mut command = match runner {
+        Some(mut runner) => {
+            runner.arg(&program.executable);
+            runner
+        }
+        None if target.as_deref().is_some_and(is_wasm) => {
+            let triple = target.unwrap_or_default();
+            let variable =
+                format!("CARGO_TARGET_{}_RUNNER", triple.replace('-', "_").to_uppercase());
+            say::error(&format!(
+                "`{shown}` is a wasm module, which runs in a runtime: name one with `target.{triple}.runner` in the configuration or `{variable}` (`wasmtime run`, say), as cargo runs it"
+            ));
+            return Ok(FAILED);
+        }
+        None => Command::new(&program.executable),
+    };
     let args = asked.program_args().map(|it| format!(" {it}")).collect::<String>();
-    say::status(asked.flags.quiet, "Running", &format!("`{shown}{args}`"));
-    let mut command = Command::new(&program.executable);
+    let ran = std::iter::once(command.get_program()).chain(command.get_args());
+    let ran: Vec<String> = ran.map(|it| it.to_string_lossy().into_owned()).collect();
+    let ran = match ran.len() {
+        1 => shown.clone(),
+        _ => {
+            format!("{} {shown}", shlex::try_join(ran[..ran.len() - 1].iter().map(String::as_str))?)
+        }
+    };
+    say::status(asked.flags.quiet, "Running", &format!("`{ran}{args}`"));
     for it in configured_env(cwd) {
         if it.force || std::env::var_os(&it.name).is_none() {
             command.env(&it.name, &it.value);
@@ -666,7 +742,8 @@ fn planned(
                 program.package
             );
         };
-        let exe = |name: &str| format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        let named = FileNames::of(selection.target.as_deref());
+        let exe = |name: &str| format!("{name}{}", named.exe_suffix);
         let kind = format!("{:?}", program.kind).to_lowercase();
         // A library's file is named for its crate, as rustc names it.
         let library = |prefix: &str, suffix: &str| {
@@ -674,9 +751,7 @@ fn planned(
         };
         let executable = match (program.kind, program.test) {
             (Kind::Example, _) => out.join("examples").join(exe(&program.name)),
-            (Kind::Cdylib, _) => {
-                out.join(library(std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX))
-            }
+            (Kind::Cdylib, _) => out.join(library(named.dll_prefix, named.dll_suffix)),
             (Kind::Staticlib, _) => out.join(match cfg!(windows) {
                 true => library("", ".lib"),
                 false => library("lib", ".a"),
@@ -737,4 +812,50 @@ fn test_hash(package: &str, kind: &str, name: &str, profile: &Path) -> String {
     let mut hasher = rustc_hash::FxHasher::default();
     (package, kind, name, profile).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// How rustc names the files of the programs it links for a target (its spec's
+/// `exe-suffix`, `dll-prefix` and `dll-suffix`), which cargo puts as they are.
+struct FileNames {
+    exe_suffix: &'static str,
+    dll_prefix: &'static str,
+    dll_suffix: &'static str,
+}
+
+impl FileNames {
+    /// Of the target `triple`, the host when it is none.
+    fn of(triple: Option<&str>) -> FileNames {
+        match triple {
+            Some(triple) if is_wasm(triple) => {
+                FileNames { exe_suffix: ".wasm", dll_prefix: "", dll_suffix: ".wasm" }
+            }
+            _ => FileNames {
+                exe_suffix: std::env::consts::EXE_SUFFIX,
+                dll_prefix: std::env::consts::DLL_PREFIX,
+                dll_suffix: std::env::consts::DLL_SUFFIX,
+            },
+        }
+    }
+}
+
+/// Whether `triple` is a WebAssembly target, whose programs run in a runtime.
+fn is_wasm(triple: &str) -> bool {
+    triple.starts_with("wasm32-") || triple.starts_with("wasm64-")
+}
+
+/// The program `target.<triple>.runner` (or a `target.'cfg(..)'.runner` that matches, or
+/// `CARGO_TARGET_<TRIPLE>_RUNNER`) names to run what is built for `triple`, and its
+/// arguments, as cargo finds it for `cargo run`.
+fn runner(asked: &Invocation, cwd: &Path, triple: &str) -> anyhow::Result<Option<Command>> {
+    use blaze_manifest::config::CompileKind;
+    let config = blaze_manifest::Config::load(cwd, std::env::vars(), &asked.flags.config)?;
+    let host = super::own::manifest::host_triple()?;
+    let cfg = super::own::manifest::target_cfg(triple)?;
+    let kind = CompileKind::Target(triple.to_owned());
+    let Some((program, args)) = config.target_runner(&kind, &host, &cfg)? else {
+        return Ok(None);
+    };
+    let mut command = Command::new(program);
+    command.args(args);
+    Ok(Some(command))
 }

@@ -4,6 +4,7 @@ what a hermetic sandbox would refuse them.
 
 usage: bscache.py record [PROJECT...] --ra-jit BIN [--work DIR] [--out DIR] [--jobs N]
        bscache.py report --out DIR
+       bscache.py directives [--work DIR] --out DIR
 
 `record` fetches each project of harness/bench.py at its pinned revision (all of them when none
 is named) and runs the step of a workspace load that builds and runs its build scripts and proc
@@ -28,6 +29,9 @@ would-be denial by package, `<out>/denied.json`:
   reads       every other R line outside the package, its OUT_DIR, the toolchain and that
               closure; a dependency's OUT_DIR (what `links` gives a script by DEP_*) is listed
               apart, as a read a hermetic sandbox allows
+
+`directives` checks what each run below `<work>/target` printed (`run/stdout`) against the rules
+of cargo/directives.rs, and their first, stricter form, into `<out>/directives.md`.
 """
 import collections, concurrent.futures, json, os, re, shutil, subprocess, sys
 
@@ -326,15 +330,131 @@ def tidy(what, script):
     return re.sub(r"^/nix/store/[0-9a-z]{32}-", "/nix/store/*-", what)
 
 
+# What cargo/directives.rs checks, as it checks it; `strict` is the first form of each rule,
+# before the corpus's counts set its edges.
+RESERVED = ["rustc-flags", "rustc-link-lib", "rustc-link-search", "rustc-link-arg-cdylib",
+            "rustc-cdylib-link-arg", "rustc-link-arg-bins", "rustc-link-arg-bin",
+            "rustc-link-arg-tests", "rustc-link-arg-benches", "rustc-link-arg-examples",
+            "rustc-link-arg", "rustc-cfg", "rustc-check-cfg", "rustc-env", "warning",
+            "rerun-if-changed", "rerun-if-env-changed"]
+SYSTEM_LIB_DIRS = ["/usr/lib", "/usr/lib64", "/usr/local/lib", "/lib", "/lib64", "/nix/store",
+                   "/opt/homebrew/lib", "/opt/homebrew/opt", "/usr/local/opt",
+                   "/Library/Developer/CommandLineTools/SDKs",
+                   "/Applications/Xcode.app/Contents/Developer/Platforms"]
+LINK_ARGS = ["-pthread", "-rdynamic", "-nostartfiles", "-Wl,--as-needed", "-Wl,--no-as-needed",
+             "-Wl,--gc-sections", "-Wl,--export-dynamic", "-Wl,-z,relro", "-Wl,-z,now",
+             "-Wl,-z,noexecstack", "-Wl,-z,nodelete", "-Wl,-undefined,dynamic_lookup",
+             "-Wl,-dead_strip", "-Wl,-headerpad_max_install_names"]
+LINK_ARG_PREFIXES = ["-Wl,--export-dynamic-symbol=", "-Wl,-soname,", "-Wl,-install_name,@rpath/",
+                     "-Wl,-exported_symbol,", "-Wl,--version-script="]
+CARGO_GIVES = ["CARGO", "CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_MANIFEST_LINKS",
+               "CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE", "CARGO_TARGET_TMPDIR",
+               "CARGO_RUSTC_CURRENT_DIR", "CARGO_ENCODED_RUSTFLAGS", "CARGO_MAKEFLAGS", "OUT_DIR",
+               "RUSTC", "RUSTDOC", "RUSTFLAGS"]
+CARGO_GIVES_PREFIXES = ["CARGO_PKG_", "CARGO_CFG_", "CARGO_BIN_EXE_", "CARGO_FEATURE_", "RUSTC_", "RUSTDOC_"]
+
+
+def directive_refusals(stdout, package_dir, out_dir):
+    """(rule, line) for each line of `stdout` a rule refuses: `strict-*` as first written, the
+    others as cargo/directives.rs has them."""
+    build_dir = os.path.dirname(os.path.dirname(out_dir))
+    if os.path.basename(build_dir) != "build":
+        build_dir = os.path.dirname(build_dir)
+    def may_search(d, system=True):
+        if not d.startswith("/"):
+            return ".." not in d.split("/")
+        d = os.path.normpath(d)
+        return any(under(d, it) for it in [out_dir, package_dir, build_dir] + (SYSTEM_LIB_DIRS if system else []))
+    def search_dir(v):
+        kind, _, rest = v.partition("=")
+        return rest if kind in ("native", "crate", "dependency", "framework", "all") and rest else v
+    def link_arg_refused(arg, strict):
+        for prefix in ("-Wl,-rpath,", "-Wl,-rpath=", "-Wl,-R"):
+            if arg.startswith(prefix):
+                d = arg[len(prefix):]
+                relative = d.startswith(("$ORIGIN", "@loader_path", "@executable_path"))
+                return not relative and (strict or not may_search(d))
+        known = (arg in LINK_ARGS and (not strict or arg != "-pthread")) \
+            or any(arg.startswith(p) and ".." not in arg[len(p):].split("/") for p in LINK_ARG_PREFIXES) \
+            or re.fullmatch(r"-l[A-Za-z0-9_+.-]+", arg) is not None
+        return not known
+    out = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("cargo::"):
+            data = line[7:]
+        elif line.startswith("cargo:") and any(line[6:].startswith(r + "=") for r in RESERVED):
+            data = line[6:]
+        else:
+            continue
+        key, _, value = data.partition("=")
+        value = value.rstrip()
+        if key in ("rustc-link-search", "rustc-flags"):
+            dirs = [search_dir(value)] if key == "rustc-link-search" else \
+                [t[2:] or n for t, n in zip(value.split(), value.split()[1:] + [""]) if t.startswith("-L")]
+            if any(not may_search(d) for d in dirs):
+                out.append(("link-search", line))
+            elif any(not may_search(d, system=False) for d in dirs):
+                out.append(("strict-link-search (system dirs not allowed)", line))
+        elif key.startswith("rustc-link-arg") or key == "rustc-cdylib-link-arg":
+            arg = value.partition("=")[2] if key == "rustc-link-arg-bin" else value
+            if link_arg_refused(arg, strict=False):
+                out.append(("link-arg", line))
+            elif link_arg_refused(arg, strict=True):
+                out.append(("strict-link-arg (no -pthread, no absolute rpath)", line))
+        elif key == "rustc-env":
+            name = value.partition("=")[0]
+            if name in CARGO_GIVES or name.startswith(tuple(CARGO_GIVES_PREFIXES)):
+                out.append(("rustc-env", line))
+            elif name.startswith(("CARGO", "RUSTC")):
+                out.append(("strict-rustc-env (any CARGO_*/RUSTC*)", line))
+    return out
+
+
+def directives(work, out_dir):
+    """Every rule of cargo/directives.rs, and its first form, over each run below
+    <work>/target: <out>/directives.md."""
+    lines = collections.defaultdict(list)
+    runs = 0
+    for project in sorted(os.listdir(os.path.join(work, "target"))):
+        for run_dir in run_dirs(os.path.join(work, "target", project)):
+            try:
+                ran = json.load(open(os.path.join(run_dir, RAN)))
+                stdout = open(os.path.join(run_dir, "run", "stdout"), "rb").read().decode("utf-8", "replace")
+            except (OSError, ValueError):
+                continue
+            runs += 1
+            env = dict(ran["env"])
+            script = f"`{env.get('CARGO_PKG_NAME')} {env.get('CARGO_PKG_VERSION')}` ({project})"
+            for rule, line in directive_refusals(stdout, ran["cwd"], env.get("OUT_DIR", "")):
+                lines[rule].append((script, re.sub(r"/nix/store/[0-9a-z]{32}-", "/nix/store/*-", line)))
+    text = ["# What directive validation refuses over the bench corpus", "",
+            f"Made by `harness/bscache.py directives` over {runs} build-script runs (`run/stdout` of each).",
+            "Rules as `cargo/directives.rs` has them; `strict-*` is the rule as first written (Andrew,",
+            "12:10Z), before these counts set its edges.", "",
+            "| rule | lines | scripts |", "|---|---|---|"]
+    for rule in ("link-search", "link-arg", "rustc-env"):
+        lines.setdefault(rule, [])
+    for rule in sorted(lines):
+        text.append(f"| {rule} | {len(lines[rule])} | {len({s for s, _ in lines[rule]})} |")
+    for rule in sorted(lines):
+        if lines[rule]:
+            text += ["", f"## {rule}", ""] + [f"- {s}: `{l}`" for s, l in sorted(set(lines[rule]))]
+    open(os.path.join(out_dir, "directives.md"), "w").write("\n".join(text) + "\n")
+    print("\n".join(text))
+
+
 def main():
     argv = sys.argv[1:]
-    if not argv or argv[0] not in ("record", "report"):
+    if not argv or argv[0] not in ("record", "report", "directives"):
         sys.exit(__doc__)
     mode = argv.pop(0)
     out_dir = option(argv, "--out", os.path.join(HERE, "..", "bench", "results", "bscache"))
     os.makedirs(out_dir, exist_ok=True)
     if mode == "report":
         return report(out_dir)
+    if mode == "directives":
+        return directives(option(argv, "--work", os.path.join(os.environ.get("TMPDIR", "/tmp"), "blaze-bscache")), out_dir)
     ra_jit = os.path.abspath(option(argv, "--ra-jit") or sys.exit("--ra-jit BIN"))
     work = option(argv, "--work", os.path.join(os.environ.get("TMPDIR", "/tmp"), "blaze-bscache"))
     jobs = int(option(argv, "--jobs", "8"))

@@ -199,8 +199,9 @@ pub(super) struct Regions<'db> {
     /// constraints. Empty when what it captures is not known exactly.
     pub(super) members: Vec<Rv>,
     pub(super) choices: Vec<Rv>,
-    /// The body returns an `impl Trait` that captures no lifetime, of a hidden type that names
-    /// no other alias: what it returns must be `'static`, rustc's `OpaqueType` constraint.
+    /// The body returns an `impl Trait` that captures no lifetime, of a hidden type alias
+    /// liveness keeps some region of live: what it returns must be `'static`, rustc's
+    /// `OpaqueType` constraint, and a borrow of a local in it is used later, E0597.
     pub(super) returns_static_opaque: bool,
     /// A variable a function item or constructor is called through, read at the call: rust-
     /// analyzer lowers `f(x)` with `let f = Foo::<&'a u32>` as a call of the item itself.
@@ -263,7 +264,9 @@ fn projections<'db>(ty: Ty<'db>) -> Vec<(hir_ty::next_solver::SolverDefId<'db>, 
 /// Which arguments of the `impl Trait` `def`, of `len` of them, its hidden type may name: the
 /// others are bivariant in rustc's `variances_of` the opaque type, and its liveness skips
 /// them. Every one, unless `use<..>` lists them; before edition 2024, outside a trait and its
-/// impls and outside an `async fn`, the type parameters and the lifetimes its bounds name.
+/// impls and outside an `async fn`, the type parameters and the lifetimes its bounds name. In
+/// a trait or its impls the trait's or impl's own are always captured, as rustc relates an
+/// `impl Trait` there (a GAT of the trait) invariantly in all of them, whatever `use<..>` says.
 /// `None` where this does not work it out, which counts every argument captured.
 pub(super) fn opaque_captures(
     db: &dyn hir_ty::db::HirDatabase,
@@ -289,6 +292,11 @@ pub(super) fn opaque_captures(
         return None;
     }
     let is_lifetime = |id: &GenericParamId| matches!(id, GenericParamId::LifetimeParamId(_));
+    let in_trait = match function.lookup(db).container {
+        ItemContainerId::TraitId(_) => true,
+        ItemContainerId::ImplId(it) => db.impl_trait(it).is_some(),
+        _ => false,
+    };
     let signature = FunctionSignature::of(db, function);
     let written = signature.ret_type.and_then(|ret| match &signature.store[ret] {
         TypeRef::ImplTrait(bounds) if index.into_raw().into_u32() == 0 => Some(bounds),
@@ -382,6 +390,9 @@ pub(super) fn opaque_captures(
                 else {
                     return true;
                 };
+                if in_trait && param.parent != function.into() {
+                    return true;
+                }
                 let written = match output {
                     Some(hir_ty::ElidedOutput::Written(it)) => names(
                         &signature.store[hir_def::type_ref::LifetimeRefId::from_raw(
@@ -411,16 +422,11 @@ pub(super) fn opaque_captures(
     if unknown {
         return None;
     }
-    let in_trait = match function.lookup(db).container {
-        ItemContainerId::TraitId(_) => true,
-        ItemContainerId::ImplId(it) => db.impl_trait(it).is_some(),
-        _ => false,
-    };
     let edition = hir_def::HasModule::krate(&function, db).data(db).edition;
     // An `async fn`'s future captures everything; an `impl Trait` it declares it returns, the
     // future's output, is as any other.
     if edition.at_least_2024() || in_trait || signature.is_async() && written.is_some() {
-        return None;
+        return Some(vec![true; len]);
     }
     Some(
         params
@@ -718,6 +724,7 @@ pub(super) fn build<'db>(
         impl_self: None,
         returns_opaque: false,
         opaque_bounds: Vec::new(),
+        opaque_hidden: None,
         elided_output: None,
         inferred: Default::default(),
         location: None,
@@ -783,6 +790,9 @@ struct Builder<'c, 'a, 'db> {
     /// The trait and projection bounds of the returned `impl Trait`, of the type it hides,
     /// proven where the body first assigns the return slot.
     opaque_bounds: Vec<Clause<'db>>,
+    /// The hidden type of the returned `impl Trait`, which must be well-formed where the body
+    /// defines it, as rustc's `add_item_bounds_for_hidden_type` requires (#114728).
+    opaque_hidden: Option<Ty<'db>>,
     /// The region lifetime elision gives the elided lifetimes of the return type.
     elided_output: Option<Region<'db>>,
     /// rustc's `inferred_outlives_of` the ADTs the body uses.
@@ -1273,8 +1283,18 @@ impl<'db> Builder<'_, '_, 'db> {
             // `'static` when nothing it could capture is, and left free otherwise.
             let opaque = signature.as_ref().is_some_and(|(_, output)| has_opaque(*output));
             self.returns_opaque = opaque;
+            // A return type with `_` in it is rustc's E0121, which takes the type the body
+            // infers (`recover_infer_ret_ty`), and an error where it cannot name it (a closure):
+            // the error relates to nothing, and the return slot is checked as any other local,
+            // its regions inferred. rust-analyzer recovers none, so it is the body's type here.
+            let recovered = signature.as_ref().is_some_and(|(_, output)| {
+                output.walk().any(|it| {
+                    rustc_type_ir::inherent::GenericArg::as_type(&it)
+                        .is_some_and(|ty| ty.is_ty_error())
+                })
+            });
             let ty = match &signature {
-                Some((_, output)) if !opaque => *output,
+                Some((_, output)) if !opaque && !recovered => *output,
                 // The type an `impl Trait` hides is inferred, the lifetimes of its trait objects
                 // too; a trait object the signature writes next to it keeps its default.
                 Some((_, output))
@@ -1344,11 +1364,9 @@ impl<'db> Builder<'_, '_, 'db> {
                         })
                     })
             });
-            self.regions.returns_static_opaque = hidden_static
-                && !captures_lifetime
-                && !rustc_type_ir::TypeVisitableExt::has_aliases(&ty);
             let ty = rustc_type_ir::fold_regions(self.interner(), ty, |region, depth| {
-                if (opaque || signature.is_none()) && matches!(region.kind(), RegionKind::ReVar(_))
+                if (opaque || recovered || signature.is_none())
+                    && matches!(region.kind(), RegionKind::ReVar(_))
                 {
                     return self.fresh();
                 }
@@ -1372,7 +1390,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         self.fresh_elided()
                     }
                     _ if hidden_static => self.static_region(),
-                    _ if opaque => self.fresh(),
+                    _ if opaque || recovered => self.fresh(),
                     (Some(it), _) => it,
                     (None, true) => self.new_universal(UniversalKind::Anon),
                     // The elided lifetimes of the type of a constant or a static are `'static`.
@@ -1391,6 +1409,13 @@ impl<'db> Builder<'_, '_, 'db> {
                 }
                 _ => ty,
             };
+            // What it returns is borrowed for `'static` through rustc's `OpaqueType` constraint,
+            // but rustc explains the borrow by the return value it is live in first, E0597: only
+            // where alias liveness keeps no region of the hidden type live, an alias whose bounds
+            // say it outlives `'static`, is it the return that is blamed, E0515.
+            self.regions.returns_static_opaque = hidden_static
+                && !captures_lifetime
+                && !super::liveness::live_regions(self.ctx, &self.regions, ty).is_empty();
             local_tys[return_local.into_raw().into_u32() as usize] = Some(ty);
             // rustc proves an `impl Trait`'s bounds of the type it hides where the body
             // defines it: `impl Iterator<Item = Box<dyn Foo>>` hiding `Iter<'a, T>` needs the
@@ -1431,6 +1456,7 @@ impl<'db> Builder<'_, '_, 'db> {
                         });
                     self.opaque_bounds.push(clause);
                 }
+                self.opaque_hidden = Some(ty);
             }
             let mut unsuggested = Vec::new();
             regions_of(ty, &mut unsuggested);
@@ -1896,6 +1922,12 @@ impl<'db> Builder<'_, '_, 'db> {
                         .map(|(local, projection)| self.place_ty(local, &projection).ty),
                 };
                 if let Some(value) = value {
+                    // `let _: <(u8, _) as Tr>::Ty = &temp();`: the value has the annotation
+                    // normalized, as rustc's user type annotation.
+                    let ty = match rustc_type_ir::TypeVisitableExt::has_aliases(&ty) {
+                        true => self.normalize_at(ty, at).unwrap_or(ty),
+                        false => ty,
+                    };
                     self.relate(value, ty, Variance::Covariant, at);
                 }
             }
@@ -1930,8 +1962,17 @@ impl<'db> Builder<'_, '_, 'db> {
             .collect();
         for (local, type_ref) in written {
             let Some(type_ref) = type_ref else { continue };
-            let ty = self.written(self.lower_written(type_ref, span));
             let local_ty = self.regions.local_tys[local.into_raw().into_u32() as usize];
+            // `|d: <(_,) as Tr>::Ty|`: the `_`s are what the parameter's type makes them, and
+            // the annotation is well-formed, the impl it selects' where clauses holding.
+            if let Some(solved) = self.solved_annotation(type_ref, local_ty, span) {
+                let ty = self.written(solved);
+                self.relate(local_ty, ty, Variance::Invariant, at);
+                let at = At { category: Category::TypeAnnotation, span };
+                self.well_formed(ty, at, 0);
+                continue;
+            }
+            let ty = self.written(self.lower_written(type_ref, span));
             self.relate(local_ty, ty, Variance::Invariant, at);
         }
     }
@@ -2027,6 +2068,7 @@ impl<'db> Builder<'_, '_, 'db> {
     /// as rustc's user type annotations: `None::<<&'a () as Trait>::Ty>` that `&'a ()`
     /// implements `Trait`.
     fn path_arguments(&mut self) {
+        use rustc_type_ir::inherent::GenericArg as _;
         let store = self.ctx.store;
         let mut parent = FxHashMap::default();
         for (expr, _) in store.exprs() {
@@ -2057,17 +2099,29 @@ impl<'db> Builder<'_, '_, 'db> {
             {
                 items.push((expr, def.0, args));
             }
+            let positions = self.spelled_positions(expr, path).unwrap_or_default();
+            let fn_args = match self.ctx.infer.type_of_expr.get(expr).map(|it| it.as_ref().kind()) {
+                Some(TyKind::FnDef(_, args)) => Some(args),
+                _ => None,
+            };
             for args in path.generic_args().into_iter().flatten().flatten() {
                 for arg in args.args.iter() {
                     if let hir_def::expr_store::path::GenericArg::Type(type_ref) = arg {
-                        found.push((expr, *type_ref));
+                        let inferred = positions
+                            .iter()
+                            .find(|(it, _)| it == type_ref)
+                            .and_then(|&(_, index)| fn_args?.get(index)?.as_type());
+                        found.push((expr, *type_ref, inferred));
                     }
                 }
             }
         }
-        for (expr, type_ref) in found {
+        for (expr, type_ref, inferred) in found {
             let span = MirSpan::ExprId(expr);
-            let ty = self.lower_written(type_ref, span);
+            // `Some::<<(_,) as Tr>::Ty>(b)`: the `_`s are what the argument inferred makes them.
+            let solved =
+                inferred.and_then(|inferred| self.solved_annotation(type_ref, inferred, span));
+            let ty = solved.unwrap_or_else(|| self.lower_written(type_ref, span));
             let ty = self.written(ty);
             self.well_formed(ty, At { category: Category::TypeAnnotation, span }, 0);
         }
@@ -3878,6 +3932,9 @@ impl<'db> Builder<'_, '_, 'db> {
         match &self.ctx.store[expr] {
             hir_def::hir::Expr::Path(path) if spells_generics(path) => {
                 let ty = self.written(ty);
+                if let TyKind::FnDef(_, args) = ty.kind() {
+                    self.spelled_projections(expr, path, args);
+                }
                 if let TyKind::FnDef(def, args) = ty.kind()
                     && let CallableDefId::FunctionId(function) = def.0
                 {
@@ -3975,9 +4032,13 @@ impl<'db> Builder<'_, '_, 'db> {
         }
         if projection.is_empty() {
             self.sized_local(place.local, dest, span);
-            if place.local == super::return_slot() && !self.opaque_bounds.is_empty() {
+            if place.local == super::return_slot() {
                 let bounds = std::mem::take(&mut self.opaque_bounds);
-                self.clauses(bounds, At { category: Category::Predicate, span }, true);
+                let at = At { category: Category::Signature, span };
+                self.clauses(bounds, at, true);
+                if let Some(hidden) = self.opaque_hidden.take() {
+                    self.well_formed(hidden, at, 0);
+                }
             }
         }
         let first = self.regions.outlives.len();
@@ -4358,8 +4419,155 @@ impl<'db> Builder<'_, '_, 'db> {
     fn annotation_ty(&mut self, annotation: Annotation) -> Option<Ty<'db>> {
         let inferred = self.ctx.infer.type_of_pat.get(annotation.pat)?.as_ref();
         let lowered = self.lower_annotation(annotation.type_ref, MirSpan::ExprId(annotation.block));
-        let ty = self.zip_annotation(lowered, inferred, &mut FxHashMap::default(), 0);
+        let mut holes = self.projection_holes(lowered, inferred);
+        let ty = self.zip_annotation(lowered, inferred, &mut holes, 0);
         Some(self.written(ty.unwrap_or(inferred)))
+    }
+
+    /// The written type `type_ref` with the `_`s in its associated types solved against the
+    /// type `inferred` for it, if it has any; see `projection_holes`.
+    fn solved_annotation(
+        &self,
+        type_ref: hir_def::type_ref::TypeRefId,
+        inferred: Ty<'db>,
+        span: MirSpan,
+    ) -> Option<Ty<'db>> {
+        let lowered = self.lower_annotation(type_ref, span);
+        let mut holes = self.projection_holes(lowered, inferred);
+        if holes.is_empty() {
+            return None;
+        }
+        self.zip_annotation(lowered, inferred, &mut holes, 0)
+    }
+
+    /// The type arguments a path to a function or constructor spells out on one segment, each
+    /// with its index in the arguments of the item's type: in `Some::<T>` or
+    /// `Option::<T>::None`, the variant's.
+    fn spelled_positions(
+        &self,
+        expr: hir_def::hir::ExprId,
+        path: &hir_def::expr_store::path::Path,
+    ) -> Option<Vec<(hir_def::type_ref::TypeRefId, usize)>> {
+        use hir_def::expr_store::path::GenericArg;
+        use rustc_type_ir::inherent::GenericArg as _;
+        let generic_args = path.generic_args()?;
+        let mut spelled = generic_args.iter().enumerate().filter(|(_, it)| it.is_some());
+        let (at, args) = spelled.next()?;
+        if spelled.next().is_some() {
+            return None;
+        }
+        let ty = self.ctx.infer.type_of_expr.get(expr)?.as_ref();
+        let TyKind::FnDef(def, inferred) = ty.kind() else { return None };
+        let last = at + 1 == generic_args.len();
+        let skip = match def.0 {
+            CallableDefId::FunctionId(function) if last => {
+                hir_ty::generics::generics(self.ctx.db, function.into()).len_parent()
+            }
+            CallableDefId::StructId(_) if last => 0,
+            CallableDefId::EnumVariantId(_) if last || at + 2 == generic_args.len() => 0,
+            _ => return None,
+        };
+        let written: Vec<_> = args
+            .as_ref()?
+            .args
+            .iter()
+            .filter_map(|it| match it {
+                GenericArg::Type(type_ref) => Some(*type_ref),
+                _ => None,
+            })
+            .collect();
+        let positions: Vec<_> = inferred
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .filter(|(_, it)| it.as_type().is_some())
+            .map(|(index, _)| index)
+            .collect();
+        (written.len() == positions.len()).then(|| written.into_iter().zip(positions).collect())
+    }
+
+    /// What a call whose callee path spells out `<(_,) as Tr>::Ty` as a type argument
+    /// requires, as rustc's user type annotation on the callee: the `_`s solved against the
+    /// argument, the annotation normalized is the argument, so `Some::<<(u8, _) as
+    /// Tr>::Ty>(&temp())` needs the borrow to live as long as the impl selected needs.
+    fn spelled_projections(
+        &mut self,
+        expr: hir_def::hir::ExprId,
+        path: &hir_def::expr_store::path::Path,
+        args: GenericArgs<'db>,
+    ) {
+        use rustc_type_ir::inherent::GenericArg as _;
+        let span = MirSpan::ExprId(expr);
+        let at = At { category: Category::TypeAnnotation, span };
+        for (type_ref, index) in self.spelled_positions(expr, path).unwrap_or_default() {
+            let Some(arg) = args.get(index).and_then(|it| it.as_type()) else { continue };
+            let Some(solved) = self.solved_annotation(type_ref, arg, span) else { continue };
+            let solved = self.written(solved);
+            self.well_formed(solved, at, 0);
+            let normalized = self.normalize_at(solved, at).unwrap_or(solved);
+            self.relate(arg, normalized, Variance::Invariant, at);
+        }
+    }
+
+    /// The `_`s of a written type that stand in an associated type, `<(_,) as Tr>::Ty`, as
+    /// rustc infers them for its user type annotation: what equating the written type with
+    /// the one inferred makes them, so normalizing the associated type selects the impl the
+    /// inferred type does, whose where clauses then must hold (`impl<T: 'static> Tr for
+    /// (T,)` needs what the `_` is to be `'static`). Each with its lifetimes fresh.
+    fn projection_holes(&self, lowered: Ty<'db>, inferred: Ty<'db>) -> FxHashMap<Ty<'db>, Ty<'db>> {
+        use hir_ty::next_solver::{
+            infer::traits::ObligationCause, obligation_ctxt::ObligationCtxt,
+        };
+        use rustc_type_ir::{TypeVisitableExt as _, inherent::GenericArg as _};
+        let mut holes = FxHashMap::default();
+        let mut in_projection = Vec::new();
+        for arg in lowered.walk() {
+            let Some(ty) = arg.as_type() else { continue };
+            if let TyKind::Alias(alias) = ty.kind()
+                && let rustc_type_ir::AliasTyKind::Projection { .. } = alias.kind
+            {
+                for arg in ty.walk() {
+                    if let Some(hole) = arg.as_type()
+                        && let TyKind::Infer(rustc_type_ir::InferTy::TyVar(_)) = hole.kind()
+                        && !in_projection.contains(&hole)
+                    {
+                        in_projection.push(hole);
+                    }
+                }
+            }
+        }
+        if in_projection.is_empty() {
+            return holes;
+        }
+        let interner = self.interner();
+        // Regions do not select an impl; rust-analyzer infers some as errors.
+        let statik = |ty: Ty<'db>| {
+            rustc_type_ir::fold_regions(interner, ty, |region, _| match region.kind() {
+                RegionKind::ReBound(..) => region,
+                _ => Region::new_static(interner),
+            })
+        };
+        if statik(inferred).references_error() {
+            return holes;
+        }
+        let infcx = &self.ctx.infcx;
+        let found: Vec<(Ty<'db>, Ty<'db>)> = infcx.probe(|_| {
+            let mut ocx = ObligationCtxt::new(infcx);
+            let cause = ObligationCause::dummy();
+            if ocx.eq(&cause, self.ctx.env, statik(lowered), statik(inferred)).is_err() {
+                return Vec::new();
+            }
+            let _ = ocx.try_evaluate_obligations();
+            in_projection
+                .iter()
+                .map(|&hole| (hole, infcx.resolve_vars_if_possible(hole)))
+                .filter(|(_, it)| !it.has_non_region_infer() && !it.references_error())
+                .collect()
+        });
+        for (hole, value) in found {
+            holes.insert(hole, self.renumber(value));
+        }
+        holes
     }
 
     /// The written type `lowered` with each `_` in it the type inferred there, the same
@@ -4412,6 +4620,34 @@ impl<'db> Builder<'_, '_, 'db> {
                     });
                 }
                 Ty::new(interner, TyKind::Adt(def, GenericArgs::new_from_iter(args)))
+            }
+            // An associated type with `_`s in it has them as `projection_holes` inferred.
+            (TyKind::Alias(alias), _)
+                if let rustc_type_ir::AliasTyKind::Projection { .. } = alias.kind
+                    && rustc_type_ir::TypeVisitableExt::has_non_region_infer(&lowered) =>
+            {
+                let mut missing = false;
+                let ty = rustc_type_ir::TypeFoldable::fold_with(
+                    lowered,
+                    &mut hir_ty::next_solver::util::BottomUpFolder {
+                        interner,
+                        ty_op: |ty: Ty<'db>| match ty.kind() {
+                            TyKind::Infer(rustc_type_ir::InferTy::TyVar(_)) => {
+                                holes.get(&ty).copied().unwrap_or_else(|| {
+                                    missing = true;
+                                    ty
+                                })
+                            }
+                            _ => ty,
+                        },
+                        lt_op: |region| region,
+                        ct_op: |ct| ct,
+                    },
+                );
+                if missing {
+                    return None;
+                }
+                ty
             }
             (TyKind::FnPtr(a, header), TyKind::FnPtr(b, inferred_header))
                 if header == inferred_header
@@ -4813,6 +5049,21 @@ impl<'db> Builder<'_, '_, 'db> {
                     for ty in args.types() {
                         self.well_formed(ty, boring, 0);
                     }
+                    // `Some::<<(u8, _) as Tr>::Ty>(&temp())`: its argument is the annotation
+                    // normalized.
+                    let callee = match span {
+                        MirSpan::ExprId(expr) => match &store[expr] {
+                            hir_def::hir::Expr::Call { callee, .. } => Some(*callee),
+                            hir_def::hir::Expr::Path(_) => Some(expr),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(callee) = callee
+                        && let hir_def::hir::Expr::Path(path) = &store[callee]
+                    {
+                        self.spelled_projections(callee, path, args);
+                    }
                 }
                 let fields = self.ctx.db.field_types(*variant);
                 for ((_, field), operand) in fields.iter().zip(operands.iter()) {
@@ -4873,6 +5124,13 @@ impl<'db> Builder<'_, '_, 'db> {
                         def.0.loc(self.ctx.db).expr,
                         args.as_closure().tupled_upvars_ty(),
                         lifetimes(args.as_closure().parent_args().as_slice()),
+                    )),
+                    // An `async` closure holds its captures as any closure does: `async || x`
+                    // borrows `x` into its upvar, rustc's operand of `CoroutineClosure`.
+                    TyKind::CoroutineClosure(def, args) => Some((
+                        def.0.loc(self.ctx.db).expr,
+                        args.as_coroutine_closure().tupled_upvars_ty(),
+                        lifetimes(args.as_coroutine_closure().parent_args().as_slice()),
                     )),
                     TyKind::Coroutine(def, args) => {
                         let expr = def.0.loc(self.ctx.db).expr;
@@ -5256,7 +5514,7 @@ impl<'db> Builder<'_, '_, 'db> {
                 for (arg, input) in args.iter().zip(inputs) {
                     let fn_item = arg.span().and_then(|it| self.fn_item(arg, it));
                     if let Some(ty) = fn_item.or_else(|| self.operand_ty(arg)) {
-                        let at = At { category, span: arg.span().unwrap_or(span) };
+                        let at = At { category, span };
                         self.relate(ty, input, Variance::Covariant, at);
                     }
                 }
@@ -6480,6 +6738,9 @@ pub(super) fn outlives_components<'db>(
         }
         TyKind::Closure(_, args) => {
             outlives_components(args.as_closure().tupled_upvars_ty(), regions, params)
+        }
+        TyKind::CoroutineClosure(_, args) => {
+            outlives_components(args.as_coroutine_closure().tupled_upvars_ty(), regions, params)
         }
         TyKind::Coroutine(_, args) => {
             outlives_components(args.as_coroutine().tupled_upvars_ty(), regions, params);
