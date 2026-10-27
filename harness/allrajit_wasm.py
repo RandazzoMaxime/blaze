@@ -257,18 +257,22 @@ def ra_jit(root, crate, out, exe, target, store, *extra):
 
 def cargo_blaze(root, what, store, runtime, target):
     """`cargo blaze build` as a user runs it, the `cargo-blaze` beside ra-jit first on the path
-    and a daemon of its own, into a target directory apart from cargo's."""
+    and a daemon of its own, in a copy of the package without cargo's build. Returns the copy
+    and how long the build took."""
     env = {"PATH": os.path.dirname(os.path.abspath(RA_JIT)) + os.pathsep + os.environ["PATH"],
            "RA_JIT_CACHE": store, "XDG_RUNTIME_DIR": runtime}
+    copy = root + "-blaze"
+    shutil.copytree(root, copy, ignore=shutil.ignore_patterns("target"))
+    root = copy
     try:
-        ran, took = run(["cargo", "blaze", "build", "--target", target, "--target-dir", "blaze"],
-                        root, f"cargo blaze build of {what}", env)
+        ran, took = run(["cargo", "blaze", "build", "--target", target], root,
+                        f"cargo blaze build of {what}", env)
     finally:
         subprocess.run(["cargo", "blaze", "stop"], cwd=root, capture_output=True,
                        env={**os.environ, **env})
     if not re.search(r"^\s*Finished .*\[blaze\]", ran.stderr, re.M):
         raise SystemExit(f"FAIL: cargo blaze did not build {what} itself:\n{ran.stderr}")
-    return took
+    return root, took
 
 
 def linked(ran, what):
@@ -345,8 +349,8 @@ def main():
             lines.append(f"{what} ({UNKNOWN}): built and linked in {took:.2f} s, the standard "
                          f"library {std}, the link {link_took}, {len(calls)} calls as cargo's; "
                          f"{kib(ours)}, cargo's {kib(theirs)}")
-            took = cargo_blaze(root, what, store, runtime, UNKNOWN)
-            served = os.path.join(root, "blaze", UNKNOWN, "debug", f"{name}.wasm")
+            copy, took = cargo_blaze(root, what, store, runtime, UNKNOWN)
+            served = os.path.join(copy, "target", UNKNOWN, "debug", f"{name}.wasm")
             got = invoked(served, root, calls)
             if got != expected:
                 raise SystemExit(f"FAIL: cargo blaze's {what} differs from cargo's:\n"
