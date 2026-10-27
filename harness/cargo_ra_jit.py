@@ -886,6 +886,7 @@ def daemon(work):
     abuse(work, ws, tree, env, check, status, alive)
     in_place(work, check)
     through_link(work, check)
+    script_links_proc_macro(work, check)
     pinned(work, check)
     own_toolchain(work, check)
     return checks
@@ -1048,6 +1049,36 @@ def through_link(work, check):
     check("an edit of a workspace named through a link, with a path dependency outside it, is the daemon's and right",
           mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
     ours.cargo("stop", *manifest)
+
+
+# A build script whose build dependency is a library that links the compiler's `proc_macro`,
+# as proc-macro2 is in bat's: the script links `proc_macro` too, whose functions then say no
+# macro is running.
+SCRIPT_PROC_MACRO = {
+    "Cargo.toml": '[workspace]\nmembers = ["app", "tokens"]\nresolver = "2"\n',
+    "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[build-dependencies]\ntokens = { path = "../tokens" }\n',
+    "app/build.rs": 'fn main() {\n    println!("cargo:rustc-env=TOKENS={}", tokens::described());\n}\n',
+    "app/src/main.rs": 'fn main() {\n    println!("{}", env!("TOKENS"));\n}\n',
+    "tokens/Cargo.toml": '[package]\nname = "tokens"\nversion = "0.1.0"\nedition = "2021"\n',
+    "tokens/src/lib.rs": 'extern crate proc_macro;\n\npub fn described() -> String {\n    format!("proc_macro available: {}", proc_macro::is_available())\n}\n',
+}
+
+
+def script_links_proc_macro(work, check):
+    """A build script that links `proc_macro` through a library ([`SCRIPT_PROC_MACRO`]) is
+    built by ra-jit, and the program runs as cargo's."""
+    ws = os.path.realpath(os.path.join(work, "script-proc-macro"))
+    for file, text in SCRIPT_PROC_MACRO.items():
+        os.makedirs(os.path.dirname(os.path.join(ws, file)), exist_ok=True)
+        open(os.path.join(ws, file), "w").write(text)
+    env = base_env(os.path.join(work, "home-script-proc-macro"))
+    ours, theirs = Side(ws, env, True), Side(ws, env, False)
+    (_, mine), (_, other) = ours.cargo("run"), theirs.cargo("run")
+    wrong = difference(program_output(mine), program_output(other))
+    how = how_built(mine.stderr)
+    check("a build script whose build dependency links `proc_macro` is the daemon's, and the program is right",
+          mine.returncode == 0 and how == "daemon" and not wrong, f"{how[:90]}; {wrong or 'same as cargo'}; {mine.stderr.strip()[-300:]!r}")
+    ours.cargo("stop")
 
 
 def in_place(work, check):
