@@ -437,6 +437,12 @@ pub(super) fn inline_limit(db: &dyn HirDatabase, instance: &Instance) -> Option<
     })
 }
 
+/// Whether the compile under way is a build's that builds nothing in (`RA_JIT_BUILT_IN=0`),
+/// the library's `#[inline]` and generic functions neither: LLVM's inliner has every body.
+pub(super) fn builds_in_nothing() -> bool {
+    built_in() == 0 && INLINING.with(|it| it.borrow().as_ref().is_some_and(|it| it.whole))
+}
+
 /// Whether a build may build `instance` in, or show it to LLVM: one of the standard library
 /// only if it is generic or `#[inline]`, as rustc does across crates. The library keeps what
 /// the rest of its functions refer to to itself (the `static`s of `std::rt`), and has them
