@@ -808,13 +808,36 @@ main 24be505), "cold": with a store that has the standard library's unit, ripgre
 4.5), nushell 27.2 s (25.6 to 25.9); with an empty store, 11.2 s and 37.3 s. rustc compiles
 the build scripts of the cold build: ripgrep 7 times before, 1 (crossbeam-utils, `include!`);
 nushell 50 before, 5 (crossbeam-utils and portable-atomic, `include!`; bigdecimal, `env!`;
-nu-cmd-lang and oem_cp, a proc macro). Not done: `RUSTC`
-naming ra-jit while scripts run, so their probes are ra-jit's; rust-analyzer's `cargo check
+nu-cmd-lang and oem_cp, a proc macro). Not done: rust-analyzer's `cargo check
 --compile-time-deps` replaced; the harness that compares every script's output with rustc's. For
 the F+G lane: the printed lines a library is linked with are where cargo keeps them
 (`cargo::script::printed`), whether ra-jit compiled the script or not, and a script ra-jit
 compiles is one more crate of a `rust-project.json`, so the standard library's scripts can take
 the same path.
+
+Then (the `no-rustc-probes` lane, 2026-10-27) a script's `RUSTC` is ra-jit, so what it asks
+rustc is ra-jit's to answer and no rustc runs (`crates/ra-jit/src/as_rustc.rs`). Every run,
+cargo's and the daemon's, has `RUSTC` naming ra-jit linked as `rustc` beside the run
+(`script_sandbox.rs`), the toolchain's rustc in `RA_JIT_SCRIPT_RUSTC`, and no
+`RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER`, as with no wrapper configured (a script runs
+`$RUSTC_WRAPPER $RUSTC`, and the wrapper would run rustc). `-vV` and `--print` are B's answers;
+a probe (`autocfg`'s `--emit=llvm-ir` of standard input, `anyhow`'s and `thiserror`'s
+`--emit=dep-info,metadata` of a file with `#![feature(error_generic_member_access)]`,
+`rustix`'s `--emit=metadata -o`, `proc-macro2`'s) is checked as `cargo blaze check` checks a
+crate (D's verdict, `check::once`), and passes with the files asked for written (empty: the
+scripts only see that they are there) or fails with the errors. What ra-jit can't answer that
+way fails the probe with an error naming the command: a flag it does not know, `-D`, a probe
+that links or names a library, or a `#![feature]` that is not in the unstable book
+rust-analyzer was made with (rustc's own list of features is not shipped). B also answers
+`-Clinker-features=-lld`, which cargo passes to its questions of rustc when configured to.
+On dev-aws-14, blaze's own `cargo blaze build -p ra-jit --release --features llvm` (main
+b11a8eb): every script printed what it prints under rustc (51 packages, `anyhow`, `thiserror`,
+`proc-macro2`, `rustix`, `num-traits`, `memoffset`, `libc`, `serde`, `rustversion` among them;
+the one difference is `ra-jit`'s commit), and of the rustc runs the probes and questions are
+gone: 22 `rustc -vV` and `--version`, 10 probes and 5 `--print` before, none after (what
+is left is the compiles of rust-analyzer's load, 82 against 119). A probe takes about 3 s, most of it loading the standard library. Risk: a probe
+rust-analyzer accepts that rustc refuses (an error that is not among D's sure ones, an unknown
+`extern crate`) turns a feature on; one it refuses that rustc accepts turns it off.
 
 Then (the `no-rustc-l3` lane, 2026-10-23) a script that uses `include!`, `include_str!`,
 `include_bytes!`, `env!` or `option_env!` is ra-jit's too. Its dep-info names what rustc's

@@ -542,6 +542,12 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- A build script's `RUSTC` is blaze, so its probes run no rustc: `rustc -vV` and `--print`
+  are blaze's answers, and a probe compile (`autocfg`, `anyhow`, `thiserror`, `rustix`,
+  `proc-macro2`) gets `cargo blaze check`'s verdict, or an error naming the command where blaze
+  can't give one. cargo's `-Clinker-features=-lld` no longer sends a question to rustc
+  (docs/no-rustc.md, step I).
+
 - LLVM's inliner runs at threshold 500 (was the level's 225 or 250): the runtime set's
   geomean goes from 1.091 to 1.080 of rustc's (tokei 1.28 to 1.26, ripgrep 1.14 to 1.11) for
   2 to 5% more code and no more compile time; docs/tiers.md has the sweep (225, 500, 1000, and

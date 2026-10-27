@@ -145,6 +145,14 @@ pub(crate) fn own_answer(command: &Command, stdin: &[u8]) -> Option<Vec<u8>> {
     own::answer(&rustc, &args, stdin, &var)
 }
 
+/// What ra-jit itself answers to rustc of the toolchain `rustc` is, asked with `args` and
+/// `stdin` in this process's environment, or `None` when it has no answer of its own. No
+/// rustc runs.
+pub(crate) fn own_answer_of(rustc: &OsStr, args: &[OsString], stdin: &[u8]) -> Option<Vec<u8>> {
+    let var = |name: &str| std::env::var_os(name);
+    own::answer(&toolchain_rustc(rustc, &var)?, args, stdin, &var)
+}
+
 /// rustc's answer to what `command` asks it, given `stdin`: ra-jit's own, the kept answer, or
 /// rustc's now, kept when it is one. `command` runs rustc and asks a question ([`is_question`]).
 pub(crate) fn answer(command: &mut Command, stdin: &[u8]) -> io::Result<Output> {

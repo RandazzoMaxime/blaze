@@ -139,9 +139,10 @@ pub(crate) fn run_as_cargo_does(
     let store =
         here.and_then(|_| ra_jit_store::Store::global_or(super::daemon::store().as_deref()));
     if store.is_none()
-        && let script_sandbox::Plan::Outside(_) = plan
+        && let script_sandbox::Plan::Outside(..) = plan
     {
         script_sandbox::keep_reads(&out_dir, None);
+        script.env_clear().envs(plan.env().iter().map(|(k, v)| (k, v)));
         return become_it(&mut script);
     }
     let keys = shared.zip(here).zip(store);
@@ -187,8 +188,9 @@ pub(crate) fn run_as_cargo_does(
 }
 
 /// What the store's runs of build scripts are kept under in place of a toolchain: what a run
-/// prints and writes is told by the script, which its key has.
-const RUNS: &str = "build script runs 2";
+/// prints and writes is told by the script, which its key has. 3 since a script's `RUSTC`
+/// is ra-jit's ([`crate::as_rustc`]).
+const RUNS: &str = "build script runs 3";
 
 /// The variables of a run that change nothing it prints or writes: the jobs it may start, and
 /// the directories the shell that ran cargo was in, which cargo leaves as they were (it runs

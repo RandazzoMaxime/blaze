@@ -75,6 +75,33 @@ pub(crate) fn serve(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The verdict of a `cargo blaze check` on the crates of `project`, `krate` among them, once,
+/// as a build script's probe of rustc is answered (`as_rustc.rs`): `None` when they compile,
+/// else their errors.
+pub(crate) fn once(project: &Path, krate: &str) -> anyhow::Result<Option<crate::Refused>> {
+    let project = project.to_str().context("a path that is not text")?.to_owned();
+    // A build's arguments, of which a check reads the project and the crate.
+    let out = std::env::temp_dir().join("unwritten.o").to_string_lossy().into_owned();
+    let args = [project, "--crate".to_owned(), krate.to_owned(), "--out".to_owned(), out];
+    let args = Args::parse(args.into_iter())?;
+    crate::process_wide();
+    let read_from = SystemTime::now();
+    let cargo_config = crate::cargo_config(&args);
+    let projects = [args.project.as_path()];
+    let (mut db, vfs, checkouts) = crate::load(
+        &projects,
+        &cargo_config,
+        crate::load_config(),
+        args.selection.clone(),
+        None,
+        None,
+    )?;
+    ide_db::base_db::set_process_env(&mut db, crate::process::own());
+    let Parts { root, members, lints_capped, .. } = checkouts.parts(&args.project)?;
+    let checker = Checker::new(&db, &vfs, &checkouts, &members, &[], read_from, root, lints_capped);
+    Ok(checker.refused(&db))
+}
+
 struct Checker {
     /// The source files of the workspace as they were last read.
     files: Vec<WatchedFile>,
@@ -262,6 +289,14 @@ impl Checker {
 
     /// `ok`, or the errors in the source as rustc writes them.
     fn verdict(&self, db: &RootDatabase) -> String {
+        match self.refused(db) {
+            Some(refused) => refused.reply(),
+            None => "ok".to_owned(),
+        }
+    }
+
+    /// The errors in the source, `None` when it compiles.
+    fn refused(&self, db: &RootDatabase) -> Option<crate::Refused> {
         let broken = crate::broken_in(
             db,
             &self.checked,
@@ -270,13 +305,9 @@ impl Checker {
             None,
             !self.lints_capped,
         );
-        let refused = hir::attach_db(db, || {
+        hir::attach_db(db, || {
             crate::refusal(db, &self.checked, &self.sources, &self.root, broken, None)
-        });
-        match refused {
-            Some(refused) => refused.reply(),
-            None => "ok".to_owned(),
-        }
+        })
     }
 
     /// The answer to the lint request `ask`: what blaze's clippy finds in the crates.
