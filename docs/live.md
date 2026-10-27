@@ -330,5 +330,28 @@ ms to its first answer (it reserves its patch room and reads its executable firs
   changes what the rest of the program sees") for texts that never build (9 to 11 times a pass). Keys queue
   behind those answers.
 
+**On Windows x86-64.** life only, one pass, on 2026-10-25 on a desktop (Intel, 24 threads,
+Windows 11, Windows Defender on as installed), at the commit that brings live edits to Windows,
+with a daemon and home of its own and no store. All times in ms; the samples are in
+[benchmarks/live/windows-life.json](benchmarks/live/windows-life.json), the run is a line in
+`benchmarks/history/windows-x86-64-live.jsonl`.
+
+| program, mode | n | p50 | p90 | p95 | p99 | max |
+|---|---|---|---|---|---|---|
+| life, socket | 10 | 26.6 | 52.6 | 52.6 | 52.6 | 52.6 |
+| life, burst | 60 | 27.4 | 33.1 | 33.2 | 38.4 | 38.4 |
+| life, replay | 77 | 89.3 | 493 | 10,440 | 12,760 | 12,760 |
+| life, cargo | 10 | 148 | 157 | 157 | 157 | 157 |
+
+Restarts: 3 of 12 session edits, 244 (max 260) against 1,526 (1,534) for `cargo run` (the build
+138 against 1,502, the start 69 against 24); the 9 body edits were applied live, p50 34 (26
+to 36). In replay 50 of the 77 compiling keys were run by a patch (p50 30.0, p90 237) and 27 by
+one of 13 restarts (p50 390), the tail being keys queued behind restarts as on macOS.
+
+- The daemon sets a named event once it wrote a patch, which the program waits on: `delivery`
+  is 0.2. Before, the program looked every 30 ms, and socket's p50 was about 50.
+- Of socket's 26.6, about 25 is the worker building the edit.
+- In `cargo`, about 115 of the 148 are cargo starting and asking the daemon.
+
 Not measured yet: keystroke to changed pixels, and these modes on the CI runner
 (`.github/workflows/live-latency.yaml` runs `socket burst replay` on all four programs).

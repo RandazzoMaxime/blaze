@@ -36,7 +36,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from live_e2e import APPLY_TIMEOUT, Running, StepError, build, serving, show_daemon_log, start
+from live_e2e import APPLY_TIMEOUT, Running, StepError, build, serving, show_daemon_log, start, own_home
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -112,6 +112,7 @@ async def edit(step: str, program: Running, source: Path, stage: int, project: P
 
 
 async def main() -> None:
+    own_home()
     bin_dir = Path(os.environ["RA_JIT_BIN"]).resolve().parent
     work = Path(tempfile.mkdtemp(prefix="ra-jit-live-types-"))
     started: list[Running] = []

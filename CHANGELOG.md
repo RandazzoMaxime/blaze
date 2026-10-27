@@ -1,13 +1,82 @@
 # Changelog
 
 All notable changes to ra-jit are written here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions after 0.1.0 are dated,
+`0.YYYYMMDD.N` with N counting the releases of that day from 0, and the release train writes
+each one's section: what `[Unreleased]` had, and the title of each change merged since
+(docs/harness.md, "CI").
 
 ## [Unreleased]
 
 ### Added
 
+- `cargo blaze doc` (and `blaze doc`) writes the HTML documentation of the packages and their
+  dependencies from rust-analyzer's HIR (`crates/blaze-doc`), with no rustdoc: a page for
+  every item with linked signatures, fields, variants, inherent, trait, blanket and auto
+  impls, implementors and the members an impl leaves as the trait provides them; docs as
+  rustdoc's Markdown with intra-doc links resolved (an unresolved one warns as rustdoc's
+  does); source pages, an "All items" page, a search box (`s` or `/`) over every crate
+  documented, light and dark themes. cargo's flags (`-p`, `--workspace`, `--no-deps`,
+  `--document-private-items`, `--open`, features, `--target`, `--lib`, `--bin`, ...); the
+  workspace loads once and the pages are written in parallel. `harness/docdiff.py` compares
+  it with the pinned nightly's `cargo doc`: on fd and its dependencies blaze writes 100% of
+  rustdoc's pages, 99.9% of the members and impls on them and 99.4% of the resolved links
+  ([docs/doc.md](docs/doc.md)).
+
+- `nonstandard_macro_braces` no longer lints a call inside another macro's arguments
+  (`vec!(..)` in `assert!(..)`), which stock clippy leaves alone; `new_without_default`
+  takes a type to be exported only when another crate can name it; the format lints read
+  macros marked `#[clippy::format_args]`, as `log`'s are. helix's 20 diagnostics of the
+  ported lints are now all written as stock clippy writes them, with none extra.
+- `cargo blaze clippy` (and `blaze clippy`) lints with blaze's own lints, `crates/blaze-lints`:
+  24 of clippy's ported onto rust-analyzer's analysis and run by the daemon, with no cargo,
+  rustc or clippy-driver started. They are written as `cargo clippy` writes them (rustc's
+  rendering, cargo's summary line and `--fix` hint, `--message-format=json`, status 101 for an
+  error), at the levels `#[allow]`, `#[expect]`, `[lints.clippy]`, `clippy.toml` and `-- -D`
+  give. On ripgrep and fd every diagnostic stock clippy writes of those lints, 567, is written
+  the same, held so by `harness/clippydiff.py`; helix and biome lint nothing yet, as
+  `cargo blaze check` of them fails. docs/cargo.md has the numbers.
+- `cargo blaze fmt` (and `blaze fmt`) is blaze's own: blaze-fmt run in process, with
+  cargo-fmt's options over the workspace's targets, or rustfmt's over the `.rs` files named
+  (`blaze fmt src/main.rs`). No rustfmt or cargo-fmt is started.
+- `crates/blaze-fmt`: blaze's own formatter, rustfmt and cargo-fmt at rust-lang/rust 12433c307
+  ported onto a syntax tree of blaze's own, which rust-analyzer's parser fills with the spans
+  rustc would give each node. It runs in process and starts no rustfmt; what it cannot
+  lower yet (nightly syntax rust-analyzer does not parse, a `macro` with parameters, the
+  `ignore` option) is refused with the reason, never formatted differently.
+  `harness/fmtdiff.py` holds it to stock rustfmt byte for byte: ripgrep, nushell, fd, helix
+  and biome with their own rustfmt.toml (6068 of 6068 files, `--check` exit codes and diffs
+  too), the same with `max_width = 60` (6068 of 6068), and rustfmt's `tests/source` (773 of
+  793; the rest are those refusals).
+- `cargo blaze search`, `owner`, `yank`, `login` and `logout` are blaze's own: blaze-registry
+  has a client of a registry's web API (crates-io 0.41's), with cargo's choice of registry, its
+  token and `credentials.toml` as cargo writes it, and its errors (`harness/own_registry.py`,
+  73 of 73 cases against a mock registry, requests and credentials files too). Credential
+  providers other than `cargo:token` are refused.
+- `cargo blaze vendor` is blaze's own for registry packages: each unpacked from its `.crate`
+  with its `.cargo-checksum.json`, and the `[source]` configuration printed
+  (`harness/own_vendor.py`, 18 of 18 cases, every file by its sha256). A git package is
+  refused with the reason.
+- `cargo blaze remove` is blaze's own: the dependencies out of the manifest, layout and
+  comments kept, what named them cleaned up, and the lock file resolved again with every
+  version it keeps (`harness/own_remove.py`, 43 of 43 cases, manifests and lock files byte
+  for byte).
+- `cargo blaze config get` is blaze's own: the configuration cargo reads, in TOML or JSON,
+  merged or file by file, with where each value is from (`harness/own_config.py`, 41 of 41
+  cases).
+- `cargo blaze report future-incompatibilities` is blaze's own: the report a build left, as
+  cargo prints it (`harness/own_report.py`, 23 of 23 cases). Every own command colors its
+  lines as `--color` or `CARGO_TERM_COLOR` says.
+- `cargo blaze uninstall` and `cargo blaze read-manifest` are blaze's own. `uninstall` is cargo
+  1.99's, with its install tracker: `.crates.toml` and `.crates2.json` are written byte for
+  byte as cargo writes them (`harness/own_uninstall.py`, 18 of 18 cases equal to cargo's).
+  `read-manifest` is the package's entry of `metadata --no-deps` (`harness/own_commands.py`,
+  now 130 of 130 over ripgrep, fd, helix, nushell and biome).
+- `enable` makes plain `cargo fmt` and `cargo clippy` blaze's, for each of the two that is
+  blaze's own: links named `cargo-fmt` and `cargo-clippy` in `~/.cargo/bin`, which cargo looks
+  in before `PATH`, to `cargo-blaze`. What they replace, rustup's proxies, is kept and
+  `disable` puts it back; `status` says whose each command is. Not an `[alias]`, which cargo
+  warns of on every run (rust-lang/cargo#10049).
 - `cargo blaze tree`, `pkgid`, `fetch`, `clean`, `new` and `init` are blaze's own, with no
   cargo: `tree` from the new `crates/blaze-tree` (cargo 1.101's, on blaze-resolve), `new` and
   `init` from the new `crates/blaze-new`. `harness/own_tree.py` (130 of 130 equal over
@@ -73,6 +142,15 @@ All notable changes to ra-jit are written here. The format follows
 - `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again: ripgrep from nothing 19.4 s to 9.9 s on dev-aws-8.
+- Live edits on Windows x86-64: `ra-jit-live` takes patches in a running PE program, named by
+  the GUID of its PDB, and registers their unwind tables, and the daemon lays a patch of a PE
+  executable out for it. An executable a program runs is spliced through a copy put in its
+  place, as on Unix, instead of being linked again; the daemon wakes the program through a
+  named event; and `ra_jit_live::edit` reaches the daemon, so `demo/life`'s editor builds as you
+  type. life's edit to running is 26.6 ms at p50 (`socket`) on a Windows 11 desktop
+  ([live.md](docs/live.md#latency-under-typing)). A static with another value still asks for a
+  restart.
+
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
@@ -369,7 +447,7 @@ All notable changes to ra-jit are written here. The format follows
   every run, starts the site's deploy, and on a regression past the noise band opens (or
   comments on) an issue labelled `bench-regression` and fails. The live-edit latency workflow
   runs every night on main on a macOS arm64 runner and does the same with its history.
-- [ra-jit.ix.dev/bench](https://ra-jit.ix.dev/bench): the benchmark history over commits, from
+- [ix.dev/blaze/bench](https://ix.dev/blaze/bench): the benchmark history over commits, from
   `docs/benchmarks/history`: the latest run's table per project, and charts of each edit,
   the cold build, the daemon's peak memory, the store size and live edit-to-running latency
   ([#10](https://github.com/indexable-inc/ra-jit/issues/10)).
@@ -460,6 +538,17 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Changed
 
+- The site moved to [ix.dev/blaze](https://ix.dev/blaze/). https://ra-jit.ix.dev and
+  https://blaze.ix.dev answer every path with a 301 to the same path and query under
+  https://ix.dev/blaze, so old links (the README's updates button, `/bench`, RFCs) keep
+  working. Every page, script, stylesheet, image, narration file and form sits under `/blaze`
+  (`Served` on `site` in `site/content/site.flecs`); pages carry a canonical URL and Open Graph
+  tags, `/blaze/sitemap.xml` lists them, and `/blaze/install.sh` serves `install.sh`.
+- The site says blaze, not ra-jit: page titles, the top bar, `og:site_name`, the home page, the
+  charter, the RFCs, `/bench` and `/updates`, and their narration, voiced again. ra-jit is left
+  only where it is still the literal name: the `ra-jit-live` crate and `#[ra_jit::cache]`, and
+  the line that blaze was called ra-jit until 2026-10-24 and `cargo ra-jit` still works.
+  Comments keep their pages and blocks (ids unchanged).
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
@@ -889,6 +978,25 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Fixed
 
+- `cargo blaze doc` documents the crates cargo does: of two of one name the one cargo keeps
+  (none of a proc macro's two `syn`s), nothing only a left-out one or a test needs. It links
+  a crate not documented at its `html_root_url`, finds blanket impls of every crate linked and
+  applies them as solved in the documented crate, leaves out more provided methods that
+  cannot apply, warns of a broken link where rustdoc does (lint levels, `cfg_attr`, no
+  warning in another crate's macro), and documents what a macro expands to past
+  rust-analyzer's token limit (biome_wasm's 2271 types). Against `cargo doc`, biome goes from
+  93.5% to 99.0% of the pages, helix from 98.2% to 99.0% of the members and impls; docs/doc.md
+  has all five bench apps.
+- The borrow checker reports nothing on helix (14 false errors before) or biome (534), as
+  rustc does; ripgrep, fd and nushell stay at none, and the UI scores are unchanged (Polonius
+  1545 of 1585, NLL 1542 of 1583). It follows rustc where it did not: the outlives
+  components of a trait object's projections and of fn pointers; an opaque's arguments
+  related by what it captures; `use<>` on an `impl Trait` inside the return type; implied
+  bounds through a projection and from a type's inferred outlives; a trait object's default
+  lifetime not counted by lifetime elision; one lifetime for an alias's elided lifetime
+  wherever the alias uses it; a closure's annotated references and the pointer fn items
+  coerce to as higher-ranked; promotion by the value, not its type, with `Freeze` seen
+  through projections.
 - `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
   ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
   before compiling anything: for a git source cargo checks that every package is a member of
@@ -944,6 +1052,11 @@ All notable changes to ra-jit are written here. The format follows
 - A patch asks rustc's executable whether it has a function of a name once per name, where
   each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
   where they took 2.2–2.8 s (cargo 2.3 s).
+- On Windows x86-64 (MSVC), `cargo blaze build` and `run` rebuild through the daemon and print
+  `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
+  `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
+  configuration names, and closes an existing directory of its own that others can enter, as
+  on Unix. Live edits of a running program are still macOS and Linux only.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

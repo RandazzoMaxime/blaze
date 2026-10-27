@@ -107,7 +107,7 @@ localStorage). With focus in the player, Space or k plays and pauses, Left and R
 is highlighted and, from the word timings and the CSS Custom Highlight API, the word being said; with
 `prefers-reduced-motion` the word highlight is off and scrolling is instant. Each block has a "play from here" button
 beside its comment button. Nothing plays until the reader presses something. The page CSP allows `media-src 'self'`
-(worker/http.ts and static/_headers).
+(worker/http.ts `csp`, for worker pages and static files alike).
 
 Format: Opus in WebM, mono, 32 kb/s. Chrome, Firefox and Safari 17.4+ (macOS and iOS) play it; Opus in Ogg needs
 Safari 18.4.
@@ -130,7 +130,7 @@ The plan, none of it done (each step needs approval):
 ## Licences
 
 - Drama 3 is under the Fish Audio Community License v1.0: free for non-commercial use, commercial use only while
-  annual revenue is under USD 500k. Check before ra-jit's site counts as commercial.
+  annual revenue is under USD 500k. Check before blaze's site counts as commercial.
 - The default voice, hifi-92, is from the Hi-Fi Multi-Speaker English TTS Dataset (Bakhturina et al., NVIDIA, 2021,
   https://www.openslr.org/109/), CC BY 4.0, audio from LibriVox. The manifest carries the attribution; credit it on
   the site when narration ships.

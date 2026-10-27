@@ -1,25 +1,25 @@
-// The charter: what ra-jit holds to, and what every RFC is checked against.
+// The charter: what blaze holds to, and what every RFC is checked against.
 site {
   charter : Doc {
     Title: {"Charter"}
-    Intro: {"[calm, warm] This is the ra-jit charter: the rulebook every RFC gets checked against."}
+    Intro: {"[calm, warm] This is the blaze charter: the rulebook every RFC gets checked against."}
     Outro: {"[calm] So, five rules. Rust that builds keeps building. New things live in a new, unstable edition. Checkable beats short. Fast to build, fast to run, easy to change. And everything is decided in the open. [breath] Thanks for listening."}
     Nav: {"Charter", 1}
-    Description: {"What ra-jit holds to: Rust keeps working, new things are opt-in, and checkable code beats short code."}
+    Description: {"What blaze holds to: Rust keeps working, new things are opt-in, and checkable code beats short code."}
 
-    Lede lede("ra-jit is Rust, plus a place to try what Rust could become. These are the rules for both.") {
-      Say: {"[thoughtful] Here's the setup. ra-jit is Rust, the Rust you already have, and it's also a place to try what Rust could become. [pause] Those could pull against each other, so there are five rules for both."}
+    Lede lede("blaze is Rust, plus a place to try what Rust could become. These are the rules for both.") {
+      Say: {"[thoughtful] Here's the setup. blaze is Rust, the Rust you already have, and it's also a place to try what Rust could become. [pause] Those could pull against each other, so there are five rules for both."}
     }
 
     Section compat(title: "1. Rust that builds keeps building") {
-      Say: {"[confident] Rule one: Rust that builds keeps building. Every crate that builds with the Rust compiler, version one point ninety-nine, builds with ra-jit and means the same thing: every edition from twenty fifteen to twenty twenty-four, the standard library, crates dot io as it is. ra-jit only adds; it never changes stable Rust. [pause] A change that would break existing code doesn't ship in the existing editions. [small laugh] That's what editions are for."}
-      P what("Every crate that builds with rustc 1.99.0 builds with ra-jit and means the same thing: editions 2015 to 2024, std, crates.io as it is. ra-jit is a superset; it does not remove or change anything in stable Rust.")
+      Say: {"[confident] Rule one: Rust that builds keeps building. Every crate that builds with the Rust compiler, version one point ninety-nine, builds with blaze and means the same thing: every edition from twenty fifteen to twenty twenty-four, the standard library, crates dot io as it is. blaze only adds; it never changes stable Rust. [pause] A change that would break existing code doesn't ship in the existing editions. [small laugh] That's what editions are for."}
+      P what("Every crate that builds with rustc 1.99.0 builds with blaze and means the same thing: editions 2015 to 2024, std, crates.io as it is. blaze is a superset; it does not remove or change anything in stable Rust.")
       P how("When a change would break existing code, it does not ship in the existing editions. That is what editions are for.")
     }
 
     Section edition(title: "2. New things live in a new edition") {
       Say: {"[curious] Rule two: so where do new things go? Into a new edition that a crate opts into, and crates on old and new editions still build together in one program. [serious] But <emphasis>the new edition is unstable.</emphasis> Anything in it can change or disappear between releases. The old editions are the stable part; the new one is where designs get tried on real code. [short pause] Its name, and how a crate opts in, are still open."}
-      P what("Everything ra-jit adds to the language sits behind a new edition that a crate opts into. Crates on the new edition and crates on old ones build together in one program, as editions do today.")
+      P what("Everything blaze adds to the language sits behind a new edition that a crate opts into. Crates on the new edition and crates on old ones build together in one program, as editions do today.")
       P unstable("**The new edition is unstable.** Anything in it may change shape or be removed between releases. The old editions are the stable part; the new one is where designs are tried on real code.")
       P open("Its name and how a crate opts in are open; see [the RFCs](/rfcs).")
     }
