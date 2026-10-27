@@ -67,7 +67,11 @@ blaze tracks the latest Rust nightly. `.github/workflows/toolchain-bump.yaml` ru
    - **green**: no job or harness red that is green on `toolchain/base`'s train (waited for, or
      started if there is none; main's newest finished train only if it was cancelled), and no
      more std refusals than main: `gh pr merge --auto`, so it lands once the gate passes, and
-     the next release of blaze carries the new pin. A job red on main too is listed and not
+     the next release of blaze carries the new pin. The gate passed hours before, and GitHub
+     acts on auto-merge only when a check finishes after it is set, so the gate's `ci` job runs
+     again (seconds). A merge made for GITHUB_TOKEN starts no workflow, so once it merges the
+     verdict dispatches on main every workflow a push to main starts (`train.yaml`,
+     `ra-jit.yaml`, ...). A job red on main too is listed and not
      counted against the bump; the train's own issue covers it.
    - **red on the first attempt**: the train's failed jobs run again (`gh run rerun --failed`),
      and the verdict of that attempt decides, so a harness that fails one run in ten does not
