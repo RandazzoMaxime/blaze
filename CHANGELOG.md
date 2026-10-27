@@ -542,6 +542,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Changed
 
+- LLVM's inliner runs at threshold 500 (was the level's 225 or 250): the runtime set's
+  geomean goes from 1.091 to 1.080 of rustc's (tokei 1.28 to 1.26, ripgrep 1.14 to 1.11) for
+  2 to 5% more code and no more compile time; docs/tiers.md has the sweep (225, 500, 1000, and
+  nothing built in by blaze). `RA_JIT_LLVM_INLINE_THRESHOLD` is in the store's key.
 - The LLVM backend is on LLVM 23.1.4 (was 20.1.8), our fork's `ix/23.x` at the commit
   wasm-host's ix-aot pins, so both run one LLVM: inkwell 0.11 and llvm-sys 231. Blaze
   builds that LLVM itself for each target (`.github/workflows/llvm.yaml`) and pins the
