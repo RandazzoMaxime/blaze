@@ -1439,6 +1439,26 @@ fn rerun_guards(package: &Package, script: &BuildScript) -> Vec<Guard> {
     files
 }
 
+/// `said`, the errors the daemon found in the source of the target `target` (`bin "app"`,
+/// `lib test`) of `package`, as rustc writes them and cargo ends the build: with the line
+/// naming what did not compile, and the note of the toolchain blaze built with in place of the
+/// project's.
+pub(crate) fn turned_down(said: &crate::errors::Said, package: &str, target: &str) -> String {
+    let errors = match said.count() {
+        0 | 1 => "1 previous error".to_owned(),
+        n => format!("{n} previous errors"),
+    };
+    let mut notes = said.notes().join("\n");
+    if !notes.is_empty() {
+        notes.push('\n');
+    }
+    let toolchain =
+        super::toolchain::failed_note().map_or(String::new(), |it| format!("\nnote: {it}"));
+    format!(
+        "{said}\n\n{notes}error: could not compile `{package}` ({target}) due to {errors}{toolchain}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
