@@ -201,7 +201,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   codeless "does not live long enough". A closure or coroutine is made where its creator's where
   clauses hold, so they are proven again at its creation with its parent's arguments (rustc's
   `prove_aggregate_predicates`): `for<'a> &'a S: 'a` needs `S: 'static` there, and a closure
-  of `negotiate<S>` is "`S` does not live long enough". rust-analyzer gives a trait object
+  of `negotiate<S>` is "`S` does not live long enough". What a parameter's type implies is
+  assumed, but its higher-ranked where clauses are proven, as rustc applies what proving the
+  type's well-formedness needs: `Foo<&'lt u8>` with `for<'x> T::Ty<'x>: Sized` normalizes
+  `<&'lt u8 as Trait>::Ty<'x>`, whose `Self: 'x` is `'lt: 'static`. rust-analyzer gives a trait object
   behind an elided reference in a signature `'static`, not the reference's lifetime, so a
   placeholder the solver equates with an elided lifetime is left out
   (`fn(&mut dyn Write)` for `impl FnMut(&mut dyn Write)` holds).

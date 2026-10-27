@@ -683,6 +683,7 @@ pub(super) fn build<'db>(
     builder.env_aliases();
     builder.location = None;
     builder.signature_projections();
+    builder.signature_higher_ranked();
     builder.annotations();
     for &block in &cfg.order {
         let data = &body.basic_blocks[block];
@@ -2344,6 +2345,46 @@ impl<'db> Builder<'_, '_, 'db> {
                 rustc_type_ir::fold_regions(interner, ty, |_, _| Region::new_static(interner))
             })
             .collect();
+    }
+
+    /// What proving a signature type's higher-ranked where clauses needs, as rustc's
+    /// `add_implied_bounds` applies the region constraints of proving the well-formedness of
+    /// each parameter's type: `Foo<&'lt u8>` with `for<'x> T::Ty<'x>: Sized` normalizes
+    /// `<&'lt u8 as Trait>::Ty<'x>` for a placeholder `'x`, whose `Self: 'x` is `'lt: 'static`
+    /// (`implied-bounds/normalization-placeholder-leak.rs`). The others are what the type
+    /// implies, assumed rather than proven.
+    fn signature_higher_ranked(&mut self) {
+        if self.ctx.closure_local.is_some() || self.ctx.inline_const {
+            return;
+        }
+        let interner = self.interner();
+        let mut clauses = Vec::new();
+        for &local in self
+            .body
+            .param_locals
+            .iter()
+            .chain((!self.returns_opaque).then_some(&super::return_slot()))
+        {
+            let ty = self.regions.local_tys[local.into_raw().into_u32() as usize];
+            for arg in ty.walk() {
+                let Some(it) = rustc_type_ir::inherent::GenericArg::as_type(&arg) else {
+                    continue;
+                };
+                let TyKind::Adt(def, args) = it.kind() else { continue };
+                for clause in GenericPredicates::query_all(self.ctx.db, def.def_id().into())
+                    .iter_instantiated(interner, args.as_slice())
+                {
+                    let clause = clause.skip_norm_wip();
+                    if matches!(clause.kind().skip_binder(), ClauseKind::Trait(_))
+                        && !clause.kind().bound_vars().is_empty()
+                        && !clauses.contains(&clause)
+                    {
+                        clauses.push(clause);
+                    }
+                }
+            }
+        }
+        self.clauses(clauses, At { category: Category::Signature, span: MirSpan::Unknown }, true);
     }
 
     /// What normalizing the signature needs, as rustc normalizes the type of each parameter
