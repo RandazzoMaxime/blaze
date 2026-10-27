@@ -573,7 +573,15 @@ fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
         // compiles itself to be told why. A thread-local is not a "definition" to `object`.
         let defined =
             file.symbols().filter(|it| !it.is_undefined() && it.scope() == SymbolScope::Dynamic);
-        names.extend(defined.filter_map(|it| it.name().ok().map(str::to_owned)));
+        // Mach-O spells every name with an underscore in front, which the names looked up
+        // ([`Resolver::in_prebuilt`]) don't have: with it kept, no function or static of the
+        // prebuilt std was found on macOS, a build script compiled std's itself and stopped
+        // at its first writable static (`GLOBAL_PANIC_COUNT`).
+        let macho = file.format() == object::BinaryFormat::MachO;
+        names.extend(defined.filter_map(|it| {
+            let name = it.name().ok()?;
+            Some(if macho { name.strip_prefix('_').unwrap_or(name) } else { name }.to_owned())
+        }));
     }
     Ok(names)
 }
@@ -7207,8 +7215,9 @@ fn take_blaze_names() {
     }
 }
 
-/// `blaze 0.1.0 (abc123def456)`: the crate's version, and the commit when the build was
-/// told it in `RA_JIT_GIT_SHA` (the release workflow and the flake set it).
+/// `blaze 0.20261026.0 (fb82b09)`: the crate's version (`0.YYYYMMDD.N`, the release train's,
+/// docs/harness.md "CI"), and the commit, which build.rs takes from `RA_JIT_GIT_SHA` (the
+/// release workflow and the flake set it) or the checkout's HEAD.
 pub(crate) fn version() -> String {
     let version = env!("CARGO_PKG_VERSION");
     match option_env!("RA_JIT_GIT_SHA") {

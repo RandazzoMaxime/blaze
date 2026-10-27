@@ -70,7 +70,7 @@ function choice(label: string, key: string, options: Option[], value: string) {
 
 export type Series = {
 	label: string;
-	/** ra-jit's numbers are drawn bright, the ones it is compared with dim. */
+	/** blaze's numbers are drawn bright, the ones it is compared with dim. */
 	tone: 'ours' | 'other';
 	dashed?: boolean;
 	values: (number | null | undefined)[];
@@ -108,7 +108,7 @@ function chart({ title, series, runs, active, group, scale = 'log', format, tick
 	if (!series.some((s) => s.values.some(defined))) {
 		return `<figure class="chart"><figcaption><span class="title">${esc(title)}</span></figcaption><p class="empty">${esc(empty)}</p></figure>`;
 	}
-	// ra-jit's series last, so that it is drawn on top.
+	// blaze's series last, so that it is drawn on top.
 	const drawn = [...series].sort((a, b) => Number(a.tone === 'ours') - Number(b.tone === 'ours'));
 	const all = series.flatMap((s) => [...s.values, ...(s.lo ?? []), ...(s.hi ?? [])]);
 	const dom = domain ?? (scale === 'log' ? logDomain(all) : linearDomain(all)) ?? ([1, 10] as [number, number]);
@@ -248,10 +248,10 @@ function tableHtml(entry: Entry) {
 	const head = [
 		'<th>Edit</th>',
 		th('cargo'),
-		th('ra-jit'),
+		th('blaze'),
 		th('Faster'),
 		...(t.memory
-			? [th(abbr('The most every process doing the work held at once', 'cargo memory')), th(abbr('The daemon, its workers and the command, at their peak', 'ra-jit memory'))]
+			? [th(abbr('The most every process doing the work held at once', 'cargo memory')), th(abbr('The daemon, its workers and the command, at their peak', 'blaze memory'))]
 			: []),
 		...t.setups.map((s) => th(abbr(SETUPS[s]?.[1] ?? s, SETUPS[s]?.[0] ?? s))),
 		...(t.setups.length ? [th('vs fastest cargo')] : []),
@@ -286,7 +286,7 @@ export function latestHtml(data: History, s: State) {
 	const out: string[] = [choice('Platform', 'platform', platforms, run.platform)];
 	const cpu = cpuLine(run);
 	out.push(
-		`<p>${esc(run.platform)}, ${esc(machineLabel(run.machine ?? ''))}${cpu ? `&nbsp;(${esc(cpu)})` : ''}, ra-jit ` +
+		`<p>${esc(run.platform)}, ${esc(machineLabel(run.machine ?? ''))}${cpu ? `&nbsp;(${esc(cpu)})` : ''}, blaze ` +
 			`${run.commit ? commitLink(run.commit) : '(commit unknown)'} on ${esc(when(run.date))}${run.runs ? `, median of ${run.runs} edits` : ''}.` +
 			`${run.runUrl ? ` <a href="${esc(run.runUrl)}">The CI run</a>.` : ''}</p>`,
 	);
@@ -333,7 +333,7 @@ export function overTimeHtml(data: History, s: State) {
 		.map((p) => {
 			const ph = phases[p];
 			const series: Series[] = [
-				{ label: 'ra-jit', tone: 'ours', values: ph.wall, lo: ph.min, hi: ph.max },
+				{ label: 'blaze', tone: 'ours', values: ph.wall, lo: ph.min, hi: ph.max },
 				{ label: 'cargo', tone: 'other', values: ph.cargo, lo: ph.cargoMin, hi: ph.cargoMax },
 			];
 			return { title: EDITS[p] ?? p, series };
@@ -345,7 +345,7 @@ export function overTimeHtml(data: History, s: State) {
 		.map((p) => ({
 			title: EDITS[p] ?? p,
 			series: [
-				{ label: 'ra-jit', tone: 'ours', values: phases[p].mem },
+				{ label: 'blaze', tone: 'ours', values: phases[p].mem },
 				{ label: 'cargo', tone: 'other', values: phases[p].cargoMem },
 			] as Series[],
 		}));
@@ -365,18 +365,18 @@ export function overTimeHtml(data: History, s: State) {
 	if (memory.length) {
 		out.push(
 			`<h3>${name}: memory while it builds</h3>`,
-			`<p class="dim note">The most every process doing the work held at once: for ra-jit the daemon, its workers and the command; for plain cargo, cargo itself, rustc and the linker (<a href="${REPO}/blob/main/docs/benchmarks.md#memory-and-disk">how</a>). Log scale.</p>`,
+			`<p class="dim note">The most every process doing the work held at once: for blaze the daemon, its workers and the command; for plain cargo, cargo itself, rustc and the linker (<a href="${REPO}/blob/main/docs/benchmarks.md#memory-and-disk">how</a>). Log scale.</p>`,
 			`<div class="charts">${memory.map((e) => chart({ ...c, ...e, format: megabytes, tick: megabytesTick, domain: memoryDomain })).join('')}</div>`,
 		);
 	}
 	const measured = 'Not measured in these runs yet.';
 	const coldSeries: Series[] = [
-		{ label: 'ra-jit', tone: 'ours', values: cold?.wall ?? [] },
-		...(cold?.warmStore.some((v) => v !== null) ? [{ label: 'ra-jit, warm store', tone: 'ours' as const, dashed: true, values: cold.warmStore }] : []),
+		{ label: 'blaze', tone: 'ours', values: cold?.wall ?? [] },
+		...(cold?.warmStore.some((v) => v !== null) ? [{ label: 'blaze, warm store', tone: 'ours' as const, dashed: true, values: cold.warmStore }] : []),
 		{ label: 'cargo', tone: 'other', values: cold?.cargo ?? [] },
 	];
 	const store = [
-		chart({ ...c, title: 'Cold build: cargo, and ra-jit until ready', series: coldSeries, scale: 'linear', format: seconds, tick: secondsTick }),
+		chart({ ...c, title: 'Cold build: cargo, and blaze until ready', series: coldSeries, scale: 'linear', format: seconds, tick: secondsTick }),
 		chart({
 			...c, ...mb, title: 'Daemon between edits', empty: measured,
 			series: [
@@ -387,12 +387,12 @@ export function overTimeHtml(data: History, s: State) {
 		chart({
 			...c, ...mb, title: 'On disk', empty: measured,
 			series: [
-				{ label: 'ra-jit: target, store, home', tone: 'ours', values: history?.disk ?? [] },
+				{ label: 'blaze: target, store, home', tone: 'ours', values: history?.disk ?? [] },
 				{ label: 'cargo: target', tone: 'other', values: history?.cargoDisk ?? [] },
 			],
 		}),
-		chart({ ...c, ...mb, title: 'Daemon peak memory', series: [{ label: 'ra-jit', tone: 'ours', values: history?.memory ?? [] }] }),
-		chart({ ...c, ...mb, title: 'Store size', empty: measured, series: [{ label: 'ra-jit', tone: 'ours', values: history?.store ?? [] }] }),
+		chart({ ...c, ...mb, title: 'Daemon peak memory', series: [{ label: 'blaze', tone: 'ours', values: history?.memory ?? [] }] }),
+		chart({ ...c, ...mb, title: 'Store size', empty: measured, series: [{ label: 'blaze', tone: 'ours', values: history?.store ?? [] }] }),
 	];
 	out.push('<h3>Cold build, memory and store</h3>', `<div class="charts">${store.join('')}</div>`);
 	return out.join('\n');

@@ -10,6 +10,7 @@ on:
     paths:
       - "site/**"
       - "README.md"
+      - "install.sh"
       - "docs/demo*"
       - "docs/benchmarks/**"
       - ".github/workflows/site.yaml"
@@ -17,6 +18,7 @@ on:
     paths:
       - "site/**"
       - "README.md"
+      - "install.sh"
       - "docs/demo*"
       - "docs/benchmarks/**"
       - ".github/workflows/site.yaml"

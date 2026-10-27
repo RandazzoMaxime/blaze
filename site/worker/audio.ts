@@ -6,7 +6,7 @@
  * Either way a Range request gets a 206: Safari will not play media from a server that answers ranges with 200.
  */
 import type { Env } from './env';
-import { methodNotAllowed, plain } from './http';
+import { assetHeaders, methodNotAllowed, plain } from './http';
 
 const FILE = /^\/audio\/([0-9a-f]{16,64})\.webm$/;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
@@ -56,7 +56,7 @@ function serve(bytes: ArrayBuffer, request: Request, etag: string): Response {
 export async function handleAudio(request: Request, env: Env, url: URL): Promise<Response> {
 	if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed('GET, HEAD');
 	const m = FILE.exec(url.pathname);
-	if (!m) return env.ASSETS.fetch(request);
+	if (!m) return assetHeaders(await env.ASSETS.fetch(request));
 	const etag = `"${m[1]}"`;
 	// One spoken line each, up to a few hundred kilobytes (about 90 s at 32 kb/s), so they are read whole and sliced here.
 	if (env.AUDIO) {

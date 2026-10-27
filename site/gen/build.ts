@@ -20,6 +20,10 @@
  *      discussable.json       doc -> title and each block's text (what comments may attach to)
  *      build.json             {hash} of the module, the snapshot and the client scripts (part of the cache key)
  *      spoken.json            every page's spoken lines and their hash (the input of audio/generate.py)
+ *      site.json              {origin, base}: where the site is served (`Served` on `site` in content/site.flecs)
+ *
+ *    and dist/sitemap.xml, every page but the 404 at its full URL (origin + base + path), and dist/install.sh, the
+ *    repo's installer.
  *
  * SITE_WASM_DIR names another directory holding site.wasm and site-snapshot.wasm (default renderer/target/site/).
  *
@@ -130,10 +134,11 @@ function bake(all: Map<string, Node>): Baked {
 
 /**
  * Every discussable page's URL must reach the worker first (wrangler.jsonc `assets.run_worker_first`), or it would be
- * served as the static, comment-less file.
+ * served as the static, comment-less file. `true` sends every request to the worker (it strips the base, worker/base.ts).
  */
 function checkRoutes(urls: string[]) {
 	const config = readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8');
+	if (/"run_worker_first"\s*:\s*true\b/.test(config)) return;
 	const m = /"run_worker_first"\s*:\s*\[([^\]]*)\]/.exec(config);
 	if (!m) throw new Error('wrangler.jsonc: no assets.run_worker_first');
 	const patterns = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
@@ -156,6 +161,14 @@ function wasmModule(file: string): WebAssembly.Module {
 	}
 	return new WebAssembly.Module(readFileSync(p));
 }
+
+/** `Served` on `site` (content/site.flecs): the origin and the base path every page sits under; empty when unset. */
+function served(tree: Map<string, Node>): { origin: string; base: string } {
+	const v = tree.get('site')?.values.get('Served');
+	return { origin: String(v?.origin ?? ''), base: String(v?.base ?? '') };
+}
+
+const xmlEsc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function write(file: string, data: string | Uint8Array) {
 	mkdirSync(path.dirname(file), { recursive: true });
@@ -196,10 +209,18 @@ async function build() {
 	for (const p of pages) write(path.join(dist, p.file), site.render(p.url, [], { viewer: null, signIn: true }));
 	writeFileSync(path.join(dist, 'site.css'), STYLES.map((s) => readFileSync(path.join(root, 'styles', s), 'utf8')).join('\n'));
 	cpSync(path.join(root, 'static'), dist, { recursive: true });
+	// The installer, at <base>/install.sh (`curl -fsSL https://ix.dev/blaze/install.sh | sh`), from the repo root.
+	cpSync(path.join(root, '..', 'install.sh'), path.join(dist, 'install.sh'));
 
 	write(path.join(gen, 'site.cbor'), snap);
 	cpSync(path.join(modules, 'site.wasm'), path.join(gen, 'site.wasm'));
 	write(path.join(gen, 'pages.json'), JSON.stringify(pages, null, '\t'));
+	const at = served(tree);
+	write(path.join(gen, 'site.json'), JSON.stringify(at, null, '\t'));
+	if (at.origin) {
+		const urls = pages.filter((p) => p.url !== '/404').map((p) => `<url><loc>${xmlEsc(at.origin + at.base + p.url)}</loc></url>`);
+		write(path.join(dist, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join('\n')}\n</urlset>\n`);
+	}
 	write(path.join(gen, 'discussable.json'), JSON.stringify(site.discussable(), null, '\t'));
 	const hash = createHash('sha256');
 	for (const f of ['site.cbor', 'site.wasm']) hash.update(f).update(readFileSync(path.join(gen, f)));
