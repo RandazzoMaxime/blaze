@@ -72,11 +72,15 @@ hir-ty.workspace = true
 hir-ty-codegen.workspace = true
 ra-jit-expand.workspace = true
 ra-jit-store.workspace = true
+blaze-fmt.workspace = true
+blaze-lints.workspace = true
 blaze-manifest.workspace = true
 blaze-metadata.workspace = true
 blaze-new.workspace = true
 blaze-tree.workspace = true
 blaze-resolve = { path = "../blaze-resolve" }
+blaze-registry = { path = "../blaze-registry" }
+cargo-util-schemas = "=0.14.3"
 ide-db.workspace = true
 ide-diagnostics.workspace = true
 pulldown-cmark.workspace = true
@@ -106,6 +110,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 ed25519-dalek = "2.2"
 getrandom = "0.3"
 url.workspace = true
+semver.workspace = true
+# `cargo remove` edits manifests as cargo's `toml_mut` does, layout and comments kept: the
+# version blaze-manifest and blaze-new read and write with.
+toml_edit = { version = "=0.25.12", default-features = false, features = ["display", "parse"] }
 tar = "0.4.44"
 zstd = "0.13.3"
 # The `.tar.xz` files of blaze's own toolchain (`cargo/toolchain/own.rs`): in Rust, within 1.3x

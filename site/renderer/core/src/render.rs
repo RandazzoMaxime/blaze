@@ -111,6 +111,48 @@ pub fn bar(world: &World, list: &[Page]) -> Result<Vec<NavItem>, String> {
     Ok(items)
 }
 
+/// Where the site is served (`Served` on `site`): the origin (`https://ix.dev`) and the path every page sits under
+/// (`/blaze`). Both empty when the site has no `Served`: pages at the root, no canonical URL.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Served {
+    pub origin: String,
+    pub base: String,
+}
+
+impl Served {
+    /// `site`'s `Served`, checked: an http(s) origin with no path, and a base that is empty or `/a/b` with no trailing
+    /// slash.
+    pub fn of(world: &World, site: Id) -> Result<Served, String> {
+        let Some(v) = world.get(site).value("Served") else { return Ok(Served::default()) };
+        let (origin, base) = (field(Some(v), "origin"), field(Some(v), "base"));
+        let host = origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://"));
+        if !host.is_some_and(|h| !h.is_empty() && !h.contains('/')) {
+            return Err(format!("site: Served origin {origin:?} is not http(s)://host"));
+        }
+        let ok_base = base.is_empty()
+            || (base.starts_with('/')
+                && !base.ends_with('/')
+                && !base.contains("//")
+                && base.bytes().all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b)));
+        if !ok_base {
+            return Err(format!(
+                "site: Served base {base:?} is not empty or /path without a trailing slash"
+            ));
+        }
+        Ok(Served { origin, base })
+    }
+
+    /// A link as the browser gets it: a site path (`/rfcs/x`, `/`) under the base (`/blaze/rfcs/x`, `/blaze/`);
+    /// anything else (`https://...`, `#ref-x`, `//host`) as it is.
+    pub fn href(&self, href: &str) -> String {
+        if href.starts_with('/') && !href.starts_with("//") {
+            format!("{}{href}", self.base)
+        } else {
+            href.to_string()
+        }
+    }
+}
+
 /// Everything a render reads: the world and the indexes over it the build makes once.
 pub struct Site<'w> {
     pub world: &'w World,
@@ -118,6 +160,7 @@ pub struct Site<'w> {
     pub pages: &'w [Page],
     pub nav: &'w [NavItem],
     pub refs: Option<Id>,
+    pub served: &'w Served,
 }
 
 impl Site<'_> {
@@ -145,7 +188,7 @@ impl Ctx<'_, '_> {
     }
 
     fn inline(&mut self, t: &str, wher: &str) -> Result<String, String> {
-        let refs = Refs { world: self.s.world, parent: self.s.refs };
+        let refs = Refs { world: self.s.world, parent: self.s.refs, served: self.s.served };
         inline(t, &refs, wher, &mut self.cited)
     }
 
@@ -204,7 +247,15 @@ fn anchor(n: Id, ctx: &mut Ctx, plain: &str) -> Result<Anchor, String> {
     Ok(Anchor {
         attr: format!(" data-block=\"{}\"{say}", esc(&id)),
         button: comments::button(&id, w, n),
-        thread: comments::thread(&id, w, n, &ctx.page.doc, &ctx.page.url, ctx.discussion),
+        thread: comments::thread(
+            &id,
+            w,
+            n,
+            &ctx.page.doc,
+            &ctx.page.url,
+            ctx.discussion,
+            ctx.s.served,
+        ),
     })
 }
 
@@ -272,7 +323,7 @@ const SIGNUP_FORM: &str = r#"<form method="POST" class="signup">
 <p class="error" role="alert" hidden></p>
 <button type="submit">Send</button>
 </form>
-<div class="sent" hidden><p class="lede">Thanks, got it.</p><p class="dim"><a href="/">Back to ra-jit</a></p></div>"#;
+<div class="sent" hidden><p class="lede">Thanks, got it.</p><p class="dim"><a href="{home}">Back to ra-jit</a></p></div>"#;
 
 fn widget(tag: &str, n: Id, ctx: &mut Ctx) -> Result<String, String> {
     match tag {
@@ -295,7 +346,7 @@ fn widget(tag: &str, n: Id, ctx: &mut Ctx) -> Result<String, String> {
                 };
                 items += &format!(
                     "<li><a href=\"{}\"><span class=\"num mono\">{num}</span> {}</a> <span class=\"status status-{}\">{}</span>{desc}</li>",
-                    p.url,
+                    esc(&ctx.s.served.href(&p.url)),
                     esc(&text(e, "Title")),
                     esc(&st.to_lowercase()),
                     esc(&st)
@@ -307,7 +358,7 @@ fn widget(tag: &str, n: Id, ctx: &mut Ctx) -> Result<String, String> {
         "References" => Ok(REFERENCES.into()),
         "SignupForm" => {
             ctx.script("updates");
-            Ok(SIGNUP_FORM.into())
+            Ok(SIGNUP_FORM.replace("{home}", &esc(&ctx.s.served.href("/"))))
         }
         "BenchHistory" => {
             ctx.script("bench");
@@ -391,7 +442,7 @@ fn block(n: Id, ctx: &mut Ctx) -> Result<String, String> {
         let a = anchor(n, ctx, &alt)?;
         return Ok(format!(
             "<img src=\"{}\" width=\"{}\" height=\"{}\" alt=\"{}\"{} />{}{}",
-            esc(&src),
+            esc(&ctx.s.served.href(&src)),
             js::number(w),
             js::number(h),
             esc(&alt),
@@ -494,7 +545,7 @@ fn references_html(ctx: &Ctx) -> String {
             format!(
                 "<li id=\"ref-{}\"><a href=\"{}\">{}</a>{note}</li>",
                 esc(&e.name),
-                esc(&field(v, "href")),
+                esc(&ctx.s.served.href(&field(v, "href"))),
                 esc(&field(v, "label"))
             )
         })
@@ -504,7 +555,7 @@ fn references_html(ctx: &Ctx) -> String {
     )
 }
 
-fn topbar(page: &Page, items: &[NavItem]) -> String {
+fn topbar(page: &Page, items: &[NavItem], served: &Served) -> String {
     let links: String = items
         .iter()
         .map(|i| {
@@ -513,7 +564,7 @@ fn topbar(page: &Page, items: &[NavItem]) -> String {
             let outside = i.href.starts_with("http:") || i.href.starts_with("https:");
             format!(
                 "<a href=\"{}\"{}{}>{}</a>",
-                esc(&i.href),
+                esc(&served.href(&i.href)),
                 if here { " aria-current=\"page\"" } else { "" },
                 if outside { " class=\"out\"" } else { "" },
                 esc(&i.label)
@@ -521,7 +572,8 @@ fn topbar(page: &Page, items: &[NavItem]) -> String {
         })
         .collect();
     format!(
-        "<header class=\"topbar\"><nav><a class=\"home\" href=\"/\">ra-jit</a><span class=\"links\">{links}</span></nav></header>"
+        "<header class=\"topbar\"><nav><a class=\"home\" href=\"{}\">ra-jit</a><span class=\"links\">{links}</span></nav></header>",
+        esc(&served.href("/"))
     )
 }
 
@@ -537,7 +589,14 @@ fn trail(ctx: &Ctx) -> String {
             break;
         }
         if let Some(p) = ctx.s.page_of(id) {
-            up.insert(0, format!("<a href=\"{}\">{}</a>", p.url, esc(&text(ctx.e(id), "Title"))));
+            up.insert(
+                0,
+                format!(
+                    "<a href=\"{}\">{}</a>",
+                    esc(&ctx.s.served.href(&p.url)),
+                    esc(&text(ctx.e(id), "Title"))
+                ),
+            );
         }
         n = ctx.e(id).parent;
     }
@@ -564,7 +623,11 @@ fn meta(ctx: &Ctx) -> Result<String, String> {
         let p = target
             .and_then(|t| ctx.s.page_of(t))
             .ok_or_else(|| format!("{}: (DependsOn, {d}) is not a page", e.path))?;
-        deps.push(format!("<a href=\"{}\">{}</a>", p.url, esc(&text(ctx.e(p.node), "Title"))));
+        deps.push(format!(
+            "<a href=\"{}\">{}</a>",
+            esc(&ctx.s.served.href(&p.url)),
+            esc(&text(ctx.e(p.node), "Title"))
+        ));
     }
     if !deps.is_empty() {
         parts.push(format!("Read first: {}", deps.join(", ")));
@@ -622,8 +685,10 @@ pub fn render(
         // The page's own comments, and those whose block is gone, are children of the page entity.
         body += &format!(
             "\n<section class=\"discussion\" data-block=\"{PAGE_BLOCK}\"><h2>Discussion</h2><p class=\"dim\">Comments on the page as a whole. To comment on one paragraph, use the button beside it.</p>{}</section>{}",
-            comments::thread(PAGE_BLOCK, s.world, page.node, &page.doc, &page.url, discussion),
-            comments::sign_out_form(&page.url, discussion)
+            comments::thread(
+                PAGE_BLOCK, s.world, page.node, &page.doc, &page.url, discussion, s.served
+            ),
+            comments::sign_out_form(&page.url, discussion, s.served)
         );
         let mut blocks = vec![(PAGE_BLOCK.to_string(), title.clone())];
         for (k, v) in std::mem::take(&mut ctx.blocks) {
@@ -639,11 +704,30 @@ pub fn render(
         _ if page.url == "/" => title.clone(),
         _ => format!("{title} · ra-jit"),
     };
-    let description = text(n, "Description");
+    let description = prose(&text(n, "Description"));
+    // Where the page lives, for search engines and link previews: origin + base + path (none without an origin).
+    let canonical = if s.served.origin.is_empty() {
+        String::new()
+    } else {
+        let at = esc(&format!("{}{}", s.served.origin, s.served.href(&page.url)));
+        let og_description = if description.is_empty() {
+            String::new()
+        } else {
+            format!("\n<meta property=\"og:description\" content=\"{}\" />", esc(&description))
+        };
+        format!(
+            "<link rel=\"canonical\" href=\"{at}\" />
+<meta property=\"og:type\" content=\"website\" />
+<meta property=\"og:site_name\" content=\"ra-jit\" />
+<meta property=\"og:title\" content=\"{}\" />
+<meta property=\"og:url\" content=\"{at}\" />{og_description}",
+            esc(&title)
+        )
+    };
     let description = if description.is_empty() {
         String::new()
     } else {
-        format!("<meta name=\"description\" content=\"{}\" />", esc(&prose(&description)))
+        format!("<meta name=\"description\" content=\"{}\" />", esc(&description))
     };
     let width = if n.has_tag("Narrow") {
         " narrow"
@@ -655,7 +739,12 @@ pub fn render(
     let scripts = ctx
         .scripts
         .iter()
-        .map(|s| format!("<script type=\"module\" src=\"/js/{s}.js\"></script>"))
+        .map(|js| {
+            format!(
+                "<script type=\"module\" src=\"{}\"></script>",
+                esc(&s.served.href(&format!("/js/{js}.js")))
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     // No widget has extra <head> markup, so that line of the TS template is always empty.
@@ -670,7 +759,8 @@ pub fn render(
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
 <title>{}</title>
 {description}
-<link rel=\"stylesheet\" href=\"/site.css\" />
+{canonical}
+<link rel=\"stylesheet\" href=\"{css}\" />
 {extra_head}
 {scripts}
 </head>
@@ -686,7 +776,7 @@ pub fn render(
 </html>
 ",
         esc(&tab),
-        topbar(page, s.nav),
+        topbar(page, s.nav, s.served),
         trail(&ctx),
         if audio.is_some() {
             format!(" data-say=\"{}\"", crate::spoken::INTRO)
@@ -697,9 +787,11 @@ pub fn render(
         meta(&ctx)?,
         match &audio {
             // The player (client/listen.ts) builds its controls in here; without JS it stays empty.
-            Some(m) => format!("\n<div class=\"listen\" data-audio=\"{}\"></div>", esc(m)),
+            Some(m) =>
+                format!("\n<div class=\"listen\" data-audio=\"{}\"></div>", esc(&s.served.href(m))),
             None => String::new(),
         },
+        css = esc(&s.served.href("/site.css")),
     );
     Ok((html, out_blocks))
 }

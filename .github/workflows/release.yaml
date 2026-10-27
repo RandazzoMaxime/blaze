@@ -1,9 +1,11 @@
 name: release
 
-# A pushed tag `vX.Y.Z` builds blaze for Linux (x86_64, aarch64) and macOS (aarch64) and makes
-# a GitHub release of that name: one tarball per target, a `.sha256` per tarball, SHA256SUMS,
-# and the tag's CHANGELOG.md section as the notes. The tag must match the workspace version.
-# A manual run builds and checks the same archives without releasing anything.
+# A tag `v0.YYYYMMDD.N` (a dated version, .github/scripts/release_notes.py) builds blaze for
+# Linux (x86_64, aarch64) and macOS (aarch64) and makes a GitHub release of that name: one tarball per target, a `.sha256` per tarball, SHA256SUMS, and the
+# tag's CHANGELOG.md section as the notes. The tag must match the workspace version. A tag
+# pushed by hand starts it; the release train's tags start it by dispatch on the tag (pgo.yaml's
+# pin job, .github/scripts/train_release.py), since a tag the workflow's own token makes starts
+# no workflow. A manual run on a branch builds and checks the same archives without releasing.
 on:
   push:
     tags: ["v*"]

@@ -688,9 +688,14 @@ One key in `$CARGO_HOME/config.toml` (usually `~/.cargo/config.toml`):
     [build]
     rustc-workspace-wrapper = "<dir>/ra-jit-rustc"
 
+And `$CARGO_HOME/bin/cargo-fmt` and `cargo-clippy`, for those of the two that are blaze's own:
+links to `cargo-blaze`, with what was there kept in `$CARGO_HOME/blaze-kept`
+([Plain `cargo <command>` after `enable`](#plain-cargo-command-after-enable)).
+
 No shell profile or environment variable is touched. `enable` keeps a copy of the file as it
 was in `ra-jit-enabled.json` next to it. `disable` restores that copy byte for byte, or, if
-you edited the file in between, removes only its own line.
+you edited the file in between, removes only its own line, and puts back the files the links
+replaced.
 
 ### Wrappers you already have
 
@@ -808,7 +813,7 @@ builds "should go to us and not cargo". So every `cargo blaze <command>` (and `b
 is blaze's own: no process of cargo, rustc, rustdoc, clippy-driver or rustfmt is started for it.
 A command blaze has not written yet fails, says so and does nothing, with status 101:
 
-    error: blaze has no `cargo publish` yet (blaze has no client of a registry's web API yet); it hands nothing to cargo, so nothing was done
+    error: blaze has no `cargo publish` yet (it packages the crate first, a build blaze does not do yet); it hands nothing to cargo, so nothing was done
     note: what blaze has of each cargo command: https://github.com/indexable-inc/blaze/blob/main/docs/cargo.md#every-subcommand
 
 A command cargo does not have is refused the same way (`error: no such command`): cargo would
@@ -819,24 +824,93 @@ cargo reads them. The table is `SUBCOMMANDS` in `crates/ra-jit/src/cargo/own/mod
 | Command | blaze's | What it is, and what it waits for |
 |---|---|---|
 | `build` (`b`), `run` (`r`), `test` (`t`), `check` (`c`) | the build | [above](#commands) |
-| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix, nushell and biome print the same JSON for each form (`harness/own_commands.py`, with `locate-project`, `verify-project`, `pkgid`, `fetch` and `clean`: 120 of 120 cases over the five). A package's `hints` has cargo 1.101's `"min-opt-level"`, always `null`: blaze-manifest does not read a value of it yet. Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
+| `metadata` | yes | `crates/blaze-metadata`: the workspace read by blaze-manifest, every locked package fetched by blaze-registry, resolved by blaze-resolve; `--no-deps`, `--features`, `--all-features`, `--no-default-features`, one `--filter-platform` (its `cfg` as blaze answers `rustc --print cfg` itself), `--manifest-path`, `--offline`. Held equal to cargo's by `harness/own_metadata.py`; against the pinned nightly's cargo, ripgrep, fd, helix, nushell and biome print the same JSON for each form (`harness/own_commands.py`, with `locate-project`, `verify-project`, `pkgid`, `read-manifest`, `fetch` and `clean`: 130 of 130 cases over the five). A package's `hints` has cargo 1.101's `"min-opt-level"`, always `null`: blaze-manifest does not read a value of it yet. Several `--filter-platform`s, and a workspace whose lock file is missing or stale, fail with the reason (choosing versions is #321) |
 | `locate-project` | yes | `--workspace`, `--message-format plain\|json`, `--manifest-path` |
 | `verify-project` | yes | `{"success":"true"}`, or `{"invalid":...}` and status 1 |
 | `version`, `help` | yes | blaze's version and help |
-| `fmt` | not yet | blaze's formatter, rustfmt's rules ported onto rust-analyzer's syntax trees, is being written |
-| `clippy` | not yet | blaze's lints, run by the daemon from its analysis, are being written |
+| `fmt` | yes | `crates/blaze-fmt`: rustfmt and cargo-fmt at rust-lang/rust 12433c307 ported onto a syntax tree of blaze's own, filled by rust-analyzer's parser with rustc's spans, run in process. `cargo blaze fmt [--check] [-p NAME]... [--all] [--manifest-path PATH] [-v\|-q] [-- RUSTFMT_ARGS]` formats the targets blaze-manifest reads; `blaze fmt a.rs b.rs` formats files, with rustfmt's options. Held equal to stock rustfmt (the pinned nightly's) by `python3 harness/fmtdiff.py`: ripgrep, nushell, fd, helix and biome with their own rustfmt.toml, 6068 of 6068 files byte-equal (100%), and `--check` exit codes and diffs equal; the same with `max_width = 60`, 6068 of 6068 (100%); rustfmt's `tests/source`, 773 of 793 (97.5%; 18 more use line ranges, which it does not run). At blaze-fmt f43e4a20af on dev-aws-14. A file is refused with the reason, and left as it is, when it has nightly syntax rust-analyzer does not parse (postfix `.yield`, `.use` and `.match`, `const` block items, `use` closures, `&pin`, unsafe binders, `unsafe mod`, `mut ref`, `default` on an associated `const fn`), a parenthesized trait object with `+` (`(Foo) + 'static`), a `macro` with a parameter list, an `impl` or `mut` restriction, or a typed `try` block; a non-empty `ignore` option is an error |
+| `clippy` | yes | `crates/blaze-lints`: 24 of clippy's lints ported onto rust-analyzer's analysis, run by the daemon, written as `cargo clippy` writes them; [below](#clippy) |
 | `doc` (`d`) | not yet | HTML documentation from rust-analyzer's HIR is being written; doctests are blaze's already (`cargo blaze test --doc`) |
 | `tree` | yes | `crates/blaze-tree`, cargo 1.101's `cargo tree` ported onto blaze-resolve: every flag (`-p`, `--workspace`, `--exclude`, `-e`, `-i`, `--prune`, `--depth`, `--prefix`, `--no-dedupe`, `-d`, `-f`, `--target`, `--charset`, `--color`, the feature flags). Held equal to cargo's by `harness/own_tree.py`: 26 forms over ripgrep, fd, helix, nushell and biome, 130 of 130 byte-equal. Package patterns with globs (`-p 'serde*'`) and `-i` with no value are refused |
 | `pkgid` | yes | the package's full spec from `Cargo.lock`, with cargo's errors for none or several matches |
 | `fetch` | yes | every package `Cargo.lock` names, downloaded by blaze-registry. `--target` fetches every platform's, and with no lock file it fails (choosing versions is #321) |
 | `clean` | yes | the target and build directories, one profile's (`--release`, `--profile`), or `--doc`, with `--target-dir`, `--dry-run` and cargo's `Removed` summary. `-p` and `--workspace` (one package's files) are refused |
 | `new`, `init` | yes | `crates/blaze-new`, cargo 1.101's `ops/cargo_new.rs`: the manifest, source file, ignore file and repository, the workspace's `members`, and cargo's checks of the name. The repository is made by `git init` (or `hg`, `pijul`, `fossil`, as cargo runs them). Cargo runs rustfmt on the file it writes; blaze does not, so a `rustfmt.toml` above the package that would change the template is not applied. Held equal to cargo's by `harness/own_new.py`: 50 of 50 cases, what each prints and every file it leaves |
-| `vendor`, `remove` (`rm`) | not yet | not written yet: each needs only blaze's manifest reader, registry and resolve |
+| `remove` (`rm`) | yes | the dependencies out of the member's manifest, with `toml_edit` keeping its layout and comments, as cargo 1.99's `cargo_remove.rs` and `toml_mut` do: the features that named them, then the `[workspace.dependencies]`, `[profile.*.package]`, `[replace]` and `[patch]` entries nothing uses any more; then the lock file resolved again by blaze with every version it keeps locked as it was (blaze-metadata's `relock`), honouring `--locked`. A workspace with no lock file is refused: writing one chooses versions (#321). Held equal to cargo's by `harness/own_remove.py`, manifests and lock files byte for byte: 43 of 43 cases on ripgrep and a made-up workspace |
+| `vendor` | yes | every registry package of the lock file unpacked from its `.crate` into the vendor directory as cargo 1.99's `ops/vendor.rs` does, with `.cargo-checksum.json`, `--versioned-dirs`, `--no-delete`, `-s`/`--sync` and `--respect-source-config`, and the `[source]` configuration printed; the workspace resolved again first, as cargo does (blaze-metadata's `vendored`). A git package is refused: cargo vendors it with its manifest as `cargo package` writes it, which blaze does not write yet. A workspace with no lock file is refused: writing one chooses versions (#321). Held equal to cargo's by `harness/own_vendor.py`, every file by its sha256: 18 of 18 cases on fd, ripgrep and a made-up workspace |
 | `add`, `update`, `generate-lockfile` | not yet | they choose versions, which blaze-resolve does not do yet ([#321](https://github.com/indexable-inc/blaze/issues/321)) |
 | `bench`, `rustc`, `rustdoc`, `fix`, `install`, `package` | not yet | builds blaze does not do yet ([no-rustc.md](no-rustc.md)) |
-| `publish`, `search`, `info`, `owner`, `yank`, `login`, `logout` | not yet | blaze has no client of a registry's web API yet |
-| `uninstall`, `report`, `config`, `read-manifest` | not yet | not written yet |
+| `search`, `owner`, `yank`, `login`, `logout` | yes | blaze-registry's `api.rs`, the `crates-io` crate 0.41's client of a registry's web API over blaze's own HTTP, and cargo 1.99's `ops/registry` around it: which registry (`--registry`, `--index`, `registry.default`, `source.*.replace-with`, the `Updating` of its `config.json`), the token (`--token`, `CARGO_REGISTRY_TOKEN`, `CARGO_REGISTRIES_<NAME>_TOKEN`, `credentials.toml` and the old `credentials`, read and written as cargo writes them, mode 0600), cargo's errors of the server (`errors`, a status not 200), and `search`'s table with `--limit` and its highlighted names. Of the credential providers only `cargo:token`, cargo's default, is blaze's: any other (`cargo:wincred`, `cargo:macos-keychain`, `cargo:libsecret`, a program) is refused, since cargo would start it. Held equal to cargo's by `harness/own_registry.py` against a mock registry: 73 of 73 cases, what each prints, every request the server saw and the credentials files left |
+| `publish`, `info` | not yet | `publish` packages the crate first, which is a build of `package`; `info` is not written yet |
+| `uninstall` | yes | cargo 1.99's `cargo_uninstall.rs` and install tracker: removes the programs from the install root's `bin` (`--root`, `CARGO_INSTALL_ROOT`, `install.root`, cargo's home) and their entries in `.crates.toml` and `.crates2.json`, written byte for byte as cargo writes them; specs, `-p`, `--bin`, the package of the directory, cargo's `Summary` of several. Held equal to cargo's by `harness/own_uninstall.py`: 18 of 18 cases, what each prints and the files it leaves |
+| `read-manifest` | yes | the package's entry of `metadata --no-deps`, as cargo prints it |
+| `report` | yes | `future-incompatibilities` (`future-incompat`): the report a build left in the build directory, with `--id`, `-p` and `--color`, as cargo 1.99's `future_incompat.rs` prints it. `timings`, `sessions` and `rebuilds` are unstable in cargo: refused as cargo refuses them without `-Z build-analysis`, and with it they fail saying blaze's builds do not write the logs they read. Held equal to cargo's by `harness/own_report.py`: 23 of 23 cases |
+| `config` | yes | `config get`, by blaze-manifest's port of cargo 1.99's `cargo_config.rs`: `--format toml`, `json` and `json-value`, `--show-origin`, `--merged no`. Unstable in cargo, and refused as cargo refuses it unless `-Z unstable-options`, `unstable.unstable-options` or `CARGO_UNSTABLE_UNSTABLE_OPTIONS` allows it. Held equal to cargo's by `harness/own_config.py`, run as `cargo blaze config`: 41 of 41 cases |
 | any other | no | `error: no such command`; blaze runs no cargo plugin |
+
+### `clippy`
+
+`cargo blaze clippy` (and `blaze clippy`) lints with blaze's own lints, `crates/blaze-lints`:
+each a port of one of clippy's, with its file naming the clippy source it follows, keeping its
+messages, spans, suggestions and conditions. The daemon runs them over the crates it loads as
+`cargo blaze check` would, and the client writes them as `cargo clippy` does: rustc's
+rendering, the notes and the docs link, cargo's line ending each crate's warnings with its
+`--fix` hint, `--message-format=json`, and status 0 for warnings, 101 for an error. Levels are
+read as clippy reads them: `#[allow]`, `#[expect]`, `[lints.clippy]`, `clippy.toml`, `-- -W`,
+`-A`, `-D`, `-F clippy::name` and `-D warnings`. A lint blaze has not ported is not run.
+
+The lints, chosen as those stock clippy reported most on the bench apps (ripgrep, fd, helix,
+nushell, biome) so that they cover 90% of what it reported there:
+`bool_assert_comparison`, `byte_char_slices`, `clone_on_copy`, `collapsible_if`,
+`crate_in_macro_def`, `empty_enums`, `get_first`, `io_other_error`, `map_clone`,
+`map_unwrap_or`, `match_like_matches_macro`, `needless_bool`, `needless_borrow`,
+`needless_borrows_for_generic_args`, `needless_return`, `new_without_default`,
+`nonstandard_macro_braces`, `redundant_static_lifetimes`, `single_char_add_str`,
+`unnecessary_map_or`, `upper_case_acronyms`, `useless_borrows_in_formatting`, `useless_format`,
+`useless_vec`, and rustc's `unfulfilled_lint_expectations` for an `#[expect]` nothing met.
+
+`harness/clippydiff.py` holds them to stock clippy: it runs both with `--message-format=json`
+and compares each diagnostic by lint, file, line and column, then its rendered text, and the
+exit status. `harness/clippy-fixture` is a crate that exercises every lint. Run on dev-aws-14 on
+2026-10-27, with `cargo blaze clippy --workspace --all-targets` against the pinned nightly's
+`cargo clippy --workspace --all-targets --message-format=json`; biome with its `*_analyze`
+packages under `unsandboxed-build-scripts` (they write their lists of rules into their own
+`src`, which blaze's sandbox refuses):
+
+| App | Stock diagnostics | Of the lints ported | Matched | Missed | Extra | Rendered the same | Exit status, stock and blaze |
+|---|---|---|---|---|---|---|---|
+| ripgrep | 676 | 553 | 553 | 0 | 0 | 553 | 0 and 0 |
+| fd | 14 | 14 | 14 | 0 | 0 | 14 | 0 and 0 |
+| helix | 57 | 20 | 20 | 0 | 0 | 20 | 0 and 0 |
+| biome | 971 | 969 | 0 | 969 | 0 | 0 | 0 and 101 |
+| `harness/clippy-fixture` | 53 | 53 | 53 | 0 | 0 | 53 | 101 and 101 |
+
+On ripgrep, fd and helix, 587 of stock's 747 diagnostics (78.6%) are written the same; the 160
+missed are all of lints not ported, most of them `doc_lazy_continuation` (40),
+`explicit_auto_deref` (11) and `derivable_impls` (11).
+
+Over the five apps stock clippy wrote 1718 diagnostics (each counted once, by lint and place),
+1556 of them (90.6%) of the lints ported. Its most frequent: `empty_enums` 540,
+`nonstandard_macro_braces` 276, `bool_assert_comparison` 164,
+`needless_borrows_for_generic_args` 145, `map_unwrap_or` 141, `needless_borrow` 43,
+`redundant_static_lifetimes` 42, `useless_vec` 41, `doc_lazy_continuation` 40 (not ported: it
+needs rustdoc's Markdown reading), `unnecessary_map_or` 30. The diagnostics are the same; what
+cargo writes around them still differs in two ways: blaze writes no `Checking` line, and the
+order the crates finish in, with the `(N duplicates)` count that follows from it, is blaze's.
+
+What is not done:
+
+- biome lints nothing: `cargo blaze check` of it fails in `biome_analyze` and `biome_wasm`
+  with errors stock rustc does not give ([#423](https://github.com/indexable-inc/blaze/issues/423):
+  the trait of an impl a proc-macro derive writes is not in scope in its body), and the crates
+  that depend on one that does not check are not linted, as cargo does not build them.
+- nushell's stock run fails under `--workspace` (a compile error in `ethnum`), so it has no
+  oracle.
+- The deny-by-default (correctness) lints: none fired on the bench apps, and none is ported.
+- `--fix` is refused: blaze does not apply its suggestions yet.
+- Ported in part, each file saying what it leaves out: `needless_borrow` (a receiver, a callee
+  or a field's base, and chains of `&` and `*`), `map_clone` (`Clone::clone` as a path),
+  `needless_borrows_for_generic_args` (bounds through projections or other parameters).
 
 ### Plain `cargo <command>` after `enable`
 
@@ -845,11 +919,16 @@ test` are still cargo's process: cargo plans the build and starts the wrapper fo
 crate, and the wrapper's first build is rustc's ([What a build does](#what-a-build-does)). The
 other commands stay cargo's entirely. Here is what each way of sending them to blaze needs:
 
-- **`fmt` and `clippy`** are not built into cargo (they are rustup's `cargo-fmt` and
-  `cargo-clippy`), so an `[alias]` in the same config file can take them over: `fmt = "blaze
-  fmt"`, `clippy = "blaze clippy"`. cargo still starts, and warns that the alias shadows an
-  external command, then runs `cargo-blaze`. `enable` should write these once blaze's own `fmt`
-  and `clippy` land. Until then such an alias would make `cargo fmt` fail.
+- **`fmt` and `clippy`** are not built into cargo: it runs `cargo-fmt` and `cargo-clippy`,
+  looking in `~/.cargo/bin` before `PATH`. `enable` puts links named so there, to
+  `cargo-blaze`, for each of the two that is blaze's own (`cargo blaze --list`), so plain
+  `cargo fmt` and `cargo clippy` run blaze's, with nothing printed of it. The file a link
+  replaces, rustup's proxy, is kept in `~/.cargo/blaze-kept` and `disable` puts it back;
+  `status` says whose each command is, and notices when `rustup update` put its proxy back
+  (`enable` links it again). macOS and Linux only. An `[alias]` (`fmt = "blaze fmt"`) would
+  route them too, but cargo warns on every run that it shadows an external command and means
+  to make that an error
+  ([rust-lang/cargo#10049](https://github.com/rust-lang/cargo/issues/10049)).
 - **Built-in commands** (`build`, `test`, `check`, `doc`, `tree`, `new`, ...) cannot be aliased:
   cargo ignores an alias that shadows a built-in. Two ways remain. `build.rustc` set to blaze
   keeps cargo's process but answers every rustc that cargo starts (`-vV`, `--print`, each

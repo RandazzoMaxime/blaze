@@ -99,6 +99,8 @@
         # The one build of ra-jit, the release workflow's recipe (.github/scripts/build_release.py):
         # the `dist` profile optimized with the profile pgo/profiles.json pins for this system,
         # fetched by its sha256. The binaries run each other from next to themselves, unwrapped.
+        # `--nix`: they load nixpkgs' glibc, so the release's floor of RHEL 9's glibc is not theirs
+        # (build_release.py checks that instead; release.yaml keeps the floor).
         triple = {
           x86_64-linux = "x86_64-unknown-linux-gnu";
           aarch64-linux = "aarch64-unknown-linux-gnu";
@@ -122,7 +124,7 @@
           auditable = false;
           buildPhase = ''
             runHook preBuild
-            python3 -I .github/scripts/build_release.py --target ${triple} --profdata ${pgoProfile} --out shipped
+            python3 -I .github/scripts/build_release.py --target ${triple} --profdata ${pgoProfile} --out shipped --nix
             runHook postBuild
           '';
           installPhase = ''

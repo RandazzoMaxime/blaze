@@ -255,6 +255,9 @@ pub struct Config {
     /// The files are read at the first value asked for, and again at the next while they fail:
     /// a broken config file is an error only to what reads configuration, as in cargo.
     values: OnceCell<FxHashMap<String, ConfigValue>>,
+    /// `$CARGO_HOME/credentials.toml` over the files' values, once [`Config::load_credentials`]
+    /// read it: what is asked of the configuration is looked up there first, as in cargo.
+    credentials: OnceCell<FxHashMap<String, ConfigValue>>,
     build_config: OnceCell<CargoBuildConfig>,
     target_cfgs: OnceCell<Vec<(String, target::TargetCfgConfig)>>,
     warnings: RefCell<Vec<String>>,
@@ -276,6 +279,7 @@ impl Config {
             env,
             cli: Vec::new(),
             values: OnceCell::new(),
+            credentials: OnceCell::new(),
             build_config: OnceCell::new(),
             target_cfgs: OnceCell::new(),
             warnings: RefCell::new(Vec::new()),
@@ -556,7 +560,18 @@ impl Config {
 
     /// The merged value at `key` from files and `--config`, without the environment.
     pub fn get_cv(&self, key: &ConfigKey) -> anyhow::Result<Option<ConfigValue>> {
-        let vals = self.values()?;
+        if let Some(credentials) = self.credentials.get()
+            && let Some(found) = Self::get_cv_in(key, credentials)?
+        {
+            return Ok(Some(found));
+        }
+        Self::get_cv_in(key, self.values()?)
+    }
+
+    fn get_cv_in(
+        key: &ConfigKey,
+        vals: &FxHashMap<String, ConfigValue>,
+    ) -> anyhow::Result<Option<ConfigValue>> {
         if key.is_root() {
             return Ok(Some(CV::Table(vals.clone(), Definition::Path(PathBuf::new()))));
         }
@@ -850,6 +865,140 @@ impl Config {
         Ok(url)
     }
 
+    /// Reads `$CARGO_HOME/credentials.toml` (or the old `credentials`) once, as cargo's
+    /// `load_credentials`: a top-level `token` is the old spelling of `registry.token`, and each
+    /// of its tables goes over the files' table of the same name.
+    pub fn load_credentials(&self) -> anyhow::Result<()> {
+        if self.credentials.get().is_some() {
+            return Ok(());
+        }
+        let mut credentials = FxHashMap::default();
+        if let Some(path) = self.get_file_path(&self.home, "credentials") {
+            let mut value = self.load_file(&path, &mut FxHashSet::default(), true, false)?;
+            let CV::Table(map, def) = &mut value else { unreachable!() };
+            if let Some(token) = map.remove("token") {
+                let def = def.clone();
+                map.entry("registry".to_owned()).or_insert_with(|| {
+                    CV::Table(FxHashMap::from_iter([("token".to_owned(), token)]), def)
+                });
+            }
+            let CV::Table(map, _) = value else { unreachable!() };
+            let base = self.values()?;
+            for (key, value) in map {
+                let entry = match base.get(&key) {
+                    Some(base) => {
+                        let mut entry = base.clone();
+                        entry.merge(value, true)?;
+                        entry
+                    }
+                    None => value,
+                };
+                credentials.insert(key, entry);
+            }
+        }
+        _ = self.credentials.set(credentials);
+        Ok(())
+    }
+
+    /// Writes `token` for `registry` (crates.io when `None`) to the credentials file, or with
+    /// no token removes the registry's, as cargo's `save_credentials`: the old `credentials`
+    /// if it is there, else `credentials.toml`, mode 0600.
+    pub fn save_credentials(
+        &self,
+        token: Option<&str>,
+        registry: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let name = match self.get_file_path_quiet(&self.home, "credentials") {
+            Some(path) => path.file_name().map_or("credentials.toml".into(), PathBuf::from),
+            None => PathBuf::from("credentials.toml"),
+        };
+        std::fs::create_dir_all(&self.home)
+            .with_context(|| format!("failed to create directory `{}`", self.home.display()))?;
+        let path = self.home.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open: {}", path.display()))?;
+        file.lock().with_context(|| format!("failed to lock file: {}", path.display()))?;
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut file, &mut contents)
+            .with_context(|| format!("failed to read configuration file `{}`", path.display()))?;
+        let mut toml: toml::Table = contents.parse()?;
+        if let Some(token) = toml.remove("token") {
+            toml.insert(
+                "registry".into(),
+                toml::Table::from_iter([("token".into(), token)]).into(),
+            );
+        }
+        match token {
+            Some(token) => {
+                let def = Definition::Path(path.clone());
+                let table = CV::Table(
+                    FxHashMap::from_iter([(
+                        "token".to_owned(),
+                        CV::String(token.to_owned(), def.clone()),
+                    )]),
+                    def.clone(),
+                );
+                let (key, mut value) = match registry {
+                    Some(registry) => (
+                        "registries",
+                        CV::Table(
+                            FxHashMap::from_iter([(registry.to_owned(), table)]),
+                            def.clone(),
+                        ),
+                    ),
+                    None => ("registry", table),
+                };
+                if registry.is_some()
+                    && let Some(table) = toml.remove("registries")
+                {
+                    value.merge(CV::from_toml(def, table)?, false)?;
+                }
+                toml.insert(key.into(), value.into_toml());
+            }
+            None => {
+                let table = match registry {
+                    Some(registry) => {
+                        toml.get_mut("registries").and_then(|it| it.get_mut(registry))
+                    }
+                    None => toml.get_mut("registry"),
+                };
+                if let Some(table) = table {
+                    let what =
+                        registry.map_or("[registry]".to_owned(), |it| format!("[registries.{it}]"));
+                    let table = table
+                        .as_table_mut()
+                        .with_context(|| format!("expected `{what}` to be a table"))?;
+                    for key in ["token", "secret-key", "secret-key-subject"] {
+                        table.remove(key);
+                    }
+                }
+            }
+        }
+        let contents = toml.to_string();
+        use std::io::{Seek as _, Write as _};
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write to `{}`", path.display()))?;
+        file.set_len(contents.len() as u64)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to set permissions of `{}`", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// `registry.default`, the registry `--registry` defaults to.
+    pub fn default_registry(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.get_string("registry.default")?.map(|it| it.val))
+    }
+
     /// Fails if `registry.index` is set, as cargo does since it stopped supporting it.
     pub fn check_registry_index_not_set(&self) -> anyhow::Result<()> {
         if self.get_string("registry.index")?.is_some() {
@@ -939,6 +1088,16 @@ fn include_paths(cv: &mut ConfigValue, remove: bool) -> anyhow::Result<Vec<Inclu
 }
 
 impl Config {
+    /// [`Config::get_file_path`] without its warnings, as cargo looks again on saving.
+    fn get_file_path_quiet(&self, dir: &Path, name: &str) -> Option<PathBuf> {
+        let possible = dir.join(name);
+        if possible.exists() {
+            return Some(possible);
+        }
+        let with_extension = dir.join(format!("{name}.toml"));
+        with_extension.exists().then_some(with_extension)
+    }
+
     /// `config` if it exists, else `config.toml`: cargo prefers the old name, with a warning,
     /// unless it is the same file.
     fn get_file_path(&self, dir: &Path, name: &str) -> Option<PathBuf> {
@@ -968,6 +1127,23 @@ impl Config {
             return Some(possible);
         }
         with_extension.exists().then_some(with_extension)
+    }
+}
+
+impl ConfigValue {
+    fn into_toml(self) -> toml::Value {
+        match self {
+            CV::Boolean(it, _) => toml::Value::Boolean(it),
+            CV::String(it, _) => toml::Value::String(it),
+            CV::Integer(it, _) => toml::Value::Integer(it),
+            CV::List(it, _) => toml::Value::Array(it.into_iter().map(CV::into_toml).collect()),
+            // cargo's tables are a `HashMap`, in no order; these are in the keys' order.
+            CV::Table(it, _) => {
+                let mut entries: Vec<_> = it.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                toml::Value::Table(entries.into_iter().map(|(k, v)| (k, v.into_toml())).collect())
+            }
+        }
     }
 }
 

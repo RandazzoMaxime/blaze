@@ -29,19 +29,35 @@ need a few gigabytes there.
 
 ### The gate
 
-The gate is what CI runs: its fast tier on every pull request and push to main, all of it
-nightly ([CI](#ci)). A change is not done until all of it exits 0 under both backends.
+The gate is what a change runs before it lands: its fast tier on the lane's dev host. CI's merge
+gate is only the build and the unit tests; all of it, every part on every platform, runs in the
+release train on main after the merge ([CI](#ci)), which finds what the fast tier would have.
+A change is not done until all of it exits 0 under both backends.
 `harness/ci.py` is the one list of it: which harness runs in which part, in which tier, on
 which hosts and under which backend.
 
-    python3 ci.py --list            # every harness, its part, its quick part, its environment
-    python3 ci.py --parts           # the parts that have harnesses on this machine
-    python3 ci.py --parts fast      # the fast tier's parts here (quick-1, quick-2)
-    python3 ci.py core              # run one part here, as CI does
+    python3 ci.py --list            # every harness, its part, fast-tier seconds and hosts
+    python3 ci.py --parts           # the full tier's parts on this machine (the train's)
+    python3 ci.py --parts fast      # the fast tier's parts here (quick-1 .. quick-N)
+    python3 ci.py core-1            # run one part here, as CI does
+    python3 ci.py fast              # every fast harness of this host, one after another
+
+The fast tier is the harnesses marked fast in `HARNESSES` that `FAST` (in `ci.py`) gives to
+this host: each line there has the harness's measured seconds on CI (the slowest median of
+2026-10-25 and 26) and the hosts it runs on. A harness whose result depends on the platform
+(the loader, the linker, signing, the daemon's sockets) runs on all three; one that checks
+generated code or the build model against rustc runs on Linux x86-64 alone in the fast tier and
+everywhere in the full tier. `ci.py` packs them into parts of about 240 seconds (`PART_SECS`,
+longest first), so adding a harness adds a part rather than lengthening one; a fast harness
+with no `FAST` line is an error. Each harness runs with an `RA_JIT_HOME` of its own under
+`/tmp/rj-ci-*` (not `RA_JIT_CACHE`, which would turn the store on), and its daemon is stopped
+afterwards, so no two harnesses of a job share a daemon or a socket (on a runner `XDG_RUNTIME_DIR` would otherwise give every
+harness `/run/user/1001/ra-jit`). `live_e2e.py`, `live_types.py` and `live_fallback.py` take a
+home of their own when run by hand too.
 
 A part runs all of its harnesses even when one fails, then names the ones that failed and how
-long each took. Alongside the harnesses, CI runs `cargo fmt --all -- --check`,
-`python3 harness/imports.py`, which imports every script of the harness, and
+long each took. Alongside the harnesses, CI runs `python3 harness/imports.py`, which imports
+every script of the harness, and
 `python3 harness/unittests.py`, which runs the Rust unit tests and holds them to its `OPEN`
 list (below). It runs cargo twice: the root workspace's crates, then the rust-analyzer fork's
 (`hir-ty`, `hir-def`, `hir-ide` and the rest) in `vendor/rust-analyzer` (there, not with `--manifest-path`: cargo reads
@@ -323,67 +339,108 @@ For a CI failure, the last line of the harness step lists which scripts failed.
 
 ## CI
 
-`.github/workflows/ra-jit.yaml` runs in two tiers. It calls `ra-jit-platform.yaml` once for
-each platform, each on a machine of its own kind.
+CI is a **merge gate** that takes minutes, and a **release train** that runs everything else on
+main after the merge and releases main when it is green. Both call `ra-jit-platform.yaml` once
+for each platform, each on a machine of its own kind.
+
+| Workflow | Event | What runs | Wall time |
+|---|---|---|---|
+| `ra-jit.yaml` (`gate`) | pull request, merge queue | on Linux x86-64: the build and the unit tests; `harness/imports.py`, `harness/rustcsites.py` | about 5 min |
+| `ra-jit.yaml` (`warm`) | push to main | the build and the unit tests on Linux x86-64, AArch64 and macOS, and the rust tests checkout: they write the caches the other runs read | about 8 min |
+| `fmt.yaml` | push to main | `cargo fmt --all`, and a commit `fmt` when it changed a file | 2 min |
+| `train.yaml` | push to main, by hand | everything below, then a release or the train's issue | about 45 min |
+| `ra-jit.yaml` | docs or site only | the two scripts | 1 min |
 
 A change reaches main through the **merge queue** alone
-([contributing.md](contributing.md#landing-a-change)). The queue takes pull requests in order,
-merges each onto main and the entries ahead of it, runs the fast tier on that, and moves main to
-it once it passes; an entry that fails leaves the queue, and the ones behind it are tested again
-without it. So main is always a commit the fast tier passed on. A pull request's own run is
-`fmt` alone, which lets it join the queue within a minute: the queue tests it merged anyway, and
-testing it alone first would make every landing wait for the fast tier twice. For the fast tier
-on a branch before queueing it, `gh workflow run ra-jit.yaml --ref <branch> -f tier=fast`.
+([contributing.md](contributing.md#landing-a-change)). `ci` must pass on the pull request before
+it can join the queue; the queue merges each pull request onto main and the entries ahead of it,
+runs the gate on that, and moves main to it once it passes. The gate is the build and the unit
+tests: a change that does not build, or breaks a unit test, never reaches main, and the queue
+moves every few minutes. What the harnesses find, they find on main, in the train, which says
+which commits since the last green train it came in with. Before the gate was this small, a
+merge-queue run took 35 to 45 minutes, nearly all of it harnesses (harness/ci.py's `quick-2`
+on every platform), and 51 of 140 queue runs on 2026-10-25 and 26 failed, most of them on
+entries that later landed unchanged.
 
-The **fast tier** runs on every entry of the merge queue, every push to main and by hand, and
-takes about ten minutes. On Linux x86-64, Linux AArch64 and macOS arm64 it:
+No check refuses a pull request for its formatting: `fmt.yaml` formats main after each push and
+commits the result as `fmt`. Run `cargo fmt --all` before pushing all the same, so that the
+diff of a pull request is its change.
 
-- builds ra-jit once, with the `llvm` feature, and hands the binary to its other jobs;
-- runs `harness/unittests.py`;
-- runs the parts of `ci.py --parts fast` (`quick-1` and `quick-2`, three to six minutes each)
-  under each backend, as a job each;
-- on Linux x86-64, runs rustc's borrow-check tests with a floor under the passes, and the
-  run-pass tests of `harness/ui-pinned.txt`, against that build.
+`harness/imports.py` has every script of the harness imported, so one that only the train or a
+person runs can't break unnoticed: a script does nothing when imported (its work is under `if
+__name__ == "__main__":`). `harness/rustcsites.py` fails when ra-jit's code gains a place that
+starts rustc, rustdoc or cargo ([no-rustc.md](no-rustc.md)).
 
-`fork alone` builds and tests `vendor/rust-analyzer` outside this repository (the tests of
-`hir-ty`, `hir-ty-borrowck`, `hir-ty-wfcheck` and `ide-diagnostics`, whose diagnostics are the
-daemon's errors; ide-diagnostics adds about 15 s), and the `fmt`
-job checks formatting and has `harness/imports.py` import every script of the harness, so one
-that only a seldom tier or a person runs can't break unnoticed. It also runs
-`harness/rustcsites.py`, which fails when ra-jit's code gains a place that starts rustc, rustdoc
-or cargo ([no-rustc.md](no-rustc.md)). A script does nothing when
-imported: its work is under `if __name__ == "__main__":`.
+### The release train
 
-The **full tier** runs nightly and by hand (`gh workflow run ra-jit.yaml --ref <branch> -f
-tier=full`, or `-f tier=fast`), and takes about an hour. It adds Windows x86-64, every part
-of `ci.py --parts` (`keys.py`, `buildmodel.py`, the store and the daemon harnesses,
-`debuginfo.py`), `cargo_ra_jit.py` on its checks, on ripgrep and hyperfine and on fd (Linux
-x86-64 and macOS), and on ripgrep, fd, bat, hyperfine, just, axum and nushell with each
-project's tests (Linux AArch64), and the ripgrep bench. A failed nightly opens an issue named
-"Nightly ra-jit failed", or comments on it while it is open
-(`.github/actions/nightly-issue`).
+`train.yaml` runs on every push to main and by hand (`gh workflow run train.yaml --ref
+<branch>` runs it on a branch, without the release or the issue). One train runs at a time: a
+push while it runs waits, and a newer push replaces the one waiting, so the train always runs
+on the newest commit of main once the one before it is done. It does not cancel the running
+train: with a merge every few minutes, a train of 45 would never end.
 
-A change to nothing but documentation or the site runs `fmt` and nothing else. On a pull
-request a newer push cancels the run before it. Every push to main and every merge-queue entry
-runs to the end in a concurrency group of its own: with one group for main, a merge every few
-minutes replaced each waiting run with the next, and 7 of 10 runs on main were cancelled.
+It builds ra-jit once per platform (Linux x86-64, Linux AArch64, macOS arm64, Windows x86-64),
+with the `llvm` feature, hands the binary to its other jobs, and runs:
 
-The build and the unit tests compile through sccache, which keeps rustc's output in the
-Actions cache; rust-cache keeps the dependencies from crates.io and leaves out the crates of
-this repository and `vendor/`, which are most of the build. The harnesses run without the
-wrapper, since `cargo_ra_jit.py` tests a user's own. Main alone writes either cache (sccache is
-read-only elsewhere, `SCCACHE_GHA_RW_MODE`): what a pull request or a queue entry wrote would
-be kept for its own ref, which nothing reads again, and would push main's entries out of the
-repository's 10 GB. The harness jobs' Ubuntu packages (valgrind and gdb) come through
-`.github/actions/apt`, which keeps them in the cache per runner image: the runners' mirror
-sometimes serves a few tens of kB/s, and installing them took 8 to 12 minutes in a cluster of
-runs.
+- `harness/unittests.py` on each platform;
+- every part of `ci.py --parts` under each backend, a job each: `core-1` ... `core-N` (the
+  harnesses of `core`, packed by the seconds `CORE` in ci.py says each takes, so that no part
+  is longer than its longest harness, `wholeprogram.py` at 19 minutes on macOS), `keys-1..3`,
+  `buildmodel`, `store-kills`, `store` and `daemon`;
+- rustc's borrow-check tests with a floor under the passes (Linux x86-64), and the run-pass
+  tests of `harness/ui-pinned.txt` (Linux x86-64 and macOS), from rustc's `tests/ui` at the
+  pinned commit in the Actions cache (`.github/actions/rust-tests`, written by main's `warm`
+  runs; a miss fetches it from GitHub with retries, since the plain fetch was refused with HTTP
+  429 in 26 jobs in two days);
+- the Bun fixtures (Linux x86-64);
+- `cargo_ra_jit.py`: its checks, ripgrep and hyperfine, and fd (Linux x86-64 and macOS), and
+  ripgrep, fd, bat, hyperfine, just, axum and nushell with each project's tests (Linux AArch64);
+- `fork alone`: `vendor/rust-analyzer` built and tested outside this repository (the tests of
+  `hir-ty`, `hir-ty-borrowck`, `hir-ty-wfcheck` and `ide-diagnostics`, whose diagnostics are the
+  daemon's errors);
+- the ripgrep bench (not blocking);
+- `nix-live.yaml`: the unit graphs, the flake's builds, the demo and live edits on macOS (not
+  blocking: `soft`, until they have been green a while).
 
-`ci` is the job that says whether everything that ran passed, and it is the one check branch
-rules and the merge queue require. A job that is renamed or split does not change it. Measured
-on 2026-10-22 ([reports/CI.md](reports/CI.md)): the fast tier took 13.3 minutes at the median
-and 20.4 at p90 on main, where the longest path is the macOS build (4 minutes) and then its
-slowest harness part (6), and the p90 is the package mirror. No job waits for a runner.
+Versions are dated and chosen by nobody: `0.YYYYMMDD.N`, N counting the releases of that day
+(UTC) from 0 (0.20261026.0, then 0.20261026.1), which is semver, as cargo and crates.io need.
+`blaze --version` says the commit too, `blaze 0.20261026.0 (fb82b09)`: crates/ra-jit's build.rs
+takes it from `RA_JIT_GIT_SHA` (release.yaml and the flake set it) or the checkout's HEAD.
+
+The job `train` is the train's verdict: every job but the bench and nix. When it is green and
+main has changes since the last release, the job `release` (`.github/scripts/train_release.py
+prepare`) makes one commit on main, `release: v0.YYYYMMDD.N [skip ci]`: the workspace version
+of today's next release, a CHANGELOG.md section with what `[Unreleased]` had and the title of each change merged
+since, and Cargo.lock and `nix/units` for the new version. A release is built against PGO
+profiles of its own crates (`build_release.py --strict`), and the version is in every crate's
+hash, so the job then runs `pgo.yaml`, whose pin job tags `v0.YYYYMMDD.N` on the commit that pins the
+new profiles (`train_release.py tag`) and runs `release.yaml` on the tag. While a release waits
+for its profiles, the trains after it release nothing; if the pgo run fails, the next train's
+`release` job fails and says so. The last release is the newest tag `v*`, or before the first,
+the commit that added the workspace version's CHANGELOG.md section. The bots' own commits
+(`fmt`, `pgo: ...`, `release: ...`) are not changes to release.
+
+When the train is red, or its release failed, the job `train issue`
+(`.github/scripts/train_issue.py`) opens the issue "Release train is red", or comments on it
+while it is open: the jobs that failed, the harnesses that failed in each harness part, and the
+commits since the last green train. The next green train closes it.
+
+A check that fails now and then is **quarantined** in the fast tier, never dropped: it runs,
+its failure and output are printed with "FLAKY, not counted in the fast tier" and its issue,
+and it still counts in the full tier. The list is `FLAKY` in the harness (today one step of
+`testselect.py`, [#412](https://github.com/indexable-inc/blaze/issues/412)); a check comes off
+it when its issue is fixed. The fast tier (`ci.py --parts fast`, `ci.py fast`) is what a lane
+runs by hand on its dev host: every harness of `FAST`, in parts of about four minutes.
+
+### Concurrency, the check and the ruleset
+
+On a pull request a newer push cancels the gate's run before it. Every push to main and every
+merge-queue entry runs the gate to the end in a concurrency group of its own: with one group for
+main, a merge every few minutes replaced each waiting run with the next, and 7 of 10 runs on
+main were cancelled.
+
+`ci` is the gate's job that says whether everything that ran passed, and it is the one check
+branch rules and the merge queue require. A job that is renamed or split does not change it.
 
 The repository ruleset `main` (Settings, Rules) is active and holds the default branch to four
 rules: a change comes through the merge queue, a push needs `ci` to have passed on the commit
@@ -391,11 +448,13 @@ pushed, the branch can't be deleted, and it can't be force-pushed. The queue mer
 merge commit, builds up to five entries at once, merges up to five together, needs every entry
 green, and counts an entry failed after 60 minutes without `ci`. Repository admins bypass the
 rules (`bypass_actors`), for repairs; work lands through the queue. A ruleset can't exempt the
-token a workflow runs with, so the workflows that commit to main (`pgo.yaml`'s pin,
-`bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check out with the secret
-`RA_JIT_BOT_TOKEN`, a fine-grained token of a repository admin (Contents read and write on
-ra-jit alone) that the admin bypass lets past; without it their push is refused. `gh api repos/indexable-inc/ra-jit/rulesets/25516056` shows the rules, and Insights,
-Rule insights what they refused.
+token a workflow runs with, so the workflows that commit to main (`fmt.yaml`, the train's
+`release`, `pgo.yaml`'s pin, `bench-readme.yaml`, `bench-bun.yaml`, `live-latency.yaml`) check
+out with the secret `RA_JIT_BOT_TOKEN`, a fine-grained token of a repository admin (Contents
+read and write on this repository alone) that the admin bypass lets past; without it their push
+is refused. The release tag is made with the workflow's own token, which starts no workflow, and
+`release.yaml` is started on it by dispatch. `gh api repos/indexable-inc/blaze/rulesets/25516056`
+shows the rules, and Insights, Rule insights what they refused.
 
 What is known to be wrong is written down, says why, and does not fail the run. Once it comes
 out right, it fails the run until it is taken off the list:
@@ -406,19 +465,23 @@ out right, it fails the run until it is taken off the list:
 - `"open"` in a `buildmodel/*/case.json`: a case that comes out WRONG, on every host or by
   host (`{"linux": "why"}`).
 
-The other workflows: `bench-readme.yaml` measures real projects on each platform's dedicated
-benchmark machine and commits the tables and the README's numbers to main. It runs a platform only once the
-repository variable `BENCH_RUNNERS` names it ([benchmarks.md](benchmarks.md#the-machines)). `bench.yaml` (the store's
-microbenchmarks, two minutes) runs on pull requests and pushes too. `claims.yaml` (all of
-rustc's `tests/ui`, both backends, and the scoreboard) and `nix-live.yaml` (the flake, the demo
-and live edits, 40 minutes; also on a change to the flake, `nix/` or the dependencies) run
-nightly and open an issue when they fail, like ra-jit.yaml's full tier. `fork-sync.yaml` runs
-on pushes to main that touch `vendor/`, `fuzz.yaml` nightly, and `live-*.yaml` on their own
-branches. None of them is part of `ci`; the few `tests/ui` programs that once differed from
-rustc (`harness/ui-pinned.txt`, `uitest.py --tests`) run in ra-jit.yaml's `pinned-ui` job,
-on Linux x86-64 and macOS, which is. `site.yaml` deploys the
+### The other workflows
+
+`bench-readme.yaml` measures real projects on each platform's dedicated benchmark machine and
+commits the tables and the README's numbers to main. It runs a platform only once the
+repository variable `BENCH_RUNNERS` names it ([benchmarks.md](benchmarks.md#the-machines)).
+`bench.yaml` (the store's microbenchmarks, two minutes) runs on pull requests and pushes too.
+`claims.yaml` (all of rustc's `tests/ui`, both backends, six hours, and the scoreboard),
+`fuzz.yaml` (a long differential fuzz run), `bench-bun.yaml` and `live-latency.yaml` keep
+schedules of their own: each takes hours or a dedicated machine, and the train would wait on
+them. On a pull request that changes the flake, `nix/` or the dependencies, `nix-live.yaml`
+checks only the unit graphs. The flake's `dist` passes `--nix` to `build_release.py`, which
+then checks that every binary loads through a `/nix/store` loader instead of the glibc 2.34
+floor of a shipped release. `fork-sync.yaml` runs on pushes to main that touch `vendor/`, and
+`live-*.yaml` on their own branches. None of them is part of `ci`. `site.yaml` deploys the
 site, and `release.yaml` builds releases from tags, each target through
-`.github/scripts/build_release.py` (the `dist` profile with PGO, [reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)),
-the recipe the flake's `dist` runs too. `pgo.yaml` trains the profiles it uses, by hand and on
+`.github/scripts/build_release.py` (the `dist` profile with PGO,
+[reports/RELEASE-BUILD.md](reports/RELEASE-BUILD.md)), the recipe the flake's `dist` runs too.
+`pgo.yaml` trains the profiles it uses, for each release the train makes, by hand, and on
 pushes to main that change Cargo.lock, a manifest or the toolchain, and pins them in
 `pgo/profiles.json`.

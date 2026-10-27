@@ -55,7 +55,10 @@ Linux only, where ra-jit links proc-macro libraries so far.
 On Linux every binary in DIR, the server's included, is refused when it asks for a glibc newer
 than `GLIBC` (RHEL 9's; Debian 12 and Ubuntu 22.04 have newer): the release builds on the
 oldest hosted Ubuntu, and a binary linked on a newer system asks for that system's glibc
-(GitHub issue #351). install.sh says the same floor to a system below it.
+(GitHub issue #351). install.sh says the same floor to a system below it. With `--nix` (the
+flake's `dist`) every binary has to load nixpkgs' glibc through a loader under /nix/store
+instead, as a binary built by Nix does: it never meets the system's glibc, so the floor is not
+its own, and a binary of the build that would meet it is refused.
 """
 
 import argparse
@@ -66,6 +69,7 @@ import os
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -344,6 +348,35 @@ def check_loads(out):
           flush=True)
 
 
+def interpreter(binary):
+    """The loader a 64-bit ELF executable names (PT_INTERP), or None for one that names none."""
+    data = binary.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 2:
+        return None
+    endian = "<" if data[5] == 1 else ">"
+    (phoff,) = struct.unpack_from(endian + "Q", data, 0x20)
+    phentsize, phnum = struct.unpack_from(endian + "HH", data, 0x36)
+    for index in range(phnum):
+        header = phoff + index * phentsize
+        if struct.unpack_from(endian + "I", data, header)[0] == 3:
+            offset, size = struct.unpack_from(endian + "Q", data, header + 8)[0], struct.unpack_from(endian + "Q", data, header + 32)[0]
+            return data[offset:offset + size].rstrip(b"\0").decode()
+    return None
+
+
+def check_nix(out):
+    """Refuses the build when a binary in `out` would load the system's glibc and not nixpkgs'."""
+    system = []
+    for binary in sorted(out.iterdir()):
+        if binary.is_file() and binary.read_bytes()[:4] == b"\x7fELF":
+            loader = interpreter(binary)
+            if loader is not None and not loader.startswith("/nix/store/"):
+                system.append(f"{binary.name} loads {loader}")
+    if system:
+        sys.exit(f"error: build_release: --nix, but {'; '.join(system)}, the system's glibc: build it in the flake")
+    print(f"build_release: the binaries in {out} load nixpkgs' glibc from /nix/store (--nix: RHEL 9's glibc floor is the release's)", flush=True)
+
+
 def ship(args, binaries):
     """The binaries copied into `--out`, with blaze's proc-macro server for `--server`."""
     if not args.out:
@@ -355,7 +388,7 @@ def ship(args, binaries):
         proc_macro_server(args.out / "ra-jit", args.out)
     check_loads(args.out)
     if "linux" in args.target:
-        check_glibc(args.out)
+        check_nix(args.out) if args.nix else check_glibc(args.out)
 
 
 def main():
@@ -369,6 +402,8 @@ def main():
     parser.add_argument("--server", action="store_true", help="build blaze's proc-macro server into --out with that ra-jit")
     parser.add_argument("--strict", action="store_true", help="fail when the profile is of other crates (a release)")
     parser.add_argument("--show", action="store_true", help="print the build's environment and command")
+    parser.add_argument("--nix", action="store_true",
+                        help="the flake's build: its Linux binaries load nixpkgs' glibc, not the system's (no RHEL 9 floor)")
     args = parser.parse_args()
     if args.pin:
         return pin(args.pin)

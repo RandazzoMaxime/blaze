@@ -246,12 +246,17 @@ did about it in one line.
   generator feature, a breaker for a bug found in real code, a step in the relevant edit
   harness for a daemon bug. [harness.md](harness.md) says how to add each.
 - The gate, under Cranelift and under LLVM, on the platform you have. Say which platforms
-  you did not run. CI's fast tier covers Linux x86-64, Linux AArch64 and macOS on every
-  change; Windows and the slow harnesses run nightly ([harness.md](harness.md#ci)).
+  you did not run. CI's merge gate is the build and the unit tests on Linux x86-64; every
+  harness on every platform, Windows too, and the slow ones (`wholeprogram.py`, `keys.py`,
+  `buildmodel.py`, the store, `cargo_ra_jit.py` on real projects) run in the release train on
+  main after the merge, and a red train opens or adds to the issue "Release train is red",
+  with the commits since the last green one ([harness.md](harness.md#ci)). The gate letting a
+  change through is not the harnesses passing on it.
 - The LLVM backend builds in the flake's dev shell, against the LLVM it pins:
   `nix develop -c cargo build -p ra-jit --release --features llvm`
   ([LLVM for `--features llvm`](#llvm-for---features-llvm)).
-- `cargo fmt --all -- --check`, `cargo test --release -p ra-jit` and
+- `cargo fmt --all` (nothing checks it, and `fmt.yaml` formats main after the merge, but a
+  pull request's diff should be its change), `cargo test --release -p ra-jit` and
   `cargo test --release -p hir-ty -p hir-def -p parser -p syntax` in `vendor/rust-analyzer`
   (or `python3 harness/unittests.py`, which runs both as CI does). The fork's crates are tested
   in `vendor/rust-analyzer`'s own workspace: the root excludes it so that `cargo install --git`
@@ -286,8 +291,8 @@ metadata and main with all the others, so:
   not a backtrace into what the harness compares.
 - **Land small and often, through the merge queue** ([below](#landing-a-change)). A lane that
   waits hours for one large merge meets every other lane's changes at once. For anything the
-  fast tier does not cover, run the full tier on the branch first
-  (`gh workflow run ra-jit.yaml --ref <branch> -f tier=full`).
+  fast tier does not cover, run the release train on the branch first
+  (`gh workflow run train.yaml --ref <branch>`: everything, without the release).
 - **Clean up when done:** remove the worktree (`git worktree remove`), its target directory,
   and the lane's directories on the dev host; delete the merged branch.
 
@@ -299,9 +304,11 @@ run in the lane's worktree
 
     python3 .github/scripts/land.py "what the branch does"
 
-It pushes the branch, opens its pull request ("Merge <branch>: what the branch does") and queues
-it. The queue merges it onto main and whatever is ahead of it, runs CI's fast tier on that
-(about ten minutes, [harness.md](harness.md#ci)) and merges it with a merge commit, as
+It pushes the branch, opens its pull request ("Merge <branch>: what the branch does") and asks for
+it to be queued. The pull request's own run is the merge gate, the build and the unit tests on
+Linux x86-64 (about five minutes); a failure there ends `land.py` with the check's link before
+anything is queued. The queue then merges it onto main and whatever is ahead of it, runs the
+gate on that ([harness.md](harness.md#ci)) and merges it with a merge commit, as
 `git merge --no-ff` would. `land.py` waits for that and prints the commit, or says why the pull
 request left the queue; then fix the branch and run it again. The waiting runs in a process of
 its own that outlives `land.py`, its terminal and a tool that ends its process group, writing to

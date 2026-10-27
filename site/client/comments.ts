@@ -112,7 +112,8 @@ function start(main: HTMLElement) {
 		button.textContent = 'Posting…';
 		if (err) err.hidden = true;
 		try {
-			const res = await fetch('/api/comments', {
+			// The form's action is the API's URL under the site's base (the renderer writes it).
+			const res = await fetch(form.action, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
 				body: JSON.stringify({ doc: data.get('doc'), block: data.get('block'), body }),
@@ -142,7 +143,8 @@ function start(main: HTMLElement) {
 		del.disabled = true;
 		at.querySelector(':scope > .error')?.remove();
 		try {
-			const res = await fetch(`/api/comments/${m[1]}`, { method: 'DELETE' });
+			// The form posts to <base>/api/comments/<id>/delete; the JSON API is the same URL without /delete.
+			const res = await fetch(form.action.slice(0, -'/delete'.length), { method: 'DELETE' });
 			if (!res.ok) throw new Error(await errorOf(res));
 			await reload(thread.id);
 		} catch (e) {

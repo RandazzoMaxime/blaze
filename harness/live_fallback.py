@@ -27,7 +27,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from live_e2e import APPLY_TIMEOUT, ROOT, HERE, Running, StepError, build, serving, show_daemon_log, start
+from live_e2e import APPLY_TIMEOUT, ROOT, HERE, Running, StepError, build, serving, show_daemon_log, start, own_home
 
 # How long a program told to restart takes to hear it: ra-jit-live looks at its executable a
 # few times a second, and the daemon says so as it writes it.
@@ -73,6 +73,7 @@ async def quiet(probe: Running, step: str, since: int) -> None:
 
 
 async def main() -> None:
+    own_home()
     bin_dir = Path(os.environ["RA_JIT_BIN"]).resolve().parent
     work = Path(tempfile.mkdtemp(prefix="ra-jit-live-fallback-"))
     probe: Running | None = None
