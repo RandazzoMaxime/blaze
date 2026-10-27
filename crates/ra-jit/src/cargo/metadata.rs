@@ -118,13 +118,15 @@ fn library(
     no_deps: bool,
     env: &rustc_hash::FxHashMap<String, Option<String>>,
 ) -> anyhow::Result<Metadata> {
-    static READ: std::sync::OnceLock<std::sync::Mutex<rustc_hash::FxHashMap<LibraryAsked, Metadata>>> =
-        std::sync::OnceLock::new();
+    static READ: std::sync::OnceLock<
+        std::sync::Mutex<rustc_hash::FxHashMap<LibraryAsked, Metadata>>,
+    > = std::sync::OnceLock::new();
     let manifest: &Path = manifest.as_ref();
     let mut set: Vec<(String, Option<String>)> =
         env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     set.sort();
-    let key = (manifest.to_owned(), format!("{features:?}"), triple.map(str::to_owned), no_deps, set);
+    let key =
+        (manifest.to_owned(), format!("{features:?}"), triple.map(str::to_owned), no_deps, set);
     let read = READ.get_or_init(Default::default);
     if let Some(metadata) = read.lock().unwrap_or_else(|it| it.into_inner()).get(&key) {
         return Ok(metadata.clone());
@@ -165,7 +167,9 @@ fn library_read(
             let args = ["--print", "cfg", "--target", triple];
             let printed = super::state::rustc_says(rustc.as_os_str(), &args)
                 .filter(|it| !it.is_empty())
-                .with_context(|| format!("`{} {}` says nothing", rustc.display(), args.join(" ")))?;
+                .with_context(|| {
+                    format!("`{} {}` says nothing", rustc.display(), args.join(" "))
+                })?;
             let cfg = printed.lines().filter(|it| !it.is_empty()).map(|it| {
                 use std::str::FromStr;
                 cargo_platform::Cfg::from_str(it).with_context(|| format!("the cfg {it}"))

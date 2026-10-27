@@ -196,7 +196,8 @@ pub fn metadata_no_deps(asked: &Asked<'_>) -> Result<String> {
 /// --locked` reads one: a lock file the manifests no longer agree with is cargo's
 /// `--locked` error. The standard library's workspace in a toolchain is read so.
 pub fn metadata_locked(asked: &Asked<'_>) -> Result<String> {
-    let relock = Relock { command: "metadata", locked: Some("--locked"), respect_source_config: true };
+    let relock =
+        Relock { command: "metadata", locked: Some("--locked"), respect_source_config: true };
     let made = resolving_with(asked, None, Some(relock), |resolved, serialized, ids, _| {
         described(asked, &resolved, serialized, ids)
     })?;
