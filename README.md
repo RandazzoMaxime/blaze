@@ -70,9 +70,10 @@ it again from scratch. A program that opts in can take the new code while it kee
 ## Good to know
 
 - **macOS on Apple silicon and Linux.** On Windows every build is cargo's.
-- **One Rust, the latest nightly.** blaze builds your project with the dated nightly it pins
-  (`nightly-2026-10-25` today) whatever toolchain the project pins. A project on a stable
-  release builds as it is, and `#![feature(...)]` code builds too.
+- **blaze is its own toolchain.** It builds every project with its own Rust, `blaze-2026-10-25`
+  (today the nightly of that date), whatever the project pins; stable code and
+  `#![feature(...)]` code build. Your toolchain and CI stay the final word
+  ([why](docs/toolchain.md)).
 - **It trades memory for speed:** a few GB for a small project.
 - **It's young.** Keep `cargo check` or your CI as the final word, and
   [tell us](https://github.com/indexable-inc/blaze/issues) when something differs from cargo.
@@ -114,6 +115,12 @@ from source the first time.
 </p>
 
 <p align="center">For release news: Watch → Custom → Releases on GitHub.</p>
+
+## Using blaze at work?
+
+We're working with a few teams on fast Rust CI and remote builds, built on blaze. If your team
+waits on Rust builds, tell us what slows you down: [andrew@ix.dev](mailto:andrew@ix.dev). Teams
+we work with get early access and a direct say in what we build next.
 
 ## Contributing
 

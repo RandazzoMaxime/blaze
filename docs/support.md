@@ -212,10 +212,13 @@ exist.
 
 The daemon refuses source in which rust-analyzer finds an error (a type mismatch, an
 unresolved name, a missing field), and under `cargo blaze` cargo then runs and rustc
-reports it. An error rust-analyzer does not find is not refused, and a crate ra-jit compiles
-without rustc, as it does a whole program's, is then built and run: one that calls a macro of
-several statements in the parentheses of another macro's call, say
-([#154](https://github.com/indexable-inc/ra-jit/issues/154)).
+reports it. A function with a macro call whose expansion is not what rustc makes of it is
+refused with the reason: one that failed to expand, and a call in parentheses or brackets
+with no `;` after it whose expansion is not the one expression rustc parses it as, such as a
+call of a macro of several statements in the parentheses of another macro's call
+([#154](https://github.com/indexable-inc/blaze/issues/154)). An error
+rust-analyzer does not find is not refused, and a crate ra-jit compiles without rustc, as it
+does a whole program's, is then built and run.
 Borrow-check errors are the main case: ra-jit's borrow checker ([borrowck.md](borrowck.md)) refuses what it finds, and it
 finds nothing rustc accepts in rustc's tests or in seven real projects, but it misses about a
 third of the errors rustc gives (67% of rustc's borrow-check tests get rustc's verdict), and

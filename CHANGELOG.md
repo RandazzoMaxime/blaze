@@ -10,6 +10,10 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 
 ### Added
 
+- blaze is its own toolchain, named `blaze-<date>` (`blaze-2026-10-25`, today the Rust nightly
+  of that date): `blaze toolchain` names it and `blaze toolchain --path` prints its directory,
+  and a project that pins another toolchain is told so once, as a note, while blaze builds
+  with its own (docs/toolchain.md; #402, #403 and #404 for building, hosting and bumping it ourselves).
 - `cargo blaze doc` (and `blaze doc`) writes the HTML documentation of the packages and their
   dependencies from rust-analyzer's HIR (`crates/blaze-doc`), with no rustdoc: a page for
   every item with linked signatures, fields, variants, inherent, trait, blanket and auto
@@ -142,6 +146,15 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - `ra-jit std` ships the standard library's unit for a `dev` program too, not only a build
   script's: a whole build of a dev program from an empty store (step K, #91) fetches it where
   it compiled the library again: ripgrep from nothing 19.4 s to 9.9 s on dev-aws-8.
+- Live edits on Windows x86-64: `ra-jit-live` takes patches in a running PE program, named by
+  the GUID of its PDB, and registers their unwind tables, and the daemon lays a patch of a PE
+  executable out for it. An executable a program runs is spliced through a copy put in its
+  place, as on Unix, instead of being linked again; the daemon wakes the program through a
+  named event; and `ra_jit_live::edit` reaches the daemon, so `demo/life`'s editor builds as you
+  type. life's edit to running is 26.6 ms at p50 (`socket`) on a Windows 11 desktop
+  ([live.md](docs/live.md#latency-under-typing)). A static with another value still asks for a
+  restart.
+
 - `crates/blaze-build-script`: the environment cargo 1.99.0 gives a build script, computed
   from a plain description of the run with no cargo, ported from cargo's own rules and tests
   (no-rustc step I, #89; #298). Nothing uses it yet; blaze's own runs of scripts come next.
@@ -950,6 +963,14 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - The LLVM backend's store: a function's key has the `asm!` blocks LLVM puts in place of its
   calls of their wrappers. Two functions that each pass a `u64` through a block of their own
   were one key, and the second got the first's code.
+- A whole-program build gives the same object every time ([#200](https://github.com/indexable-inc/blaze/issues/200)).
+  Functions went into the object in the order the compile-ahead threads finished them, so
+  their names, the ids of what they call and their places in the program changed from one
+  build of the same source to the next; the layout alone moved a benchmark by 8%. The object
+  is now given roots and instances in the order they were asked for, the thread that puts
+  them in it waiting for the next in line while the others compile on, and the threads take
+  instances in that order too. `harness/wholeprogram.py` builds each case twice and holds the
+  objects to the same bytes.
 - `cargo blaze doc` documents the crates cargo does: of two of one name the one cargo keeps
   (none of a proc macro's two `syn`s), nothing only a left-out one or a test needs. It links
   a crate not documented at its `html_root_url`, finds blanket impls of every crate linked and
@@ -969,6 +990,13 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   wherever the alias uses it; a closure's annotated references and the pointer fn items
   coerce to as higher-ranked; promotion by the value, not its type, with `Freeze` seen
   through projections.
+
+- A macro call in parentheses or brackets with no `;` after it has to expand to one
+  expression, as rustc parses it ([#154](https://github.com/indexable-inc/blaze/issues/154)):
+  `twice!(twice!(n += 1;));`, whose outer call expands to two such calls with nothing between,
+  built and ran where rustc reports an error. A function with such a call whose expansion is
+  statements is now refused with the reason, as one with a call that failed to expand is.
+
 - `cargo install --git https://github.com/indexable-inc/blaze ra-jit` builds ra-jit
   ([#242](https://github.com/indexable-inc/blaze/issues/242), #293, by @gakonst). It failed
   before compiling anything: for a git source cargo checks that every package is a member of
@@ -1024,6 +1052,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
 - A patch asks rustc's executable whether it has a function of a name once per name, where
   each asking searched every symbol of it. biome's body edits after the first take 1.6–1.7 s,
   where they took 2.2–2.8 s (cargo 2.3 s).
+- On Windows x86-64 (MSVC), `cargo blaze build` and `run` rebuild through the daemon and print
+  `[ra-jit]` instead of handing every build to cargo. The daemon takes COFF programs (also with
+  `--target x86_64-pc-windows-msvc`), links them with the `rust-lld` the repository's cargo
+  configuration names, and closes an existing directory of its own that others can enter, as
+  on Unix. Live edits of a running program are still macOS and Linux only.
 - A profile with `debug = "line-tables-only"` (or `1`, or `"limited"`) no longer has the type
   of every variable worked out. Only the lines were written, but the types were described for
   each function compiled and then thrown away. On Biome (`biome_cli`, 518 crates, whose dev

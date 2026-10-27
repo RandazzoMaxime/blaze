@@ -18,7 +18,8 @@ outside the rule of [no-rustc.md](no-rustc.md#what-counts-as-running-rustc).
 
 ## Which Rust a project gets
 
-blaze compiles one toolchain of Rust, the dated nightly in `harness/toolchain`
+blaze is its own toolchain, `blaze-2026-10-25` ([toolchain.md](toolchain.md)). It compiles one
+toolchain of Rust, the dated nightly in `harness/toolchain`
 (`nightly-2026-10-25`, `rustc 1.101.0-nightly (12433c307 2026-10-24)`): its standard library,
 its layouts and its answers to rustc's questions. It follows the latest nightly, moved by
 `harness/toolchain_bump.py`. Which toolchain the project names (`rust-toolchain.toml`,

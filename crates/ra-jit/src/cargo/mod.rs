@@ -73,7 +73,11 @@ pub(crate) fn command(args: impl Iterator<Item = String>) -> anyhow::Result<()> 
         Asked::Stop => stop()?,
         Asked::Enable => switch::enable()?,
         Asked::Disable => switch::disable()?,
-        Asked::Toolchain => match toolchain::settle() {
+        Asked::Toolchain { path } => match toolchain::settle() {
+            Ok(chosen) if path => {
+                println!("{}", chosen.dir().display());
+                0
+            }
             Ok(chosen) => {
                 println!("blaze builds with {chosen}");
                 0
@@ -106,7 +110,8 @@ usage: blaze <command> [cargo's flags]    (or cargo blaze <command>)
   status             whether blaze is enabled, what the daemon has loaded, what fell back
   stop               ends the daemon; the next build starts one
   enable, disable    plain `cargo build|run|test|check` through blaze, and back
-  toolchain          which Rust blaze builds with, downloaded once if it has none
+  toolchain          blaze's own toolchain, which it builds every project with, downloaded once
+                     if it has none (`--path`: its directory)
   cache              what the `#[ra_jit::cache]` functions kept, by function
   cache clear        forgets it; `--stale`, all but what each function's code computed
 

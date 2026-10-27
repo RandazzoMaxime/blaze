@@ -954,29 +954,18 @@ impl CodegenUnit {
                 // The other threads go on to what the roots call while these are put in the
                 // object.
                 cg.compile_ahead(ours, &mut |cg, mut ahead| {
-                    // A root still being compiled waits for those compiled after it.
-                    let mut held = std::collections::VecDeque::new();
+                    // The roots go in the object in the order they were found, whichever
+                    // the threads are through with first: a root still being compiled is
+                    // waited for, so that every build lays the program out the same (#200).
                     loop {
-                        let root = match (queue.get(next), &ahead) {
-                            (Some(&root), Some(ahead))
-                                if !denied.contains(&root)
-                                    && !left.contains(&root)
-                                    && !ahead.root_ready(root) =>
-                            {
-                                next += 1;
-                                held.push_back(root);
-                                continue;
-                            }
-                            (Some(&root), _) => {
-                                next += 1;
-                                root
-                            }
-                            (None, _) if held.is_empty() => break,
-                            (None, ahead) => {
-                                let at = ahead.as_ref().map_or(0, |it| it.ready_root(&held));
-                                held.remove(at).expect("one of those held")
-                            }
-                        };
+                        let Some(&root) = queue.get(next) else { break };
+                        next += 1;
+                        if let Some(ahead) = &ahead
+                            && !denied.contains(&root)
+                            && !left.contains(&root)
+                        {
+                            ahead.wait_root(root);
+                        }
                         let result = if denied.contains(&root) {
                             Err(CodegenError::Unsupported("left to rustc on request".to_owned()))
                         } else if left.contains(&root) {
@@ -3834,11 +3823,11 @@ struct Ahead {
     /// Every function that has been one of `roots`, and those a thread is through with.
     rooted: FxHashSet<FunctionId>,
     rooted_done: FxHashSet<FunctionId>,
-    queue: Vec<(Instance, StoredParamEnvAndCrate)>,
+    /// Instances to compile, in the order they were asked for, which is the order the object
+    /// is given them: the threads then finish first what it wants first.
+    queue: std::collections::VecDeque<(Instance, StoredParamEnvAndCrate)>,
     seen: FxHashSet<(Instance, StoredParamEnvAndCrate)>,
     done: FxHashSet<(Instance, StoredParamEnvAndCrate)>,
-    /// Those of `done` that [`Ready::take`] has not seen yet.
-    fresh: Vec<(Instance, StoredParamEnvAndCrate)>,
     working: usize,
     /// A thread was stopped in the middle of an instance, as a write to the database
     /// does: the others are not to wait for what it would have found.
@@ -3851,8 +3840,24 @@ struct Ahead {
     alive: usize,
 }
 
+impl Ahead {
+    /// Whether the threads are through with everything they will compile: what they have
+    /// not compiled by now, the one that puts functions in the object compiles itself.
+    fn ended(&self) -> bool {
+        self.stopped
+            || self.alive == 0
+            || (self.roots.is_empty() && self.queue.is_empty() && self.working == 0)
+    }
+}
+
 /// What the threads that compile ahead are through with, for the one that puts the
 /// instances in the object: it would wait for one of them on each it asked for too early.
+///
+/// The object is given functions in the order they were asked for, never in the order the
+/// threads happen to finish them: a function's name, the ids of what it calls and its place
+/// in the object all follow that order, so the same source gives the same program every
+/// build (#200). The one that puts them in the object waits for the next in line while the
+/// threads go on with the rest.
 struct Ready<'a> {
     ahead: &'a std::sync::Mutex<Ahead>,
     /// What the threads that compile ahead wait on for work, and the one that puts the
@@ -3860,49 +3865,39 @@ struct Ready<'a> {
     /// woken whenever one is through with a function has them take turns at the lock.
     work: &'a std::sync::Condvar,
     progress: &'a std::sync::Condvar,
-    /// The instances to put in the object that a thread is still to compile.
-    waiting: FxHashMap<(Instance, StoredParamEnvAndCrate), Vec<FuncId>>,
+    /// The instances to put in the object, in the order they were asked for.
+    waiting: std::collections::VecDeque<((Instance, StoredParamEnvAndCrate), FuncId)>,
 }
 
 impl Ready<'_> {
-    /// Takes from `pending` and from what waited the instances no thread is still to
-    /// compile, waiting until there is one. Nothing is left when it gives none.
+    /// Takes from `pending` and from what waited the instances next in line that no thread
+    /// is still to compile, waiting until there is one. Nothing is left when it gives none.
     fn take(
         &mut self,
         pending: &mut Vec<(Instance, StoredParamEnvAndCrate, FuncId)>,
     ) -> Vec<(Instance, StoredParamEnvAndCrate, FuncId)> {
-        let mut ready = Vec::new();
         let mut state = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
         let mut queued = false;
         for (instance, env, id) in pending.drain(..) {
             let it = (instance, env);
-            if state.done.contains(&it) || (state.alive == 0 && !state.seen.contains(&it)) {
-                ready.push((it.0, it.1, id));
-            } else {
-                // One the threads did not come to, as one only data asks for.
-                if state.seen.insert(it.clone()) {
-                    state.queue.push(it.clone());
-                    queued = true;
-                }
-                self.waiting.entry(it).or_default().push(id);
+            // One the threads did not come to, as one only data asks for.
+            if !state.done.contains(&it) && state.alive > 0 && state.seen.insert(it.clone()) {
+                state.queue.push_back(it.clone());
+                queued = true;
             }
+            self.waiting.push_back((it, id));
         }
         if queued {
             self.work.notify_all();
         }
         loop {
-            let ended = state.stopped
-                || state.alive == 0
-                || (state.roots.is_empty() && state.queue.is_empty() && state.working == 0);
-            let done: Vec<_> = if ended {
-                state.fresh.clear();
-                self.waiting.drain().collect()
-            } else {
-                let fresh = std::mem::take(&mut state.fresh);
-                fresh.into_iter().filter_map(|it| self.waiting.remove_entry(&it)).collect()
-            };
-            for ((instance, env), ids) in done {
-                ready.extend(ids.into_iter().map(|id| (instance.clone(), env.clone(), id)));
+            let ended = state.ended();
+            let mut ready = Vec::new();
+            while let Some((it, _)) = self.waiting.front()
+                && (ended || state.done.contains(it))
+            {
+                let ((instance, env), id) = self.waiting.pop_front().expect("the front");
+                ready.push((instance, env, id));
             }
             if !ready.is_empty() || self.waiting.is_empty() {
                 return ready;
@@ -3911,26 +3906,12 @@ impl Ready<'_> {
         }
     }
 
-    /// Which of `held` no thread is still to compile, waiting until one is. The first when
-    /// the threads are through with everything.
-    fn ready_root(&self, held: &std::collections::VecDeque<FunctionId>) -> usize {
+    /// Waits until no thread is still to compile `root`, or none is going to.
+    fn wait_root(&self, root: FunctionId) {
         let mut state = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
-        loop {
-            let found = held.iter().position(|it| Self::through(&state, *it));
-            let ended = state.stopped
-                || state.alive == 0
-                || (state.roots.is_empty() && state.queue.is_empty() && state.working == 0);
-            match found {
-                Some(at) => return at,
-                None if ended => return 0,
-                None => state = self.progress.wait(state).unwrap_or_else(|e| e.into_inner()),
-            }
+        while !Self::through(&state, root) && !state.ended() {
+            state = self.progress.wait(state).unwrap_or_else(|e| e.into_inner());
         }
-    }
-
-    /// Whether no thread is still to compile `root`.
-    fn root_ready(&self, root: FunctionId) -> bool {
-        Self::through(&self.ahead.lock().unwrap_or_else(|e| e.into_inner()), root)
     }
 
     fn through(state: &Ahead, root: FunctionId) -> bool {
@@ -5619,7 +5600,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             }
         }
         let mut seen = std::mem::take(&mut self.ahead);
-        let queue: Vec<_> = self
+        let queue: std::collections::VecDeque<_> = self
             .pending
             .iter()
             .map(|(instance, env, _)| (instance.clone(), env.clone()))
@@ -5632,7 +5613,6 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             queue,
             seen,
             done: FxHashSet::default(),
-            fresh: Vec::new(),
             working: 0,
             stopped: false,
             open: true,
@@ -5680,7 +5660,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                 }
                 let job = match state.roots.pop_front() {
                     Some(root) => either::Either::Left(root),
-                    None => match state.queue.pop() {
+                    None => match state.queue.pop_front() {
                         Some(it) => either::Either::Right(it),
                         None if state.working == 0 && !state.open => {
                             work_to_do.notify_all();
@@ -5775,13 +5755,12 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
                     state.rooted_done.insert(root);
                 }
                 if let either::Either::Right(it) = job {
-                    state.done.insert(it.clone());
-                    state.fresh.push(it);
+                    state.done.insert(it);
                 }
                 let mut added = 0;
                 for it in found {
                     if state.seen.insert(it.clone()) {
-                        state.queue.push(it);
+                        state.queue.push_back(it);
                         added += 1;
                     }
                 }
@@ -5813,7 +5792,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
             let _leaving = Leaving(&ahead, progress);
             run(db, symbols);
         };
-        let waiting = FxHashMap::default();
+        let waiting = std::collections::VecDeque::new();
         let mut ready = Ready { ahead: &ahead, work: work_to_do, progress, waiting };
         self.symbols.in_parallel_beside(threads, &work, &mut || {
             beside(self, Some(&mut ready));
