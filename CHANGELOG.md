@@ -8,6 +8,14 @@ All notable changes to ra-jit are written here. The format follows
 
 ### Added
 
+- `cargo blaze clippy` (and `blaze clippy`) lints with blaze's own lints, `crates/blaze-lints`:
+  24 of clippy's ported onto rust-analyzer's analysis and run by the daemon, with no cargo,
+  rustc or clippy-driver started. They are written as `cargo clippy` writes them (rustc's
+  rendering, cargo's summary line and `--fix` hint, `--message-format=json`, status 101 for an
+  error), at the levels `#[allow]`, `#[expect]`, `[lints.clippy]`, `clippy.toml` and `-- -D`
+  give. On ripgrep and fd every diagnostic stock clippy writes of those lints, 567, is written
+  the same, held so by `harness/clippydiff.py`; helix and biome lint nothing yet, as
+  `cargo blaze check` of them fails. docs/cargo.md has the numbers.
 - `cargo blaze fmt` (and `blaze fmt`) is blaze's own: blaze-fmt run in process, with
   cargo-fmt's options over the workspace's targets, or rustfmt's over the `.rs` files named
   (`blaze fmt src/main.rs`). No rustfmt or cargo-fmt is started.
