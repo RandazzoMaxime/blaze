@@ -16786,6 +16786,93 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builder.ins().store(MEM, sum, dst, lane);
                 }
             }
+            // `minps` and `maxps`: the second operand when either is a NaN, or both are equal.
+            (
+                "x86.sse.min.ps" | "x86.sse.max.ps" | "x86.avx.min.ps.256" | "x86.avx.max.ps.256"
+                | "x86.sse2.min.pd" | "x86.sse2.max.pd" | "x86.avx.min.pd.256"
+                | "x86.avx.max.pd.256",
+                [a, b],
+            ) => {
+                let (a, ty) = self.operand(a)?;
+                let (b, _) = self.operand(b)?;
+                let (lane, step) = if name.ends_with("pd") || name.contains(".pd.") {
+                    (types::F64, 8)
+                } else {
+                    (types::F32, 4)
+                };
+                let cond =
+                    if name.contains(".min.") { FloatCC::LessThan } else { FloatCC::GreaterThan };
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(step) {
+                    let l = self.builder.ins().load(lane, MEM, a, at);
+                    let r = self.builder.ins().load(lane, MEM, b, at);
+                    let first = self.builder.ins().fcmp(cond, l, r);
+                    let chosen = self.builder.ins().select(first, l, r);
+                    self.builder.ins().store(MEM, chosen, dst, at);
+                }
+            }
+            // `roundps` and `roundpd`: the mode is the low two bits of the immediate, or the
+            // processor's, which is to nearest (`4` and above).
+            (
+                "x86.sse41.round.ps"
+                | "x86.avx.round.ps.256"
+                | "x86.sse41.round.pd"
+                | "x86.avx.round.pd.256",
+                [a, mode],
+            ) => {
+                let (a, ty) = self.operand(a)?;
+                let Some(mode) = self.immediate(mode)? else {
+                    unsupported!("LLVM intrinsic `{name}` with a mode that is not a constant");
+                };
+                let (lane, step) = if name.ends_with("pd") || name.contains(".pd.") {
+                    (types::F64, 8)
+                } else {
+                    (types::F32, 4)
+                };
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(step) {
+                    let value = self.builder.ins().load(lane, MEM, a, at);
+                    let rounded = match if mode & 4 != 0 { 0 } else { mode & 3 } {
+                        0 => self.builder.ins().nearest(value),
+                        1 => self.builder.ins().floor(value),
+                        2 => self.builder.ins().ceil(value),
+                        _ => self.builder.ins().trunc(value),
+                    };
+                    self.builder.ins().store(MEM, rounded, dst, at);
+                }
+            }
+            // `cvttps2dq`: truncation, and the "integer indefinite" for what does not fit,
+            // which saturation gives for the negative side only.
+            ("x86.sse2.cvttps2dq" | "x86.avx.cvtt.ps2dq.256", [a]) => {
+                let (a, ty) = self.operand(a)?;
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(4) {
+                    let value = self.builder.ins().load(types::F32, MEM, a, at);
+                    let truncated = self.builder.ins().fcvt_to_sint_sat(types::I32, value);
+                    let limit = self.builder.ins().f32const(2147483648.0);
+                    let over = self.builder.ins().fcmp(
+                        FloatCC::UnorderedOrGreaterThanOrEqual,
+                        value,
+                        limit,
+                    );
+                    let indefinite = self.builder.ins().iconst(types::I32, i64::from(i32::MIN));
+                    let result = self.builder.ins().select(over, indefinite, truncated);
+                    self.builder.ins().store(MEM, result, dst, at);
+                }
+            }
+            // `psrlw` by one count for all the lanes: the low 64 bits of the second operand,
+            // and zero when it is above 15.
+            ("x86.sse2.psrl.w" | "x86.avx2.psrl.w", [a, count]) => {
+                let (a, ty) = self.operand(a)?;
+                let (count, _) = self.operand(count)?;
+                let count = self.builder.ins().load(types::I64, MEM, count, 0);
+                let over = self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, count, 15);
+                let count = self.builder.ins().ireduce(types::I16, count);
+                let zero = self.builder.ins().iconst(types::I16, 0);
+                for at in (0..self.layout(ty)?.size.bytes() as i32).step_by(2) {
+                    let word = self.builder.ins().load(types::I16, MEM, a, at);
+                    let shifted = self.builder.ins().ushr(word, count);
+                    let result = self.builder.ins().select(over, zero, shifted);
+                    self.builder.ins().store(MEM, result, dst, at);
+                }
+            }
             // Lane by lane: the rounded average, the high half of the product and the shifts
             // by a count per lane (the toolchain's `core::arch` calls LLVM for these since
             // nightly-2026-10-25, where 1.99.0's wrote them with `simd_*`).
