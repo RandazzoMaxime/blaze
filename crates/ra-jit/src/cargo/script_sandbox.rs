@@ -266,6 +266,17 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         };
         let version = script.var("CARGO_PKG_VERSION").unwrap_or("0.0.0");
         let closure = hermetic::closure_for(package, version, &overrides)?;
+        // Cargo names the toolchain's rustc as it found it, often by name on `PATH`, which the
+        // run's `PATH` is not: it is named where it is.
+        let mut env = env;
+        let var = |name: &str| env.iter().find(|it| it.0 == name).map(|it| OsString::from(&it.1));
+        let rustc = var(crate::as_rustc::TOOLCHAIN)
+            .and_then(|it| crate::answers::toolchain_rustc(&it, &var))
+            .and_then(|it| it.into_os_string().into_string().ok());
+        if let Some(rustc) = rustc {
+            env.retain(|it| it.0 != crate::as_rustc::TOOLCHAIN);
+            env.push((crate::as_rustc::TOOLCHAIN.to_owned(), rustc));
+        }
         let env = hermetic::env_in(&env, &also, &closure);
         let deps = hermetic::dep_out_dirs(&env);
         let mut read = deps.clone();
