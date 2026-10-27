@@ -10,6 +10,10 @@
 )]
 #![cfg_attr(all(feature = "nightly", target_arch = "aarch64"), feature(stdarch_aarch64_sve))]
 #![cfg_attr(feature = "nightly", allow(incomplete_features, internal_features))]
+#![cfg_attr(
+    all(feature = "nightly", target_arch = "x86_64"),
+    feature(stdarch_x86_avx512vp2intersect)
+)]
 // The `core::arch::aarch64` functions `neon_intrinsics` calls that are not stable yet.
 #![cfg_attr(
     all(feature = "nightly", target_arch = "aarch64"),
@@ -25,6 +29,9 @@
 )]
 
 pub mod stabilized;
+
+#[cfg(all(feature = "nightly", target_arch = "x86_64"))]
+pub mod avx512;
 
 pub mod scalars {
     pub fn wide_mul(a: u128, b: u128, c: i128) -> (u128, bool, Option<i128>, Option<u128>) {
