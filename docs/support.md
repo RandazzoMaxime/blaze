@@ -105,8 +105,8 @@ harness below.
 
 ## Backends
 
-Cranelift is the default and needs nothing installed. LLVM needs LLVM 20 and a ra-jit built
-with `--features llvm`, and is selected with `RA_JIT_BACKEND=llvm`. Everything that was
+Cranelift is the default and needs nothing installed. LLVM is in every released binary (LLVM 23,
+linked statically); a ra-jit built from source needs `--features llvm`. It is selected with `RA_JIT_BACKEND=llvm`. Everything that was
 measured under LLVM used `RA_JIT_OPT=2 RA_JIT_EMIT=fast`. Other levels are accepted and are
 not covered by the gate.
 

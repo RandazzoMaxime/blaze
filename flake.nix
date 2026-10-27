@@ -108,13 +108,14 @@
         pgoProfile =
           let pin = pgo.targets.${triple} or (throw "pgo/profiles.json has no profile for ${triple}: run the pgo workflow");
           in pkgs.fetchurl { url = "${pgo.release}/${pin.name}"; inherit (pin) sha256; };
-        dist = rustPlatform.buildRustPackage {
+        dist = rustPlatform.buildRustPackage (llvmEnv // {
           pname = "ra-jit-dist";
           inherit version src;
           # `ra-jit --version` names the commit (a dirty tree has none of its own).
           RA_JIT_GIT_SHA = self.shortRev or self.dirtyShortRev or "";
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = [ pkgs.python3 ];
+          # otool: build_release.py checks that no binary loads libLLVM.
+          nativeBuildInputs = [ pkgs.python3 ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.cctools ];
           doCheck = false;
           # cargo-auditable wraps rustc for the workspace's crates, which changes their symbols:
           # the profile would find none of them.
@@ -130,7 +131,7 @@
             cp shipped/* $out/bin/
             runHook postInstall
           '';
-        };
+        });
         # What `nix profile install` puts on PATH: the same binaries, with the toolchain.
         daemon = pkgs.runCommand "ra-jit-${version}" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
