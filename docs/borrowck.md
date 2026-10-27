@@ -290,7 +290,12 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   it hides where the body returns it, as rustc proves them there: `impl Iterator<Item =
   Box<dyn Foo>>` hiding `Iter<'a, T>` needs the where clauses of that `Iterator` impl with
   `'a` `'static`. A closure or coroutine outlives as its captures do, and
-  an `impl Trait` with no outlives bound as its arguments.
+  an `impl Trait` with no outlives bound as its arguments. An `impl Trait` a trait's method
+  returns, an `async fn`'s future included, is an associated type of the trait whose bounds
+  must be well-formed given only what the method's parameters imply (rustc's
+  `check_associated_type_bounds` of the RPITIT): `async fn foo(&self) -> &(T, U)` in
+  `trait MyTrait<T, U>` needs `T` and `U` to outlive the lifetime of `&self` (E0311), and
+  `async fn foo() -> &'static impl T` needs `Self: 'static` (E0310).
 - Function items and locals, as rustc's type check: a function item used as a value, not
   only called (`let f: fn(&'a str) -> _ = extend;`, or passed to a call), needs its where
   clauses and its type arguments well-formed; a variable's or temporary's type is `Sized`,
