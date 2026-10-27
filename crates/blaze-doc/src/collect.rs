@@ -42,8 +42,8 @@ pub(crate) fn build(db: &RootDatabase, places: &Places) -> Model {
                     std: &std,
                     by_trait_arg: &by_trait_arg,
                     krate,
-                    allowed: places::upstream(db, places.crates[krate].krate),
-                    linked: places::linked(db, places.crates[krate].krate),
+                    allowed: places.upstream(db, places.crates[krate].krate),
+                    linked: places.linked(db, places.crates[krate].krate),
                     warnings: RefCell::default(),
                 };
                 builder.build()
@@ -187,7 +187,7 @@ impl StdItems {
             }
             let mut upstream = FxHashSet::default();
             for documented in &places.crates {
-                upstream.extend(places::upstream(db, documented.krate));
+                upstream.extend(places.upstream(db, documented.krate));
             }
             // Not the crates the sysroot's own depend on (its tests' `rand`).
             let crates = Crate::all(db).into_iter().filter(|it| match it.origin(db) {
@@ -1290,7 +1290,7 @@ impl Builder<'_> {
             if !self.impl_shown_blanket(imp) {
                 continue;
             }
-            if !blanket_applies(db, imp, &ty) {
+            if !blanket_applies(db, imp, &ty, self.documented().krate) {
                 continue;
             }
             out.push(self.impl_doc(imp, Members::WithProvided));
@@ -1312,7 +1312,7 @@ impl Builder<'_> {
     fn trait_impls(&self, trait_: hir::Trait) -> Impls {
         let db = self.db;
         let mut out = Impls::default();
-        let mut allowed = places::upstream(
+        let mut allowed = self.places.upstream(
             db,
             places::krate_of(db, ModuleDef::Trait(trait_)).unwrap_or(self.documented().krate),
         );
@@ -1592,9 +1592,10 @@ fn small_url_encode(text: &str) -> String {
 }
 
 /// Whether a blanket impl applies to `ty`, as rustdoc decides: with the impl's parameters and
-/// the type's as inference variables, each of the impl's where-clauses may hold.
-fn blanket_applies(db: &RootDatabase, imp: Impl, ty: &hir::Type<'_>) -> bool {
-    imp.self_ty(db).as_type_param(db).is_some() && ty.may_have_impl(db, imp)
+/// the type's as inference variables, each of the impl's where-clauses may hold, solved in
+/// `krate`, the crate documented, which may see impls a re-exported type's crate does not.
+fn blanket_applies(db: &RootDatabase, imp: Impl, ty: &hir::Type<'_>, krate: Crate) -> bool {
+    imp.self_ty(db).as_type_param(db).is_some() && ty.may_have_impl(db, imp, krate)
 }
 
 /// The patterns of a `macro_rules!`'s rules, each as written on one line.

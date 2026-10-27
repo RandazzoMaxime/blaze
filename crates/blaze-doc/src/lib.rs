@@ -27,6 +27,11 @@ use rustc_hash::FxHashSet;
 
 pub use crate::places::Documented;
 
+/// Each crate's dependencies only its tests use (a workspace member's dev-dependencies), which
+/// rust-analyzer's crate graph gives the crate itself and `cargo doc` neither documents nor
+/// links: `(crate, dependency)`.
+pub type TestOnly = FxHashSet<(Crate, Crate)>;
+
 /// A crate the user asked to document.
 #[derive(Debug, Clone, Copy)]
 pub struct Asked {
@@ -36,9 +41,14 @@ pub struct Asked {
 }
 
 /// The crates `cargo doc` documents for `asked`: those, and unless `no_deps` every library
-/// they depend on, directly or not, but none of the sysroot's. Two crates of one name keep the
-/// one asked for, else as `one_per_name` says.
-pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> Vec<Documented> {
+/// they depend on, directly or not, but none of the sysroot's and none only tests use. Two
+/// crates of one name keep the one asked for, else as `one_per_name` says.
+pub fn crates_to_document(
+    db: &RootDatabase,
+    asked: &[Asked],
+    no_deps: bool,
+    test_only: &TestOnly,
+) -> Vec<Documented> {
     let mut out: Vec<Documented> = vec![];
     let mut names = FxHashSet::default();
     let mut seen = FxHashSet::default();
@@ -61,7 +71,11 @@ pub fn crates_to_document(db: &RootDatabase, asked: &[Asked], no_deps: bool) -> 
         for dep in krate.dependencies(db) {
             let dep = dep.krate;
             let host = host || is_proc_macro(db, dep);
-            if seen.contains(&dep) || is_sysroot(db, dep) || !walked.insert((dep, host)) {
+            if seen.contains(&dep)
+                || is_sysroot(db, dep)
+                || test_only.contains(&(krate, dep))
+                || !walked.insert((dep, host))
+            {
                 continue;
             }
             match reached.iter_mut().find(|(it, _)| *it == dep) {
@@ -159,7 +173,7 @@ pub fn set_cfg_doc(db: &mut RootDatabase, crates: &[Documented]) {
 }
 
 /// The documentation of `crates`, ready to write.
-pub fn model(db: &RootDatabase, crates: Vec<Documented>) -> model::Model {
-    let places = places::place(db, crates);
+pub fn model(db: &RootDatabase, crates: Vec<Documented>, test_only: TestOnly) -> model::Model {
+    let places = places::place(db, crates, test_only);
     collect::build(db, &places)
 }

@@ -12,7 +12,7 @@ use crate::{
 
 const FIXTURE: &str = r#"
 //- proc_macros: identity, derive_identity, mirror
-//- minicore: sized, copy, clone, derive, option, iterator, send, sync, unpin, non_null, cell, phantom_data, deref, deref_mut, slice, from
+//- minicore: sized, copy, clone, derive, option, ord, iterator, send, sync, unpin, non_null, cell, phantom_data, deref, deref_mut, slice, from
 //- /lib.rs crate:fixture@0.3.1,https://example.com/fixture.git deps:dep
 //! The fixture crate. See [`Thing`], [`shapes::Square`] and [`missing_item`].
 //!
@@ -183,6 +183,14 @@ pub trait Each {
         Self: Sized,
     {
     }
+    /// A bound of a trait the solver looks up impls of, after one that holds, as
+    /// `Iterator::max` has it.
+    fn least(self)
+    where
+        Self: Sized,
+        Self::Item: Ord,
+    {
+    }
     /// A higher-ranked bound, which every item meets.
     fn borrowed(&self)
     where
@@ -198,6 +206,11 @@ impl Each for Squares {
 /// Yields squares too, over a parameter with a bound of the impl's own.
 pub struct Finds<A>(A);
 impl<A: Clone> Each for Finds<A> {
+    type Item = shapes::Square;
+}
+/// Yields squares from what it borrows, an impl of lifetimes alone.
+pub struct Borrows<'a>(&'a u8);
+impl<'a> Each for Borrows<'a> {
     type Item = shapes::Square;
 }
 /// Yields helpers, not `Copy` either, though their crate could make them so.
@@ -243,19 +256,24 @@ pub use deep::Deep;
 "#;
 
 fn load() -> (RootDatabase, Model) {
-    load_with(false)
+    load_with(false, false)
 }
 
-fn load_with(no_deps: bool) -> (RootDatabase, Model) {
+/// The fixture documented; `dep_for_tests` makes `dep` a dependency of its tests alone.
+fn load_with(no_deps: bool, dep_for_tests: bool) -> (RootDatabase, Model) {
     let mut db = RootDatabase::with_files(FIXTURE);
-    let fixture = Crate::all(&db)
-        .into_iter()
-        .find(|it| crate::crate_name(&db, *it) == "fixture")
-        .expect("the fixture crate");
+    let named = |name: &str| {
+        Crate::all(&db).into_iter().find(|it| crate::crate_name(&db, *it) == name).expect(name)
+    };
+    let (fixture, dep) = (named("fixture"), named("dep"));
+    let mut test_only = crate::TestOnly::default();
+    if dep_for_tests {
+        test_only.insert((fixture, dep));
+    }
     let asked = [Asked { krate: fixture, private: false }];
-    let crates = crate::crates_to_document(&db, &asked, no_deps);
+    let crates = crate::crates_to_document(&db, &asked, no_deps, &test_only);
     crate::set_cfg_doc(&mut db, &crates);
-    let model = crate::model(&db, crates);
+    let model = crate::model(&db, crates, test_only);
     (db, model)
 }
 
@@ -493,9 +511,10 @@ fn provided_methods_that_cannot_apply_are_left_out() {
     };
     assert_eq!(members("fixture::Squares"), ["Item", "borrowed"], "a square is not Copy");
     assert_eq!(members("fixture::Finds"), ["Item", "borrowed"], "nor through `A: Clone`");
+    assert_eq!(members("fixture::Borrows"), ["Item", "borrowed"], "nor through lifetimes");
     assert_eq!(
         members("fixture::Helpers"),
-        ["Item", "copied", "borrowed"],
+        ["Item", "copied", "least", "borrowed"],
         "dep may make a helper Copy"
     );
 }
@@ -586,7 +605,7 @@ fn writes_pages_sources_and_search() {
 
 #[test]
 fn a_crate_not_documented_is_linked_at_its_html_root_url() {
-    let (_db, model) = load_with(true);
+    let (_db, model) = load_with(true, false);
     let out = std::env::temp_dir().join(format!("blaze-doc-test-remote-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     crate::html::write(&model, &out).expect("written");
@@ -599,6 +618,13 @@ fn a_crate_not_documented_is_linked_at_its_html_root_url() {
         "where it is declared, which its docs redirect from"
     );
     let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_dependency_of_tests_alone_is_not_documented() {
+    let (_db, model) = load_with(false, true);
+    let names: Vec<&str> = model.crates.iter().map(|it| it.name.as_str()).collect();
+    assert!(!names.contains(&"dep"), "{names:?}");
 }
 
 /// The text of an HTML page, its tags dropped.

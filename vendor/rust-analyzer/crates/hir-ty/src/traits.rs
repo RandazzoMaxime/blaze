@@ -273,13 +273,18 @@ pub fn is_impossible_associated_item(
         // A projection is normalized as the solver constrains it, though the impl's own bounds
         // on its inference variables leave the goal ambiguous (`Self::Item` of a
         // `FindIter<'a, 'h, A: Automaton>` is `Match`); one under a binder (`for<'a>`) is
-        // judged as written, the normalizer taking no bound vars.
+        // judged as written, the normalizer taking no bound vars. Each projection has a
+        // fulfillment context of its own, so the clauses already registered are answered once,
+        // at the end, and not with it.
         if let rustc_type_ir::ClauseKind::Trait(pred) = clause.kind().skip_binder() {
             let known = knowable(db, krate, pred.trait_ref, |ty| {
                 if !matches!(ty.kind(), TyKind::Alias(..)) || ty.has_escaping_bound_vars() {
                     return ty;
                 }
-                ocx.structurally_normalize_ty(&ObligationCause::dummy(), ParamEnv::empty(), ty)
+                let mut own = crate::next_solver::fulfill::FulfillmentCtxt::new(&infcx);
+                infcx
+                    .at(&ObligationCause::dummy(), ParamEnv::empty())
+                    .structurally_normalize_ty(ty, &mut own)
                     .ok()
                     .filter(|it| !matches!(it.kind(), TyKind::Infer(_)))
                     .unwrap_or(ty)
