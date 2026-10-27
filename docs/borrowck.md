@@ -135,7 +135,10 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   bounds write (`dyn Trait<'_> + 'a`). A parameter that elides one lifetime has
   it once however often its type does (`s: S2` with `type S2<'a> = S<'a, 'a>`); one that
   writes `Self` gives elision none of the impl's lifetimes (`self` of `impl Id<'_>`), and
-  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes.
+  `Self::Target` in an impl for `S<'_, '_>` has the impl's lifetimes. `Self` written in a
+  trait object's or `impl Trait`'s bounds or a function pointer's signature is the impl's self
+  type too, its anonymous lifetimes the impl's own (`f: &mut dyn FnMut(&mut Self)` in
+  `impl Builder<'_>`), as rustc makes each `'_` of an impl header one parameter of the impl.
 - Raw pointers: a reference coerced to one relates what it points to, raw and function
   pointers compare when they have a common supertype, an array's pointer cast to its
   element's relates the element, and a cast between pointers to trait objects keeps the
