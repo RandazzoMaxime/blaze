@@ -193,7 +193,15 @@ impl<'db> FunctionCx<'_, 'db> {
         Ok(match cc {
             None => self.builtin(name, &quads, types::F128, &[l, r])?,
             Some(cc) => {
-                let answer = self.builtin(name, &quads, types::I32, &[l, r])?;
+                // compiler-builtins answers in a word on x86-64, as libgcc does, of which LLVM
+                // reads the low 32 bits.
+                let answer = match self.x86() {
+                    true => {
+                        let word = self.builtin(name, &quads, types::I64, &[l, r])?;
+                        self.builder.ins().ireduce(types::I32, word)
+                    }
+                    false => self.builtin(name, &quads, types::I32, &[l, r])?,
+                };
                 self.builder.ins().icmp_imm_s(cc, answer, 0)
             }
         })
