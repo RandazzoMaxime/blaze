@@ -52,7 +52,7 @@ use std::{
 
 use anyhow::Context as _;
 
-use super::sandboxed;
+use super::{hermetic, sandboxed};
 use crate::sandbox::{self, Line, Reached, Spec};
 
 /// The file beside a script's `OUT_DIR` with what its last run of cargo's read, when that is
@@ -103,6 +103,9 @@ pub(crate) enum Plan {
         /// The system directories its `rustc-link-search` may name besides those it always may
         /// (`directives.rs`): `build-script-link-dirs` of the root manifest.
         link_dirs: Vec<PathBuf>,
+        /// The closure it sees alone, when it does ([`hermetic::VAR`]): then its run is kept by
+        /// what it is made of, and not by what it was seen reading.
+        in_view: Option<hermetic::InView>,
     },
 }
 
@@ -255,6 +258,39 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
     readable.retain(|it| !all.iter().any(|other| other != it && it.starts_with(other)));
     let mut not_inputs = vec![script.real.to_owned()];
     not_inputs.extend(std::fs::canonicalize(script.real).ok());
+    let root_manifest = root.as_ref().map(|it| it.join("Cargo.toml"));
+    if hermetic::wanted(script.env) && cfg!(target_os = "linux") {
+        let overrides = match &root_manifest {
+            Some(manifest) => hermetic::system_deps(manifest)?,
+            None => Default::default(),
+        };
+        let version = script.var("CARGO_PKG_VERSION").unwrap_or("0.0.0");
+        let closure = hermetic::closure_for(package, version, &overrides)?;
+        let env = hermetic::env_in(&env, &also, &closure);
+        let deps = hermetic::dep_out_dirs(&env);
+        let mut read = deps.clone();
+        read.extend(script.real.parent().map(Path::to_owned));
+        read.push(script.scratch.join(OWN_RUSTC));
+        read.extend(std::fs::canonicalize(&exe).ok().and_then(|it| Some(it.parent()?.to_owned())));
+        let toolchain = env.iter().find(|it| it.0 == crate::as_rustc::TOOLCHAIN);
+        let toolchain = toolchain.and_then(|it| Some(Path::new(&it.1).parent()?.parent()?.to_owned()));
+        read.extend(toolchain.and_then(|it| std::fs::canonicalize(it).ok()));
+        let (view, hidden) =
+            hermetic::view(script.cwd, script.out_dir, &read, &closure, script.scratch)?;
+        let spec = Spec {
+            cwd: script.cwd.to_owned(),
+            env,
+            overlays: Vec::new(),
+            writable: Vec::new(),
+            readable: Vec::new(),
+            record: Some(script.scratch.join("ra-jit-record")),
+            record_reads: false,
+            not_inputs,
+            view: Some(view),
+        };
+        let in_view = Some(hermetic::InView { closure, hidden, deps });
+        return Ok(Plan::Sandboxed { spec, root_manifest, link_dirs, in_view });
+    }
     let env = env.into_iter().filter(|(name, _)| given(name) || also.contains(name)).collect();
     let spec = Spec {
         cwd: script.cwd.to_owned(),
@@ -267,7 +303,7 @@ pub(crate) fn plan(script: &Script<'_>) -> anyhow::Result<Plan> {
         not_inputs,
         view: None,
     };
-    Ok(Plan::Sandboxed { spec, root_manifest: root.map(|it| it.join("Cargo.toml")), link_dirs })
+    Ok(Plan::Sandboxed { spec, root_manifest, link_dirs, in_view: None })
 }
 
 /// Whether the variable `name` of cargo's environment is given to a build script in the
@@ -436,7 +472,7 @@ fn user_cache() -> Option<PathBuf> {
 /// has a note after what it printed to stderr, naming the package, what the sandbox refused
 /// it and how to take it out; a sandbox that could not be made, why and how to fix it.
 pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Result<Ran> {
-    let (spec, root_manifest) = match plan {
+    let (spec, root_manifest, in_view) = match plan {
         Plan::Outside(why, env) => {
             if std::env::var_os("RA_JIT_STATS").is_some() {
                 eprintln!("ra-jit: the build script of `{}` runs outside: {why}", script.package());
@@ -447,7 +483,7 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
             let output = command.output().with_context(|| running(script))?;
             return Ok(Ran { output, reads: None });
         }
-        Plan::Sandboxed { spec, root_manifest, .. } => (spec, root_manifest),
+        Plan::Sandboxed { spec, root_manifest, in_view, .. } => (spec, root_manifest, in_view),
     };
     std::fs::create_dir_all(script.scratch)
         .with_context(|| format!("making {}", script.scratch.display()))?;
@@ -480,6 +516,15 @@ pub(crate) fn run(script: &Script<'_>, plan: &Plan, stdin: Stdio) -> anyhow::Res
         && let Some(note) = refused_note(lines, package, root_manifest.as_deref())
     {
         output.stderr.extend(format!("note: {note}\n").into_bytes());
+    } else if !output.status.success()
+        && let Some(in_view) = in_view
+    {
+        let root = root_manifest.as_deref();
+        let note = hermetic::failed_note(package, &in_view.closure, &output.stderr, root);
+        output.stderr.extend(format!("note: {note}\n").into_bytes());
+    }
+    if in_view.is_some() {
+        return Ok(Ran { output, reads: None });
     }
     let reads = lines.filter(|it| it.iter().all(|it| it.reached != Reached::Incomplete));
     let reads = reads.map(|lines| inputs(&lines, script, spec));
@@ -687,7 +732,8 @@ mod tests {
     fn a_script_that_says_it_reads_what_it_was_not_given_is_named() {
         let pair = |name: &str| (name.to_owned(), "x".to_owned());
         let spec = Spec { env: vec![pair("CC")], ..Spec::default() };
-        let plan = Plan::Sandboxed { spec, root_manifest: None, link_dirs: Vec::new() };
+        let plan =
+            Plan::Sandboxed { spec, root_manifest: None, link_dirs: Vec::new(), in_view: None };
         let outside = [pair("CC"), pair("OPENSSL_DIR")];
         let stdout = b"cargo:rerun-if-env-changed=CC\ncargo::rerun-if-env-changed=OPENSSL_DIR\n\
             cargo:rerun-if-env-changed=OPENSSL_DIR\ncargo:rerun-if-env-changed=UNSET\n";
