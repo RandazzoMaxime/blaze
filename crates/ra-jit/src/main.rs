@@ -524,7 +524,7 @@ impl<'a> ResolverParts<'a> {
 /// The standard library ra-jit built before the program ([`std_unit`]).
 struct Prebuilt {
     /// What its object defines for others to link to.
-    defined: FxHashSet<String>,
+    defined: Arc<FxHashSet<String>>,
     /// Its crates, as [`library_unit`] has them.
     crates: FxHashSet<ide_db::base_db::Crate>,
 }
@@ -677,6 +677,28 @@ pub(crate) fn unlinked_panic_runtime(db: &RootDatabase, program: &[Crate]) -> &'
     if abort { "panic_unwind" } else { "panic_abort" }
 }
 
+/// [`defined_symbols`] of the object at `path`, read again only when the file is not the one it
+/// was read from: every build of the program asks for the standard library's unit, which is
+/// tens of megabytes of object.
+fn defined_symbols_kept(path: &Path) -> anyhow::Result<Arc<FxHashSet<String>>> {
+    type Kept = FxHashMap<PathBuf, ((std::time::SystemTime, u64), Arc<FxHashSet<String>>)>;
+    static KEPT: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+        std::sync::LazyLock::new(Default::default);
+    let file = std::fs::metadata(path).ok();
+    let key = file.and_then(|it| Some((it.modified().ok()?, it.len())));
+    if let Some(key) = key
+        && let Some((was, names)) = lock(&KEPT).get(path)
+        && *was == key
+    {
+        return Ok(names.clone());
+    }
+    let names = Arc::new(defined_symbols(path)?);
+    if let Some(key) = key {
+        lock(&KEPT).insert(path.to_owned(), (key, names.clone()));
+    }
+    Ok(names)
+}
+
 /// The names an object defines for others to link to.
 fn defined_symbols(path: &Path) -> anyhow::Result<FxHashSet<String>> {
     use object::{Object as _, ObjectSymbol as _, SymbolScope};
@@ -806,9 +828,8 @@ impl<'a> Resolver<'a> {
             source_path(db, &named.0, named.1.as_deref(), file)
         });
         let prebuilt = args.prebuilt.as_deref().filter(|_| table.is_empty()).map(|path| {
-            let defined = defined_symbols(path);
-            let defined =
-                defined.unwrap_or_else(|e| panic!("the standard library blaze built: {e:#}"));
+            let defined = defined_symbols_kept(path)
+                .unwrap_or_else(|e| panic!("the standard library blaze built: {e:#}"));
             let program: Vec<Crate> =
                 args.crates().filter_map(|it| crates_named(db, it, args).ok()).flatten().collect();
             let crates = library_unit(db, &program);
@@ -1043,15 +1064,7 @@ impl Resolver<'_> {
     /// Whether the function, or the `impl` it is in, takes types or constants. A method a
     /// trait provides takes `Self`.
     fn is_generic(&self, func: FunctionId) -> bool {
-        let generic = |def: hir::GenericDef| !def.type_or_const_params(self.db).is_empty();
-        if generic(hir::Function::from(func).into()) {
-            return true;
-        }
-        match func.lookup(self.db).container {
-            ItemContainerId::ImplId(imp) => generic(hir::Impl::from(imp).into()),
-            ItemContainerId::TraitId(_) => true,
-            _ => false,
-        }
+        is_generic_function(self.db, func)
     }
 
     /// Whether another function written in a body of the crate has this one's path. rustc
@@ -3731,7 +3744,28 @@ struct ListedCrate {
     in_provided: Vec<FunctionId>,
     /// For each, whether a runtime looks it up by name.
     exported: Vec<bool>,
+    /// What a build takes of `functions` for its roots, each with whether a runtime looks it up
+    /// by name and whether it is generic: those only the const evaluator runs are left out.
+    /// Kept with the crate, as a query of the attributes of every function of every crate is
+    /// most of what an edit would otherwise wait for.
+    rooted: Vec<(FunctionId, bool, bool)>,
+    /// The same of `in_provided`: each with whether it is generic.
+    provided: Vec<(FunctionId, bool)>,
     main: Option<FunctionId>,
+}
+
+/// Whether the function, or the `impl` it is in, takes types or constants. A method a trait
+/// provides takes `Self`.
+fn is_generic_function(db: &RootDatabase, func: FunctionId) -> bool {
+    let generic = |def: hir::GenericDef| !def.type_or_const_params(db).is_empty();
+    if generic(hir::Function::from(func).into()) {
+        return true;
+    }
+    match func.lookup(db).container {
+        ItemContainerId::ImplId(imp) => generic(hir::Impl::from(imp).into()),
+        ItemContainerId::TraitId(_) => true,
+        _ => false,
+    }
 }
 
 fn is_bodiless_intrinsic(db: &RootDatabase, id: FunctionId) -> bool {
@@ -3955,7 +3989,28 @@ impl ListedCrate {
             .filter(|_| !has_no_main(db, krate));
         let exported = exported(db, &functions);
         let shared_paths = Default::default();
-        ListedCrate { functions, shared_paths, kept, statics, in_provided, exported, main }
+        let rooted = functions
+            .iter()
+            .zip(&exported)
+            .filter(|&(&it, _)| !hir_ty_codegen::compile_time_only(db, it))
+            .map(|(&it, &exported)| (it, exported, is_generic_function(db, it)))
+            .collect();
+        let provided = in_provided
+            .iter()
+            .filter(|&&it| !hir_ty_codegen::compile_time_only(db, it))
+            .map(|&it| (it, is_generic_function(db, it)))
+            .collect();
+        ListedCrate {
+            functions,
+            shared_paths,
+            kept,
+            statics,
+            in_provided,
+            exported,
+            rooted,
+            provided,
+            main,
+        }
     }
 }
 
@@ -4999,11 +5054,19 @@ fn build(
             } else if at == 0 {
                 main = main.or_else(|| harness_main(db, &listed.functions));
             }
-            functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
+            // With nothing of rustc's there is no copy of a generic function to name: each
+            // instance is compiled with the caller that asks for it.
+            let kept_rooted = |it: &&(FunctionId, bool, bool)| !(table.is_empty() && it.2);
+            functions.extend(
+                listed.rooted.iter().filter(kept_rooted).map(|&(it, exported, _)| (it, exported)),
+            );
             // rustc's copy of the crate has them when rustc built it.
             let own = resolver.own_crate_id(krate.into()).is_some();
             if table.is_empty() || own {
-                functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
+                let kept_provided = |it: &&(FunctionId, bool)| !(table.is_empty() && it.1);
+                functions.extend(
+                    listed.provided.iter().filter(kept_provided).map(|&(it, _)| (it, false)),
+                );
             }
             if own {
                 kept.extend(&listed.kept);
@@ -5034,8 +5097,10 @@ fn build(
         for krate in linked {
             local.push(krate);
             let listed = listed.of(db, krate);
-            functions.extend(listed.functions.iter().copied().zip(listed.exported.iter().copied()));
-            functions.extend(listed.in_provided.iter().map(|&it| (it, false)));
+            functions.extend(
+                listed.rooted.iter().filter(|it| !it.2).map(|&(it, exported, _)| (it, exported)),
+            );
+            functions.extend(listed.provided.iter().filter(|it| !it.1).map(|&(it, _)| (it, false)));
             kept.extend(&listed.kept);
             every_static.extend(&listed.statics);
         }
@@ -5053,11 +5118,6 @@ fn build(
     // rustc's there is no copy of it to name: each instance a caller asks for is compiled with
     // the caller. As a root it would only be counted as left out ("no rustc symbol"), which is
     // not something blaze could not compile.
-    if table.is_empty() {
-        functions.retain(|&(func, _)| !resolver.is_generic(func));
-    }
-    // A function only the const evaluator runs has no code, in rustc's build or ours.
-    functions.retain(|&(func, _)| !hir_ty_codegen::compile_time_only(db, func));
     let list = start.elapsed();
     // With a program to start from, only what it reaches is compiled, and what a runtime
     // looks up by name. Without one any function may be the one called.
@@ -11234,6 +11294,111 @@ fn main() {}
             assert_eq!(crates_of(&within(&[app]), shared), [app]);
             assert_eq!(crates_of(&within(&[example]), main), [app]);
         });
+    }
+
+    /// What a build roots of a crate is what it always was: its functions with whether a runtime
+    /// looks each up by name, but those only the const evaluator runs, and with whether each is
+    /// generic, which a build with nothing of rustc's leaves out. They are listed with the
+    /// crate, so an edit does not ask the attributes of every function of every crate again.
+    #[test]
+    fn the_roots_of_a_listed_crate_are_its_functions_but_those_only_the_const_evaluator_runs() {
+        use test_fixture::WithFixture;
+        let (db, file) = RootDatabase::with_single_file(
+            r#"
+fn plain() {}
+fn generic<T>(_: T) {}
+#[rustc_comptime]
+fn comptime() {}
+struct S;
+impl S { fn method(&self) {} }
+impl<T> Tr for T { fn provided(&self) {} }
+trait Tr { fn required(&self); fn default(&self) { fn inner() {} } }
+#[no_mangle]
+extern "C" fn exported() {}
+"#,
+        );
+        hir::attach_db(&db, || {
+            let sema = hir::Semantics::new(&db);
+            let module = sema.file_to_module_defs(file.file_id(&db)).next().unwrap();
+            let listed = ListedCrate::new(&db, module.krate(&db));
+            let name = |func: FunctionId| hir::Function::from(func).name(&db).as_str().to_owned();
+            let before: Vec<(FunctionId, bool)> = listed
+                .functions
+                .iter()
+                .copied()
+                .zip(listed.exported.iter().copied())
+                .filter(|&(it, _)| !hir_ty_codegen::compile_time_only(&db, it))
+                .collect();
+            let rooted: Vec<_> =
+                listed.rooted.iter().map(|&(it, exported, _)| (it, exported)).collect();
+            assert_eq!(rooted, before);
+            assert!(listed.functions.iter().any(|&it| name(it) == "comptime"));
+            assert!(listed.rooted.iter().all(|&(it, _, _)| name(it) != "comptime"));
+            let flags: Vec<_> = listed
+                .rooted
+                .iter()
+                .map(|&(it, exported, generic)| (name(it), exported, generic))
+                .collect();
+            for (wanted, exported, generic) in [
+                ("plain", false, false),
+                ("generic", false, true),
+                ("method", false, false),
+                ("provided", false, true),
+                ("exported", true, false),
+            ] {
+                assert!(
+                    flags.contains(&(wanted.to_owned(), exported, generic)),
+                    "{wanted}: {flags:?}"
+                );
+            }
+            assert!(listed.provided.iter().any(|&(it, generic)| name(it) == "inner" && !generic));
+            for &(it, generic) in &listed.provided {
+                assert_eq!(generic, is_generic_function(&db, it));
+                assert!(!hir_ty_codegen::compile_time_only(&db, it));
+            }
+        });
+    }
+
+    /// The symbols of the standard library's object are read once for as long as the file is the
+    /// one they were read from.
+    #[test]
+    fn the_symbols_of_an_object_are_read_again_only_when_the_file_changed() {
+        use object::write::{Object, Symbol, SymbolSection};
+        let dir = std::env::temp_dir().join(format!("ra-jit-defined-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("std.o");
+        let write = |names: &[&str]| {
+            let mut object = Object::new(
+                object::BinaryFormat::Elf,
+                object::Architecture::X86_64,
+                object::Endianness::Little,
+            );
+            let section = object.section_id(object::write::StandardSection::Text);
+            for name in names {
+                let symbol = Symbol {
+                    name: name.as_bytes().to_vec(),
+                    value: 0,
+                    size: 0,
+                    kind: object::SymbolKind::Text,
+                    scope: object::SymbolScope::Dynamic,
+                    weak: false,
+                    section: SymbolSection::Section(section),
+                    flags: object::SymbolFlags::None,
+                };
+                object.add_symbol(symbol);
+            }
+            object.append_section_data(section, &[0x90], 1);
+            std::fs::write(&path, object.write().unwrap()).unwrap();
+        };
+        write(&["one"]);
+        let first = defined_symbols_kept(&path).unwrap();
+        assert!(first.contains("one"));
+        assert!(Arc::ptr_eq(&first, &defined_symbols_kept(&path).unwrap()));
+        write(&["one", "another_and_longer"]);
+        let second = defined_symbols_kept(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(second.contains("another_and_longer"));
+        assert!(!Arc::ptr_eq(&first, &second));
     }
 
     #[test]
