@@ -167,6 +167,8 @@ All of these are rustc's, written from `compiler/rustc_borrowck` at the pinned n
   for a trait's item, `Self`) equal to `A<'a>`, in a range pattern's bounds too.
 - Promotion: a borrowed function item, and a named `const` whose type has no interior
   mutability whatever its drop (rustc asks whether the value needs dropping, not the type).
+  A mutable borrow is promoted only of an empty array, the one an index or method call makes
+  of its receiver too (`&mut [][..]`, `[].iter_mut()`), as rustc's `validate_ref`.
   In a `const` or `static` item's value, a call of a `const fn` is promotable too
   (`Migrations::new(&[Migration::new("a")])`), as it is in rustc's const contexts, a method
   call and a block of items and a tail included: tracing's `fieldset!` names a field
