@@ -3386,6 +3386,7 @@ dependencies = [
  "blaze-manifest",
  "blaze-metadata",
  "blaze-new",
+ "blaze-registry",
  "blaze-resolve",
  "blaze-tree",
  "cargo-platform",

@@ -244,7 +244,7 @@ pub fn locked(asked: &Asked<'_>) -> Result<Option<Locked>> {
 pub fn fetch_locked(asked: &Asked<'_>) -> Result<Option<usize>> {
     with_lock(asked, "fetch", |ctx, _, lock| {
         let offline = asked.offline || ctx.config.net_config()?.offline.unwrap_or(false);
-        Ok(fetch(lock, ctx, offline, asked.store.clone())?.len())
+        Ok(fetch(lock, ctx, offline, asked.store.clone(), true)?.len())
     })
 }
 
@@ -285,7 +285,7 @@ fn made(asked: &Asked<'_>) -> Result<(String, Vec<String>)> {
 /// if the resolve changed it, unless `locked` (`--locked` or `--frozen`) forbids it. Returns
 /// the packages `[patch]` names that the resolve did not use.
 pub fn relock(asked: &Asked<'_>, command: &str, locked: Option<&str>) -> Result<Vec<PackageId>> {
-    let relock = Relock { command, locked };
+    let relock = Relock { command, locked, respect_source_config: true };
     resolving_with(asked, None, Some(relock), |_, _, _, unused| Ok(unused.to_vec()))
 }
 
@@ -294,6 +294,8 @@ pub fn relock(asked: &Asked<'_>, command: &str, locked: Option<&str>) -> Result<
 struct Relock<'a> {
     command: &'a str,
     locked: Option<&'a str>,
+    /// Whether `[source]` replaces the sources it names; `cargo vendor` reads around it.
+    respect_source_config: bool,
 }
 
 fn resolving<R>(
@@ -332,7 +334,8 @@ fn resolving_with<R>(
         entry.insert(m.package_id.version.clone(), SourceId::for_path(&dir)?);
     }
     let lock = lockfile::into_resolve(lockfile::parse(&lock_text)?, &lock_text, &path_deps)?;
-    let fetched = fetch(&lock, &ctx, offline, asked.store.clone())?;
+    let respect = relock.is_none_or(|it| it.respect_source_config);
+    let fetched = fetch(&lock, &ctx, offline, asked.store.clone(), respect)?;
 
     let mut serialized: Vec<SerializedPackage<'_>> =
         ws.members().map(|(path, m)| export_package(path, m)).collect();
@@ -624,14 +627,9 @@ fn fetch(
     ctx: &Context,
     offline: bool,
     store: Option<Arc<dyn blaze_registry::Blobs>>,
+    respect_source_config: bool,
 ) -> Result<Vec<Package>> {
-    let mut context = blaze_registry::Context::new(
-        ctx.config.home().to_owned(),
-        blaze_registry::http::HyperHttp::shared()?,
-    );
-    context.net.offline = offline;
-    context.store = store;
-    let sources = blaze_registry::Sources::new(&source_config(&ctx.config)?, Arc::new(context))?;
+    let sources = sources(ctx, offline, store, respect_source_config)?;
     let mut locked = Vec::new();
     let mut ids = Vec::new();
     // The `[[patch.unused]]` entries too, which the resolve has to see to keep them unused.
@@ -669,6 +667,101 @@ fn fetch(
         read.push(Package { manifest_path, manifest, locked_source: Some(source_text) });
     }
     Ok(read)
+}
+
+/// The sources packages are fetched from, `[source]` replacing those it names unless not
+/// `respect_source_config`.
+fn sources(
+    ctx: &Context,
+    offline: bool,
+    store: Option<Arc<dyn blaze_registry::Blobs>>,
+    respect_source_config: bool,
+) -> Result<blaze_registry::Sources> {
+    let mut context = blaze_registry::Context::new(
+        ctx.config.home().to_owned(),
+        blaze_registry::http::HyperHttp::shared()?,
+    );
+    context.net.offline = offline;
+    context.store = store;
+    let mut config = source_config(&ctx.config)?;
+    if !respect_source_config {
+        config.sources.clear();
+    }
+    blaze_registry::Sources::new(&config, Arc::new(context))
+}
+
+/// A package of the lock file as `cargo vendor` reads it.
+pub struct Vendored {
+    pub id: PackageId,
+    /// The checksum the lock file has of it.
+    pub checksum: Option<String>,
+    /// Its source: unpacked from its registry, or a path package's directory.
+    pub root: PathBuf,
+    /// The `.crate` of a registry's package; none for a path package.
+    pub tarball: Option<PathBuf>,
+}
+
+/// Every package of the workspace's lock file, as `cargo vendor` reads them: the workspace
+/// resolved again first, writing the lock file if that changes it (unless `locked`, the flag
+/// that forbids it), and each registry package fetched, `[source]` replacing none unless
+/// `respect_source_config`. A git package is refused: it is vendored with its manifest as
+/// `cargo package` writes it, which blaze does not write yet.
+pub fn vendored(
+    asked: &Asked<'_>,
+    respect_source_config: bool,
+    locked: Option<&str>,
+) -> Result<Vec<Vendored>> {
+    let relock = Relock { command: "vendor", locked, respect_source_config };
+    resolving_with(asked, None, Some(relock), |_, _, _, _| Ok(()))?;
+    let read = with_lock(asked, "vendor", |ctx, _, lock| {
+        let offline = asked.offline || ctx.config.net_config()?.offline.unwrap_or(false);
+        let sources = sources(ctx, offline, asked.store.clone(), respect_source_config)?;
+        let mut out = Vec::new();
+        let mut locked = Vec::new();
+        let mut fetched = Vec::new();
+        for id in lock.sort() {
+            let checksum = lock.checksums().get(&id).cloned().flatten();
+            if id.source_id().is_path() {
+                let root = id.source_id().local_path().context("a path package's directory")?;
+                out.push(Vendored { id, checksum, root, tarball: None });
+                continue;
+            }
+            let source_text = id.source_id().as_url().to_string();
+            let (source, precise) = blaze_registry::SourceId::from_url(&source_text)?;
+            let from = sources.map().replacement(&source, precise.is_some())?;
+            use blaze_registry::SourceKind;
+            match from.kind() {
+                SourceKind::Registry | SourceKind::SparseRegistry | SourceKind::LocalRegistry => {}
+                SourceKind::Git(_) => bail!(
+                    "blaze does not vendor `{id}` yet: a git package is vendored with its \
+                     manifest as `cargo package` writes it, which blaze does not write yet"
+                ),
+                _ => bail!("blaze does not vendor `{id}` yet: it is read from {from}"),
+            }
+            if from.is_remote_registry() && !from.is_sparse() {
+                bail!("{source_text} is read from a git index, which blaze does not read yet");
+            }
+            let registry = sources.registry(&from)?;
+            let mut sum = checksum.clone().unwrap_or_default();
+            if sum.is_empty() && from.is_remote_registry() {
+                sum = registry.checksum(id.name().as_str(), id.version())?;
+            }
+            let package = blaze_registry::Package {
+                name: id.name().to_string(),
+                version: id.version().clone(),
+                checksum: sum,
+            };
+            let tarball = registry.crate_file(id.name().as_str(), id.version());
+            locked.push(blaze_registry::Locked { source, precise, package });
+            fetched.push(out.len());
+            out.push(Vendored { id, checksum, root: PathBuf::new(), tarball: Some(tarball) });
+        }
+        for (at, (dir, _)) in fetched.into_iter().zip(sources.fetch(&locked)?) {
+            out[at].root = dir;
+        }
+        Ok(out)
+    })?;
+    read.context("a lock file the resolve just wrote")
 }
 
 /// The source of a package the lock file pins to `source`, as blaze-manifest names it.

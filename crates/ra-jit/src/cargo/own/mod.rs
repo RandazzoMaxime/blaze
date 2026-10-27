@@ -12,6 +12,7 @@ mod remove;
 mod report;
 mod tree;
 mod uninstall;
+mod vendor;
 
 use args::Args;
 
@@ -85,7 +86,7 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = &[
     sub("new", Status::Own, "make a package in a new directory"),
     sub("init", Status::Own, "make a package in this directory"),
     sub("pkgid", Status::Own, "the full id of a package"),
-    sub("vendor", Status::Not("not written yet"), "copy every dependency into the workspace"),
+    sub("vendor", Status::Own, "copy every dependency into the workspace"),
     aka("remove", &["rm"], Status::Own, "remove dependencies from the manifest"),
     sub("add", CHOOSES_VERSIONS, "add dependencies to the manifest"),
     sub("update", CHOOSES_VERSIONS, "update the lock file"),
@@ -141,6 +142,7 @@ pub(crate) fn command(args: Vec<String>) -> anyhow::Result<i32> {
         "report" => report::command(Args::new(rest)),
         "config" => config::command(rest),
         "remove" => remove::command(rest),
+        "vendor" => vendor::command(Args::new(rest)),
         "fetch" => manifest::fetch(Args::new(rest)),
         "clean" => clean::command(Args::new(rest)),
         "new" | "init" => new::command(subcommand.name, Args::new(rest)),
