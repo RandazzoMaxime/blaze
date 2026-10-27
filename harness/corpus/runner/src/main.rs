@@ -408,6 +408,7 @@ fn main() {
     println!("promoted_self_variant {:?}", cases::promoted_self_variant::run());
     println!("static_cycle {:?}", cases::static_cycle::run());
     println!("async_frames {:?}", cases::async_frames::run());
+    println!("async_frames captured {:?}", cases::async_frames::captured_copy());
     println!("boxed_fn_tuple {:?}", cases::boxed_fn_tuple::run());
     println!("builtin_location {:?}", cases::builtin_location::run());
     println!("builtin_location passed {:?}", cases::builtin_location::passed());

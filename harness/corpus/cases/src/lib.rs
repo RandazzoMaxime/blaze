@@ -2903,6 +2903,36 @@ pub mod async_frames {
         first + second + third + checksum(view)
     }
 
+    /// Runs a closure on its second poll, as `spawn_blocking`'s handle does, scribbling over
+    /// itself on the first.
+    struct Later<F> {
+        scratch: [u64; 8],
+        run: Option<F>,
+    }
+    impl<F: FnOnce() -> u64 + Unpin> Future for Later<F> {
+        type Output = u64;
+        fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u64> {
+            if self.scratch[0] == 0 {
+                self.scratch = [u64::MAX - 1; 8];
+                return Poll::Pending;
+            }
+            Poll::Ready(self.run.take().unwrap()())
+        }
+    }
+
+    /// A `move` closure copies `size` and leaves it live across the await of the closure.
+    async fn captured(n: u64) -> u64 {
+        let size = n;
+        let more = Later { scratch: [0; 8], run: Some(move || size + 1) }.await;
+        let label = format!("{size}");
+        Twice(false).await;
+        more * 1000 + size + label.len() as u64
+    }
+
+    pub fn captured_copy() -> (u64, u64) {
+        (block_on(captured(1181)), block_on(captured(7)))
+    }
+
     pub fn shared() -> (Vec<u64>, bool) {
         let size = std::mem::size_of_val(&arms(0));
         ((0..4).map(|which| block_on(arms(which))).collect(), size < 2 * 4096)
