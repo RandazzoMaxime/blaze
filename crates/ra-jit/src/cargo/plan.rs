@@ -233,8 +233,10 @@ fn calls_by_symbol(unit: &Record) -> bool {
 
 /// The file in a program's directory that says it is a program of tests, which the daemon
 /// starts in ra-jit's test harness. It holds why the daemon builds it only with that harness,
-/// when it does: [`harness_alone`].
-pub(crate) const TESTS: &str = "tests";
+/// when it does: [`harness_alone`]. A program's own file is never named so, as rustc takes no
+/// `.` in a crate's name: a whole build links a program of tests in the same directory, and
+/// one of an integration test `tests/tests.rs` is named `tests`.
+pub(crate) const TESTS: &str = "tests.harness";
 
 /// The file in a program of tests' directory that says `cargo ra-jit test` runs only the
 /// tests an edit reaches, for the daemon to write [`REACH`] at each build of it.
