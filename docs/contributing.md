@@ -246,8 +246,11 @@ did about it in one line.
   generator feature, a breaker for a bug found in real code, a step in the relevant edit
   harness for a daemon bug. [harness.md](harness.md) says how to add each.
 - The gate, under Cranelift and under LLVM, on the platform you have. Say which platforms
-  you did not run. CI's fast tier covers Linux x86-64, Linux AArch64 and macOS on every
-  change; Windows and the slow harnesses run nightly ([harness.md](harness.md#ci)).
+  you did not run. CI's fast tier runs on Linux x86-64 for a pull request and on Linux
+  AArch64 and macOS too in the merge queue, each platform the harnesses where it matters;
+  Windows, every harness everywhere and the slow ones (`wholeprogram.py`, `keys.py`,
+  `buildmodel.py`, the store, `cargo_ra_jit.py` on real projects) run nightly, and a failed
+  nightly job opens an issue of its own ([harness.md](harness.md#ci)).
 - The LLVM backend builds in the flake's dev shell, against the LLVM it pins:
   `nix develop -c cargo build -p ra-jit --release --features llvm`
   ([LLVM for `--features llvm`](#llvm-for---features-llvm)).
@@ -299,9 +302,11 @@ run in the lane's worktree
 
     python3 .github/scripts/land.py "what the branch does"
 
-It pushes the branch, opens its pull request ("Merge <branch>: what the branch does") and queues
-it. The queue merges it onto main and whatever is ahead of it, runs CI's fast tier on that
-(about ten minutes, [harness.md](harness.md#ci)) and merges it with a merge commit, as
+It pushes the branch, opens its pull request ("Merge <branch>: what the branch does") and asks for
+it to be queued. The pull request's own run is the fast tier on Linux x86-64 (about ten minutes);
+a failure there ends `land.py` with the check's link before anything is queued. The queue then
+merges it onto main and whatever is ahead of it, runs the fast tier on every platform on that
+(about twelve minutes, [harness.md](harness.md#ci)) and merges it with a merge commit, as
 `git merge --no-ff` would. `land.py` waits for that and prints the commit, or says why the pull
 request left the queue; then fix the branch and run it again. The waiting runs in a process of
 its own that outlives `land.py`, its terminal and a tool that ends its process group, writing to

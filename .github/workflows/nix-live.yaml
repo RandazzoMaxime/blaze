@@ -1,9 +1,9 @@
 # What is new since the fork: the flake (per-unit nix builds of the daemon and the demo), the
-# unit graphs behind them, the Game of Life demo, and live edits (ra-jit-live). It takes about
-# 40 minutes, so it runs nightly, by hand, and on a change to the flake, nix/ or the
-# dependencies (which the unit graphs are generated from); the
-# fast tier of ra-jit.yaml has live edits on every change (live_e2e.py, tiers.py). A failed
-# nightly opens an issue, or adds to the one still open.
+# unit graphs behind them, the Game of Life demo, and live edits (ra-jit-live). The builds take
+# about 40 minutes, so they run nightly and by hand; a pull request or push that changes the
+# flake, nix/ or the dependencies (which the unit graphs are generated from) checks the unit
+# graphs alone, in two minutes. The fast tier of ra-jit.yaml has live edits on every change
+# (live_e2e.py, tiers.py). Each job that fails at night opens an issue of its own, or adds to it.
 #
 #   unit graphs   nix/units/*.json are what `nix/unit_graph.py` generates from Cargo.lock now
 #   nix           `nix build` of the daemon, the demo and the per-unit builds, and the flake's apps
@@ -59,6 +59,7 @@ jobs:
 
   nix:
     name: nix build (x86_64-linux)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -84,6 +85,7 @@ jobs:
 
   nix-darwin:
     name: nix build (aarch64-darwin)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -100,6 +102,7 @@ jobs:
 
   demo:
     name: demo/life and ra-jit-live (linux)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -128,6 +131,7 @@ jobs:
 
   live-edits:
     name: live edits (macOS arm64)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 60
     # Not required: it runs a daemon, a program and a patch between them on a hosted macOS VM,
@@ -160,6 +164,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: write
+      actions: read
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/nightly-issue

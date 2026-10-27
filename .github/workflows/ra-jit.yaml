@@ -2,16 +2,19 @@
 # builds, under both producers, each platform on a machine of its own kind
 # (ra-jit-platform.yaml). What runs when, and how long it takes, is in docs/harness.md ("CI").
 #
-#   pull request: fmt alone (under a minute), so that it can join the merge queue at once
-#   fast tier: merge queue, push to main, by hand (about 10 minutes)
-#       fmt; on Linux x86-64, Linux AArch64 and macOS arm64 the unit tests, one build and the
-#       quick harnesses (harness/ci.py --parts fast); rustc's borrow-check tests with a floor
-#       under the passes; the pinned run-pass tests (Linux x86-64, macOS); vendor/rust-analyzer
-#       on its own
-#   full tier: nightly, by hand (an hour)
-#       all of that with every harness, Windows x86-64 too, `cargo ra-jit` on small projects
-#       (Linux x86-64, macOS) and the larger ones (AArch64), and the ripgrep bench. A failed
-#       nightly opens an issue, or adds to the one still open.
+#   pull request (about 10 minutes): fmt, `fork alone` and the fast tier on Linux x86-64 (the
+#       unit tests, one build, every fast harness of harness/ci.py in parts of about four
+#       minutes, rustc's borrow-check tests, the pinned run-pass tests, the Bun fixtures). It is
+#       what a pull request needs before it joins the merge queue, so a change that breaks them
+#       fails there, alone, and does not take the queue entries behind it down with it.
+#   merge queue (about 12 minutes): that, and the fast tier on Linux AArch64 and macOS arm64,
+#       which run the harnesses where the platform matters (`FAST` in harness/ci.py), on the
+#       change merged onto main and the entries ahead of it
+#   push to main: the build and the unit tests on each platform, which write the caches every
+#       other run reads (the queue already tested the commit)
+#   nightly, by hand (an hour): the full tier: every harness, Windows x86-64 too, `cargo
+#       ra-jit` on small projects (Linux x86-64, macOS) and the larger ones (AArch64), the ripgrep
+#       bench. Each job that fails opens an issue of its own, or adds to it while it is open.
 #
 # A change to nothing but documentation or the site runs fmt alone. `ci` is the one check that
 # says whether everything that ran passed: it is the check branch rules and the merge queue
@@ -28,10 +31,10 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: "fast or full"
+        description: "full (the nightly's), fast (the merge queue's) or pr (a pull request's)"
         default: full
         type: choice
-        options: [full, fast]
+        options: [full, fast, pr]
 
 concurrency:
   # A pull request's newer push cancels its run before. Every push to main and every entry of
@@ -44,10 +47,10 @@ permissions:
   contents: read
 
 jobs:
-  # Which tier runs: `none` for a pull request (the merge queue tests it merged, and testing it
-  # alone first would only make its landing wait twice) and for a change to nothing but
-  # documentation, the files of the merge queue's entry or of the push against the commit main
-  # was at before it. Anything that cannot be told counts as code.
+  # Which tier runs: `pr` for a pull request (the fast tier on Linux x86-64), `fast` for the
+  # merge queue, `warm` for a push to main, `full` nightly, or `none` for a change to nothing but
+  # documentation (the pull request's files, the merge queue entry's or the push's against the
+  # commit before it). Anything that cannot be told counts as code.
   changes:
     name: changes
     runs-on: ubuntu-24.04
@@ -61,16 +64,22 @@ jobs:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
           QUEUE_HEAD: ${{ github.event.merge_group.head_sha }}
-          TIER: ${{ github.event_name == 'schedule' && 'full' || inputs.tier || 'fast' }}
+          TIER: ${{ github.event_name == 'schedule' && 'full' || inputs.tier || (github.event_name == 'pull_request' && 'pr') || (github.event_name == 'push' && 'warm') || 'fast' }}
         run: |
           case "$EVENT" in
-            pull_request) echo "tier=none" | tee -a "$GITHUB_OUTPUT"; exit 0;;
-            push) files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$AFTER" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=;;
-            merge_group) files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$QUEUE_BASE...$QUEUE_HEAD" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=;;
-            *) files=;;
+            pull_request) range="$PR_BASE...$PR_HEAD";;
+            push) range="$BEFORE...$AFTER";;
+            merge_group) range="$QUEUE_BASE...$QUEUE_HEAD";;
+            *) range=;;
           esac
+          files=
+          if [ -n "$range" ]; then
+            files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$range" --jq 'if (.files | length) >= 300 then "" else .files[].filename end') || files=
+          fi
           code=false
           [ -n "$files" ] || code=true
           while read -r file; do
@@ -108,17 +117,19 @@ jobs:
     with:
       platform: linux-x64
       os: ubuntu-24.04
-      tier: ${{ needs.changes.outputs.tier }}
+      tier: ${{ needs.changes.outputs.tier == 'pr' && 'fast' || needs.changes.outputs.tier }}
       borrowck: true
       pinned-ui: true
       cargo-ra-jit: ${{ needs.changes.outputs.tier == 'full' }}
       bench: ${{ needs.changes.outputs.tier == 'full' }}
       bun-e2e: true
 
+  # A pull request's run is Linux x86-64's alone: it caught all but a few of what the queue
+  # failed on in 2026-10-25 and 26's runs, and the queue runs these two on it anyway.
   linux-arm64:
     name: linux arm64
     needs: changes
-    if: needs.changes.outputs.tier != 'none'
+    if: needs.changes.outputs.tier != 'none' && needs.changes.outputs.tier != 'pr'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: linux-arm64
@@ -129,7 +140,7 @@ jobs:
   macos:
     name: macos arm64
     needs: changes
-    if: needs.changes.outputs.tier != 'none'
+    if: needs.changes.outputs.tier != 'none' && needs.changes.outputs.tier != 'pr'
     uses: ./.github/workflows/ra-jit-platform.yaml
     with:
       platform: macos-arm64
@@ -188,9 +199,10 @@ jobs:
     needs: ci
     if: always() && github.event_name == 'schedule' && needs.ci.result != 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       issues: write
+      actions: read
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/nightly-issue
