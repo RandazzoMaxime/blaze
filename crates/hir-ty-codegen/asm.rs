@@ -701,9 +701,10 @@ pub(super) fn inline(
         }
     }
     // An instruction that names a high byte register (`ah`, `{x:h}`) cannot encode one that
-    // needs a REX prefix (`sil`, `r8b`): LLVM 20's assembler refuses `mov ah, sil`, and LLVM 23's
-    // encodes `spl` in its place. So in such a block a `reg_byte` is one of a, b, c and d (`Q`),
-    // as rustc's happens to get by the allocation it is given; elsewhere any byte register (`q`).
+    // needs a REX prefix (`sil`, `r8b`), and LLVM's assembler refuses `mov ah, sil`. rustc's
+    // `q` leaves it to the allocation: a block that gets `sil` fails to build, one that gets
+    // `cl` builds. So in such a block a `reg_byte` is one of a, b, c and d (`Q`), which always
+    // encodes; elsewhere any byte register (`q`), as rustc's.
     let high_byte = arch == Arch::X86_64
         && (template.iter().any(|piece| match piece {
             AsmPiece::Operand { modifier, .. } => *modifier == Some('h'),

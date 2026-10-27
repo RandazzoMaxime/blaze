@@ -789,10 +789,8 @@ fn unshow<'ctx>(module: &Module<'ctx>, shown: &FxHashMap<u32, FunctionValue<'ctx
 }
 
 /// The object file LLVM's assembler makes of `text`, which is assembly in the syntax
-/// `asm!` is written in.
-///
-/// FIXME: assembly LLVM rejects ends the process: its default diagnostic handler exits on an
-/// error, and inkwell has no way to set another.
+/// `asm!` is written in. Assembly LLVM rejects is an error naming what it said
+/// ([`diagnosed`]).
 pub(super) fn assemble(text: &str) -> Result<Vec<u8>, String> {
     Machine::with(Optimization::NONE, |context, machine| {
         let module = context.create_module("ra_jit_asm");
@@ -917,6 +915,47 @@ impl Optimization {
 /// machine holds on to things of the last context it compiled a module of: the instruction
 /// selector of AArch64 keeps the source location of the last instruction it saw, and lets
 /// go of it at the next function, by when a context of that one module would be gone.
+thread_local! {
+    /// The errors LLVM diagnosed in the context of this thread's [`Machine`] since it was
+    /// last asked to work.
+    static DIAGNOSED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A context whose diagnostics come to [`DIAGNOSED`]. Through the C API, LLVM 23's own
+/// handler prints an error and goes on: `mov ah, sil` in an `asm!` block is printed, left
+/// out of the object, and `LLVMTargetMachineEmitToMemoryBuffer` succeeds with the rest.
+fn diagnosed() -> Context {
+    extern "C" fn handle(
+        info: inkwell::llvm_sys::prelude::LLVMDiagnosticInfoRef,
+        _: *mut core::ffi::c_void,
+    ) {
+        use inkwell::llvm_sys::{LLVMDiagnosticSeverity, core as llvm};
+        // SAFETY: LLVM passes a diagnostic that lives through the call; the description is
+        // a message of its own that is disposed of here.
+        let (severity, text) = unsafe {
+            let message = llvm::LLVMGetDiagInfoDescription(info);
+            let text = std::ffi::CStr::from_ptr(message).to_string_lossy().into_owned();
+            llvm::LLVMDisposeMessage(message);
+            (llvm::LLVMGetDiagInfoSeverity(info), text)
+        };
+        match severity {
+            LLVMDiagnosticSeverity::LLVMDSError => DIAGNOSED.with_borrow_mut(|it| it.push(text)),
+            LLVMDiagnosticSeverity::LLVMDSWarning => eprintln!("LLVM warning: {text}"),
+            LLVMDiagnosticSeverity::LLVMDSRemark | LLVMDiagnosticSeverity::LLVMDSNote => {}
+        }
+    }
+    let context = Context::create();
+    // SAFETY: the handler is a function for the life of the process and takes no context.
+    unsafe {
+        inkwell::llvm_sys::core::LLVMContextSetDiagnosticHandler(
+            context.raw(),
+            Some(handle),
+            core::ptr::null_mut(),
+        );
+    }
+    context
+}
+
 #[derive(Default)]
 struct Machine {
     // Before the context, which has to outlive them.
@@ -947,7 +986,16 @@ impl Machine {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(slot) => slot.insert(Self::create(optimization)?),
             };
-            work(this.context.get_or_insert_with(Context::create), machine)
+            let context = this.context.get_or_insert_with(diagnosed);
+            DIAGNOSED.with_borrow_mut(Vec::clear);
+            let done = work(context, machine);
+            // An error LLVM diagnosed leaves its output wrong, not refused: the assembler
+            // drops an instruction it cannot encode and the object is written all the same.
+            let errors = DIAGNOSED.with_borrow_mut(core::mem::take);
+            match done {
+                Ok(_) if !errors.is_empty() => Err(Unhandled::Llvm(errors.join("; "))),
+                done => done,
+            }
         })
     }
 
@@ -1509,6 +1557,15 @@ attributes #0 = { alwaysinline }
         let kept: Vec<u32> = unit.kept.iter().map(|it| it.0).collect();
         assert_eq!(kept, [imports[0].id]);
         assert!(unit.kept[0].1.as_ref().is_ok_and(|it| !it.bytes.is_empty()));
+    }
+
+    /// LLVM's assembler leaves out an instruction it cannot encode and writes the object all
+    /// the same; that is an error here, not code missing an instruction.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn assembly_llvm_cannot_encode_is_an_error() {
+        let refused = assemble("mov ah, sil\nret").unwrap_err();
+        assert!(refused.contains("can't encode 'ah'"), "{refused}");
     }
 
     #[test]
