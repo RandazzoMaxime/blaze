@@ -101,6 +101,7 @@ pub use backend::{Backend, builds_edits, links_own, sections_of_their_own};
 mod cached;
 mod debuginfo;
 pub use debuginfo::Sidecar;
+mod f16_f128;
 mod float_pair;
 mod fncache;
 pub use fncache::{AlwaysRun, Reach, tests_reach};
@@ -3123,7 +3124,7 @@ impl VariadicRegisters {
                     self.floats += 1;
                     continue;
                 }
-                ty if ty.is_int() || ty.is_float() && ty.bytes() <= 8 => 8,
+                ty if ty.is_int() || ty == types::F32 || ty == types::F64 => 8,
                 ty => unsupported!("a variadic function with a named {ty}"),
             };
             self.stack = self.stack.next_multiple_of(on_stack) + on_stack;
@@ -7944,6 +7945,16 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             Primitive::Pointer(_) => AbiScalar { ty: ptr(), signed: false },
             Primitive::Float(rustc_abi::Float::F32) => AbiScalar { ty: types::F32, signed: true },
             Primitive::Float(rustc_abi::Float::F64) => AbiScalar { ty: types::F64, signed: true },
+            // `f16b` has no arithmetic in Rust, only its bits moved, and LLVM passes it where
+            // it passes an `f16`: in Cranelift's `F16` it is a 16-bit value of a float register.
+            Primitive::Float(rustc_abi::Float::F16 | rustc_abi::Float::F16B)
+                if f16_f128::soft_floats(self.cg.target) =>
+            {
+                AbiScalar { ty: types::F16, signed: true }
+            }
+            Primitive::Float(rustc_abi::Float::F128) if f16_f128::soft_floats(self.cg.target) => {
+                AbiScalar { ty: types::F128, signed: true }
+            }
             Primitive::Float(_) => unsupported!("f16, f16b, f128 and ppcf128"),
         })
     }
@@ -8385,6 +8396,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             && leaves.len() <= 4
         {
             let unit = self.scalar(first)?.ty;
+            if f16_f128::soft(unit) {
+                unsupported!("a homogeneous aggregate of {unit} in the C ABI");
+            }
             let step = u64::from(unit.bytes());
             let packed = leaves.iter().zip(0..).all(|(&(offset, scalar), index)| {
                 offset == index * step && scalar.primitive() == first.primitive()
@@ -8860,6 +8874,7 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
         match ty {
             types::F32 => self.builder.ins().f32const(0.0),
             types::F64 => self.builder.ins().f64const(0.0),
+            ty if f16_f128::soft(ty) => self.soft_zero(ty),
             _ => self.builder.ins().iconst(ty, 0),
         }
     }
@@ -11076,6 +11091,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let value = match op {
                     UnOp::Not if is_bool => self.builder.ins().bxor_imm(value, 1),
                     UnOp::Not => self.builder.ins().bnot(value),
+                    UnOp::Neg if f16_f128::soft(self.builder.func.dfg.value_type(value)) => {
+                        self.soft_neg(value)
+                    }
                     UnOp::Neg if self.builder.func.dfg.value_type(value).is_float() => {
                         self.builder.ins().fneg(value)
                     }
@@ -11485,6 +11503,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             None => self.builder.ins().load(r_scalar.ty, MEM, r_addr, 0),
         };
         let signed = scalar.signed;
+        if f16_f128::soft(scalar.ty) {
+            return Ok((self.soft_binary_op(op, l, r)?, None));
+        }
         if scalar.ty.is_float() {
             return Ok((self.float_binary_op(op, l, r)?, None));
         }
@@ -11593,8 +11614,12 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
 
     /// `as` between a float and an integer or another float.
     fn float_cast(&mut self, value: Value, from: AbiScalar, to: AbiScalar) -> Result<Value> {
+        if f16_f128::soft(from.ty) || f16_f128::soft(to.ty) {
+            return self.soft_cast(value, from, to);
+        }
         if from.ty == types::I128 || to.ty == types::I128 {
-            // compiler-builtins' conversions, which saturate and turn NaN into zero as `as` does.
+            // compiler-builtins' conversions. What one of a float does out of range differs
+            // between it and libgcc's, so the bounds are checked around it, as LLVM does.
             let name = match (from.ty, from.signed, to.ty, to.signed) {
                 (types::F32, _, _, true) => "__fixsfti",
                 (types::F32, _, _, false) => "__fixunssfti",
@@ -11606,7 +11631,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 (_, false, types::F64, _) => "__floatuntidf",
                 _ => unsupported!("cast from {} to {}", from.ty, to.ty),
             };
-            return self.builtin(name, &[from.ty], to.ty, &[value]);
+            let converted = self.builtin(name, &[from.ty], to.ty, &[value])?;
+            if !from.ty.is_float() {
+                return Ok(converted);
+            }
+            return Ok(self.saturate_wide(value, from.ty, converted, to.signed));
         }
         let ins = self.builder.ins();
         Ok(match (from.ty.is_float(), to.ty.is_float()) {
@@ -11654,6 +11683,40 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
             }
             (false, false) => unreachable!("float cast between integers"),
         })
+    }
+
+    /// What `as` makes of the `f32` or `f64` `value` as a 128-bit integer, given what a
+    /// conversion that is right in range made of it: the least or greatest integer below or
+    /// above the range, and zero for NaN.
+    fn saturate_wide(&mut self, value: Value, ty: Type, converted: Value, signed: bool) -> Value {
+        let single = ty == types::F32;
+        // The least value in range, and the greatest float that is in range.
+        let (low, high): (u64, u64) = match (single, signed) {
+            (true, true) => (0xff00_0000, 0x7eff_ffff),
+            (true, false) => (0, 0x7f7f_ffff),
+            (false, true) => (0xc7e0_0000_0000_0000, 0x47df_ffff_ffff_ffff),
+            (false, false) => (0, 0x47ef_ffff_ffff_ffff),
+        };
+        let [low, high] = [low, high].map(|bits| match single {
+            true => self.builder.ins().f32const(f32::from_bits(bits as u32)),
+            false => self.builder.ins().f64const(f64::from_bits(bits)),
+        });
+        let (min, max) = match signed {
+            true => (1u128 << 127, (1u128 << 127) - 1),
+            false => (0, u128::MAX),
+        };
+        let (min, max) = (self.iconst(types::I128, min), self.iconst(types::I128, max));
+        // NaN is not in range either, and is below it for an unsigned integer.
+        let in_low = self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, value, low);
+        let converted = self.builder.ins().select(in_low, converted, min);
+        let above = self.builder.ins().fcmp(FloatCC::GreaterThan, value, high);
+        let converted = self.builder.ins().select(above, max, converted);
+        if !signed {
+            return converted;
+        }
+        let ordered = self.builder.ins().fcmp(FloatCC::Ordered, value, value);
+        let zero = self.iconst(types::I128, 0);
+        self.builder.ins().select(ordered, converted, zero)
     }
 
     /// Whether arithmetic of the body being compiled panics when it overflows.
@@ -13862,6 +13925,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 // A 128-bit integer is in two registers that start at an even one, or in
                 // sixteen bytes of the stack at a multiple of sixteen.
                 let wide = scalar.ty == types::I128 && arch == Arch::Aarch64;
+                if f16_f128::soft(scalar.ty) {
+                    unsupported!("`va_arg` of {dst_ty:?}");
+                }
                 if scalar.ty.bytes() > 8 && !wide {
                     unsupported!("`va_arg` of {dst_ty:?}");
                 }
@@ -14636,7 +14702,13 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 | "round_ties_even_f32"
                 | "round_ties_even_f64"
                 | "roundf32"
-                | "roundf64",
+                | "roundf64"
+                | "sqrt"
+                | "floor"
+                | "ceil"
+                | "trunc"
+                | "round_ties_even"
+                | "round",
                 [arg],
             ) => {
                 let (value, scalar) = self.load_scalar(arg)?;
@@ -14644,6 +14716,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     unsupported!("intrinsic `{name}` on {:?}", scalar.ty);
                 }
                 let op = name.trim_end_matches("f32").trim_end_matches("f64").trim_end_matches('_');
+                if f16_f128::soft(scalar.ty) {
+                    let value = self.soft_unary(op, value)?;
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let value = match op {
                     "fabs" => self.builder.ins().fabs(value),
                     "sqrt" => self.builder.ins().sqrt(value),
@@ -14658,25 +14735,47 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 };
                 self.builder.ins().store(MEM, value, dst, 0);
             }
-            ("powif32" | "powif64", [base, power]) => {
+            ("powif32" | "powif64" | "powi", [base, power]) => {
                 let (base, scalar) = self.load_scalar(base)?;
                 let (power, _) = self.load_scalar(power)?;
+                if f16_f128::soft(scalar.ty) {
+                    let value = self.soft_powi(base, power)?;
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let builtin = if scalar.ty == types::F32 { "__powisf2" } else { "__powidf2" };
                 let value =
                     self.builtin(builtin, &[scalar.ty, types::I32], scalar.ty, &[base, power])?;
                 self.builder.ins().store(MEM, value, dst, 0);
             }
             (
-                "copysignf32" | "copysignf64" | "minnumf32" | "minnumf64" | "maxnumf32"
-                | "maxnumf64" | "powf32" | "powf64" | "fadd_fast" | "fsub_fast" | "fmul_fast"
-                | "fdiv_fast" | "frem_fast" | "fadd_algebraic" | "fsub_algebraic"
-                | "fmul_algebraic" | "fdiv_algebraic" | "frem_algebraic",
+                "copysignf32" | "copysignf64" | "copysignf16" | "copysignf128" | "minnumf32"
+                | "minnumf64" | "maxnumf32" | "maxnumf64" | "powf32" | "powf64" | "fadd_fast"
+                | "fsub_fast" | "fmul_fast" | "fdiv_fast" | "frem_fast" | "fadd_algebraic"
+                | "fsub_algebraic" | "fmul_algebraic" | "fdiv_algebraic" | "frem_algebraic",
                 [a, b],
             ) => {
                 let (l, scalar) = self.load_scalar(a)?;
                 let (r, _) = self.load_scalar(b)?;
                 if !scalar.ty.is_float() {
                     unsupported!("intrinsic `{name}` on {:?}", scalar.ty);
+                }
+                if f16_f128::soft(scalar.ty) {
+                    let op = match name {
+                        "copysignf16" | "copysignf128" => None,
+                        "fadd_fast" | "fadd_algebraic" => Some(BinOp::Add),
+                        "fsub_fast" | "fsub_algebraic" => Some(BinOp::Sub),
+                        "fmul_fast" | "fmul_algebraic" => Some(BinOp::Mul),
+                        "fdiv_fast" | "fdiv_algebraic" => Some(BinOp::Div),
+                        "frem_fast" | "frem_algebraic" => Some(BinOp::Rem),
+                        _ => unsupported!("intrinsic `{name}` on {:?}", scalar.ty),
+                    };
+                    let value = match op {
+                        Some(op) => self.soft_binary_op(&op, l, r)?,
+                        None => self.soft_copysign(l, r),
+                    };
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
                 }
                 let single = scalar.ty == types::F32;
                 let value = match name {
@@ -14717,10 +14816,15 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                     self.builtin(name, &[float.ty, types::I32], float.ty, &[base, power])?;
                 self.builder.ins().store(MEM, value, dst, 0);
             }
-            ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64", [a, b, c]) => {
+            ("fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" | "fma", [a, b, c]) => {
                 let (a, scalar) = self.load_scalar(a)?;
                 let (b, _) = self.load_scalar(b)?;
                 let (c, _) = self.load_scalar(c)?;
+                if f16_f128::soft(scalar.ty) {
+                    let value = self.soft_fma(a, b, c)?;
+                    self.builder.ins().store(MEM, value, dst, 0);
+                    return Ok(Intrinsic::Inline);
+                }
                 let value = if name.starts_with("fmuladd") {
                     let product = self.builder.ins().fmul(a, b);
                     self.builder.ins().fadd(product, c)
@@ -15699,7 +15803,11 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
     fn simd_lanes(&self, ty: Ty<'db>) -> Result<(AbiScalar, u64)> {
         match self.layout(ty)?.backend_repr {
             BackendRepr::SimdVector { element, count } => {
-                Ok((self.scalar(element)?, count.as_u64()))
+                let lane = self.scalar(element)?;
+                if f16_f128::soft(lane.ty) {
+                    unsupported!("vector operation on lanes of {}", lane.ty);
+                }
+                Ok((lane, count.as_u64()))
             }
             _ => unsupported!("vector operation on {ty:?}"),
         }
@@ -16408,7 +16516,9 @@ impl<'cx, 'db> FunctionCx<'cx, 'db> {
                 let scalar = self.scalar_of(ty)?;
                 let l = self.builder.ins().load(scalar.ty, MEM, l, 0);
                 let r = self.builder.ins().load(scalar.ty, MEM, r, 0);
-                let same = if scalar.ty.is_float() {
+                let same = if f16_f128::soft(scalar.ty) {
+                    self.soft_binary_op(&BinOp::Eq, l, r)?
+                } else if scalar.ty.is_float() {
                     self.builder.ins().fcmp(FloatCC::Equal, l, r)
                 } else {
                     self.builder.ins().icmp(IntCC::Equal, l, r)
