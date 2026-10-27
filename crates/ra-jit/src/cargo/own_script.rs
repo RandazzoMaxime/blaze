@@ -353,8 +353,7 @@ fn add(
     };
     let parent = path.parent().ok_or("a library without a directory")?;
     let unit = &super::layout::unit_of_file(stem, parent);
-    let dir = Record::dir_for(parent);
-    let record = Record::described(&dir, unit).ok_or_else(|| {
+    let (record, _) = Record::described_or_seeded(parent, unit).ok_or_else(|| {
         format!("`{unit}`, which it links, was compiled before ra-jit described it")
     })?;
     let asked = Asked { args: &record.args, cwd: &record.cwd };

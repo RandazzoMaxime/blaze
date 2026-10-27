@@ -4,9 +4,9 @@
 //! into a library ([`SERVER`], `vendor/proc-macro-srv`), the wrapper describes the proc macro
 //! and the libraries it links as it does a build script (`own_script.rs`), and ra-jit links it
 //! as a shared library where rustc would have put it, with the dep-info cargo reads. The
-//! load expands with it by that server. Cargo's own builds never read that directory; a crate
-//! rustc compiles there that links such a library has rustc compile the proc macro first,
-//! over ra-jit's library, as rustc loads only its own.
+//! load expands with it by that server. Cargo's own builds never read that directory, and
+//! nothing there is rustc's (`wrapper.rs`, `for_load`): the libraries a proc macro links are
+//! only described, and a proc macro without a server fails the load.
 
 use std::{
     collections::BTreeMap,
@@ -16,7 +16,6 @@ use std::{
 };
 
 use anyhow::Context as _;
-use paths::AbsPathBuf;
 use sha2::{Digest as _, Sha256};
 
 use super::{
@@ -36,10 +35,10 @@ pub(crate) const SHIPPED: &str = "blaze-proc-macro-srv";
 /// The variable ra-jit sets for the cargo of a load into its own target directory.
 pub(crate) const OWN_TARGET: &str = "RA_JIT_OWN_TARGET";
 
-/// Whether a proc macro cargo asks the wrapper for is ra-jit's to compile. The load names the
-/// server it found ([`server`]) to its cargo, so the wrapper reads only that it is named.
-pub(crate) fn wanted() -> bool {
-    std::env::var_os(SERVER).is_some() && std::env::var_os(OWN_TARGET).is_some()
+/// Whether [`SERVER`] turns ra-jit's proc macros off, `0` or `off`, as the harness's reference
+/// builds do: a load's cargo is then told so, and rustc builds what it asks for.
+pub(crate) fn turned_off() -> bool {
+    matches!(std::env::var_os(SERVER).as_deref().and_then(OsStr::to_str), Some("0" | "off"))
 }
 
 /// The server that expands with the libraries ra-jit links, as [`SERVER`] says, relative to
@@ -63,12 +62,10 @@ fn find() -> Option<PathBuf> {
     if shipped.is_file() {
         return Some(shipped);
     }
-    // A build of ra-jit that has no server, as one from crates.io, is as it was before.
+    // A build of ra-jit that has no server, as one from crates.io, links no proc macro: a load
+    // into its own target directory that has one fails.
     if named.is_some() {
-        say::fallback(
-            &format!("no proc-macro server is beside {}", exe.display()),
-            "rustc compiles the proc macros and the toolchain's server expands them",
-        );
+        eprintln!("warning: no proc-macro server is beside {}", exe.display());
     }
     None
 }
@@ -153,17 +150,7 @@ fn library_of(sysroot: &Path, library: &Path) -> Result<Option<PathBuf>, String>
     let stem = stem.ok_or("not a library")?;
     let dir = library.parent().ok_or("a library without a directory")?;
     let unit = &super::layout::unit_of_file(stem, dir);
-    // One ra-jit's own target directory was seeded with is recorded in cargo's.
-    let parts: Vec<_> = dir.components().collect();
-    let cargos = parts.iter().rposition(|it| it.as_os_str() == "rust-analyzer").map(|at| {
-        let parts = parts.iter().enumerate().filter(|(it, _)| *it != at);
-        parts.map(|(_, it)| it).collect::<PathBuf>()
-    });
-    let found = [Some(dir.to_owned()), cargos].into_iter().flatten().find_map(|dir| {
-        let records = Record::dir_for(&dir);
-        Some((Record::described(&records, unit)?, records))
-    });
-    let Some((record, records)) = found else { return Ok(None) };
+    let Some((record, records)) = Record::described_or_seeded(dir, unit) else { return Ok(None) };
     let dir = records.join(unit).join(OWN);
     let extra = record.codegen("extra-filename").unwrap_or_default();
     let made = Made {
@@ -333,56 +320,4 @@ pub(crate) fn made(record: &Record) -> Option<Made<'_>> {
         exe: out_dir.join(format!("{prefix}{name}{extra}{suffix}")),
         dep_info: out_dir.join(format!("{name}{extra}.d")),
     })
-}
-
-/// Has rustc compile, over ra-jit's library, each proc macro ra-jit linked that the crate
-/// cargo asked rustc for with `args`, in `cwd`, links. `rustc` is the compiler cargo named.
-pub(crate) fn rustc_first(rustc: &OsStr, args: &[String], cwd: &Path) -> anyhow::Result<()> {
-    let externs = args.windows(2).filter(|it| it[0] == "--extern").map(|it| it[1].as_str());
-    let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
-    for (_, path) in externs.filter_map(|it| it.split_once('=')) {
-        let library = cwd.join(path);
-        let Some(unit) = Record::id_of_file(&library, prefix, suffix) else { continue };
-        let unit = &unit;
-        let Some(listed) = library.to_str().and_then(|it| AbsPathBuf::try_from(it).ok()) else {
-            continue;
-        };
-        let listed = listed.as_path();
-        if !load_cargo::is_listed(listed) {
-            continue;
-        }
-        let records =
-            library.parent().map(Record::dir_for).context("a library without a directory")?;
-        let record = Record::described(&records, unit).with_context(|| {
-            format!("ra-jit linked {} and described it nowhere", library.display())
-        })?;
-        // Every crate that links it waits here for the one that has rustc compile it.
-        let lock = std::fs::File::create(records.join(unit).join("rustc.lock"))?;
-        lock.lock()?;
-        if !load_cargo::is_listed(listed) {
-            continue;
-        }
-        // Kept beside its record, for `RA_JIT_PROC_MACRO_LIBS` to compare with rustc's.
-        let kept = records.join(unit).join(library.file_name().context("a library unnamed")?);
-        std::fs::copy(&library, &kept)
-            .with_context(|| format!("copying {} to {}", library.display(), kept.display()))?;
-        let mut compile = super::wrapper::rustc_of(rustc);
-        for (name, _) in std::env::vars().filter(|(name, _)| own_script::read_by_crates(name)) {
-            compile.env_remove(name);
-        }
-        compile.args(&record.args).envs(&record.crate_env).current_dir(&record.cwd);
-        let compiled = compile.env_remove(crate::answers::ONLY_ASKS).output()?;
-        anyhow::ensure!(
-            compiled.status.success(),
-            "rustc did not compile the proc macro `{}`: {}",
-            record.crate_name,
-            String::from_utf8_lossy(&compiled.stderr).trim_end()
-        );
-        let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-        say::fallback(
-            &format!("`{package}` is rustc's and links the proc macro `{}`", record.crate_name),
-            "rustc compiles the proc macro too",
-        );
-    }
-    Ok(())
 }

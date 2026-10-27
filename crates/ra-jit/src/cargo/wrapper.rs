@@ -200,10 +200,8 @@ pub(crate) fn command(mut args: impl Iterator<Item = OsString>) -> anyhow::Resul
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// The compiler cargo named, `rustc`, for a crate cargo asked it for: run then, or, for a
-/// proc macro ra-jit linked, when a crate of rustc's that links it is compiled
-/// ([`own_macro::rustc_first`]).
-pub(crate) fn rustc_of(rustc: &OsStr) -> Command {
+/// The compiler cargo named, `rustc`, for a crate cargo asked it for.
+fn rustc_of(rustc: &OsStr) -> Command {
     Command::new(rustc)
 }
 
@@ -231,47 +229,65 @@ fn outside(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow
     Ok(status.code().unwrap_or(1))
 }
 
-/// Builds a crate for rust-analyzer's `cargo check --compile-time-deps` as `compiler`, rustc,
-/// does without ra-jit, but a proc macro when it is ra-jit's ([`own_macro::wanted`]): the
-/// libraries rustc compiles are then described for the proc macros that link them. The code
-/// to end with.
-fn for_load(mut compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
-    let unit = Unit::of(args);
-    if !own_macro::wanted() {
-        let status = compiler.status()?;
-        stand_in_front_of_rustcs(unit.as_ref(), status)?;
-        return Ok(status.code().unwrap_or(1));
+/// Builds a crate for rust-analyzer's `cargo check --compile-time-deps`. Into ra-jit's own
+/// target directory, which cargo's builds never read ([`own_macro::OWN_TARGET`]), nothing is
+/// rustc's: a build script is compiled and linked by ra-jit as [`outside`] does one, a proc
+/// macro is linked by ra-jit for its server ([`own_macro`]), and a library is only described
+/// for those that link it ([`Unit::described_only`]), since every crate that links one there
+/// is ra-jit's and is compiled from the descriptions. One ra-jit cannot build fails the load
+/// with why. Into cargo's target directory, or with ra-jit's proc macros turned off for the
+/// harness's reference builds ([`own_macro::turned_off`]), `compiler`, rustc, builds it as
+/// without ra-jit. The code to end with.
+fn for_load(compiler: Command, rustc: &OsString, args: &[OsString]) -> anyhow::Result<i32> {
+    let own = std::env::var_os(own_macro::OWN_TARGET).is_some() && !own_macro::turned_off();
+    let unit = match Unit::of(args) {
+        Some(unit) if own => unit,
+        unit => return by_rustc(compiler, unit.as_ref()),
+    };
+    let record = unit.as_record(stamp_now(), Vec::new(), None);
+    let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    let failed = |what: String, why: String| {
+        anyhow::anyhow!("ra-jit did not build {what} of `{package}` for the load: {why}")
+    };
+    if unit.script {
+        let dir = unit.records.join(&unit.id);
+        unit.by_ra_jit(rustc, &dir).map_err(|why| failed("the build script".to_owned(), why))?;
+        return Ok(0);
     }
-    let record = unit.as_ref().map(|it| it.as_record(stamp_now(), Vec::new(), None));
-    if let Some((unit, record)) =
-        unit.as_ref().zip(record.as_ref()).filter(|(_, it)| it.is_proc_macro())
-    {
-        let built = own_macro::made(record).ok_or("cargo names no place for it".to_owned());
-        let dir = unit.records.join(&unit.id).join(record.stamp.to_string());
-        let built = built.and_then(|made| {
-            own_script::compile_as(rustc, &unit.args, &unit.cwd, &unit.source, &made, &dir)
-        });
-        match built {
-            Ok(()) => {
-                record.write_described(&unit.records)?;
-                return Ok(0);
-            }
-            Err(why) => {
-                let then = format!("rustc compiles the proc macro `{}`", unit.crate_name);
-                say::fallback(&why, &then);
-            }
+    let named = || format!("`{}`", unit.crate_name);
+    if record.is_proc_macro() {
+        if std::env::var_os(own_macro::SERVER).is_none() {
+            let why = format!(
+                "no proc-macro server is beside ra-jit ({}), and ra-jit links proc macros only \
+                 for its own",
+                own_macro::SHIPPED
+            );
+            return Err(failed(format!("the proc macro {}", named()), why));
         }
-    }
-    let text: Vec<String> = args.iter().filter_map(|it| it.to_str().map(str::to_owned)).collect();
-    own_macro::rustc_first(rustc, &text, &std::env::current_dir()?)?;
-    let status = compiler.status()?;
-    stand_in_front_of_rustcs(unit.as_ref(), status)?;
-    if let Some((unit, record)) = unit.as_ref().zip(record.as_ref())
-        && status.success()
-        && (record.is_rlib() || record.runs_in_build())
-    {
+        let built = own_macro::made(&record).ok_or("cargo names no place for it".to_owned());
+        let dir = unit.records.join(&unit.id).join(record.stamp.to_string());
+        built
+            .and_then(|made| {
+                own_script::compile_as(rustc, &unit.args, &unit.cwd, &unit.source, &made, &dir)
+            })
+            .map_err(|why| failed(format!("the proc macro {}", named()), why))?;
         record.write_described(&unit.records)?;
+        return Ok(0);
     }
+    if !record.is_rlib() {
+        let why = "it is neither a library, a proc macro nor a build script".to_owned();
+        return Err(failed(named(), why));
+    }
+    record.write_described(&unit.records)?;
+    unit.described_only(&record).map_err(|why| failed(named(), format!("{why:#}")))?;
+    Ok(0)
+}
+
+/// Has `compiler`, rustc, build `unit` as cargo asked, which runs as one of ra-jit's when it
+/// is a build script ([`stand_in_front_of_rustcs`]). The code to end with.
+fn by_rustc(mut compiler: Command, unit: Option<&Unit>) -> anyhow::Result<i32> {
+    let status = compiler.status()?;
+    stand_in_front_of_rustcs(unit, status)?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -513,6 +529,58 @@ impl Unit {
         self.record(stamp, &copies, None, &self.source).map_err(|it| format!("{it:#}"))
     }
 
+    /// Gives cargo what rustc would have written of the library `record` is of, which the
+    /// load reads nothing of but its record: an empty file for each it was to emit, and the
+    /// dep-info, which names every Rust file of the crate's directory (no package nested in
+    /// it, nothing hidden, no `target`), so that cargo builds the crate again, and so the
+    /// scripts and proc macros that link it, when one of those changes. Each is written in
+    /// place of what is there, which may be a link to cargo's own (`seed_own_target`).
+    fn described_only(&self, record: &Record) -> anyhow::Result<()> {
+        let out_dir = record.out_dir().context("cargo names no `--out-dir`")?;
+        let stem =
+            format!("{}{}", self.crate_name, record.codegen("extra-filename").unwrap_or_default());
+        let emits = self.args.iter().filter_map(|it| it.strip_prefix("--emit="));
+        let mut outputs = Vec::new();
+        for kind in emits.flat_map(|it| it.split(',')) {
+            match kind {
+                "link" => outputs.push(out_dir.join(format!("lib{stem}.rlib"))),
+                "metadata" => outputs.push(out_dir.join(format!("lib{stem}.rmeta"))),
+                "dep-info" => {}
+                other => {
+                    anyhow::bail!("cargo asks for `--emit={other}`, which ra-jit does not write")
+                }
+            }
+        }
+        let info = out_dir.join(format!("{stem}.d"));
+        let root = self.source.parent().context("a crate root without a directory")?;
+        let manifest = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+        let mut files = vec![self.source.clone()];
+        rust_files(root, manifest.as_deref(), &mut files)
+            .with_context(|| format!("reading {}", root.display()))?;
+        files.sort();
+        files.dedup();
+        let files: Vec<String> =
+            files.iter().map(|it| dep_info::escaped(&it.display().to_string())).collect();
+        let mut text = String::new();
+        for target in outputs.iter().chain([&info]) {
+            let target = dep_info::escaped(&target.display().to_string());
+            text.push_str(&format!("{target}: {}\n\n", files.join(" ")));
+        }
+        for file in &files {
+            text.push_str(&format!("{file}:\n"));
+        }
+        let write = |path: &Path, bytes: &[u8]| {
+            let new = path.with_extension(format!("{}.new", std::process::id()));
+            std::fs::write(&new, bytes)
+                .and_then(|()| std::fs::rename(&new, path))
+                .with_context(|| format!("writing {}", path.display()))
+        };
+        for output in &outputs {
+            write(output, b"")?;
+        }
+        write(&info, text.as_bytes())
+    }
+
     /// Says in one line why rustc compiles the build script and not ra-jit.
     fn script_to_rustc(&self, why: &str) {
         let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
@@ -728,6 +796,29 @@ impl Unit {
         }
         self.as_record(stamp, copies, link_line).write(&self.records)
     }
+}
+
+/// Adds to `files` every Rust file below `dir` but those of a package nested in it (a
+/// directory with a manifest that is not `manifest`), of a hidden directory or of `target`.
+fn rust_files(
+    dir: &Path,
+    manifest: Option<&Path>,
+    files: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if entry.file_type()?.is_dir() {
+            let nested = path.join("Cargo.toml").is_file() && Some(&*path) != manifest;
+            if !(name.to_string_lossy().starts_with('.') || name == "target" || nested) {
+                rust_files(&path, manifest, files)?;
+            }
+        } else if path.extension().is_some_and(|it| it == "rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// The key of the build whose daemon built the program whose unit is recorded in `dir`, when

@@ -7536,7 +7536,10 @@ fn cargo_config(args: &Args) -> CargoConfig {
             .chain(
                 args.own_target
                     .then(|| {
-                        let server = cargo::own_macro::server().map(|it| it.display().to_string());
+                        // Turned off, the wrapper is told so; with none found, it is told none.
+                        let server = cargo::own_macro::server()
+                            .map(|it| it.display().to_string())
+                            .or_else(|| cargo::own_macro::turned_off().then(|| "0".to_owned()));
                         [
                             (cargo::own_macro::OWN_TARGET.to_owned(), Some("1".to_owned())),
                             (cargo::own_macro::SERVER.to_owned(), server),

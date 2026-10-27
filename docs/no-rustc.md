@@ -252,7 +252,7 @@ Paths are under `crates/`; line numbers are of 41e7906192.
 | `ra-jit/src/main.rs:2261` `ProjectWorkspace::load` | `cargo metadata`, plus rustc's `-vV`, `--print sysroot`, `--print cfg`, `--print target-spec-json` through `cargo rustc --print` (`vendor/rust-analyzer/crates/project-model/src/toolchain_info/`) | every load: the daemon's workers and spares, and each doctest process; since B, ra-jit answers them (`answers/own.rs`) |
 | `ra-jit/src/main.rs:2272` | asks rustc for the target triple | every load |
 | `ra-jit/src/plan.rs:475` | `cargo build --unit-graph`, which asks rustc about the target | every load, and every doctest run per library |
-| `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: rustc compiles every build script and proc macro and their dependencies, and the scripts run | a load that is neither beside nor after a cargo build of the workspace (a worker after one reads what cargo said, `cargo/state.rs` `kept_said`), whose target directory does not have them yet; after an edit to a proc macro or build script |
+| `ra-jit/src/main.rs:2314`, `ra-jit/src/inputs.rs:282` `run_build_scripts` | rust-analyzer's `cargo check --compile-time-deps`: into ra-jit's own target directory (every load of `cargo ra-jit` and the daemon) nothing is rustc's since 2026-10-27 (J, below): ra-jit links the scripts and proc macros and only describes their libraries; into cargo's (a load without `--own-target`) rustc compiles them all; the scripts run | a load that is neither beside nor after a cargo build of the workspace (a worker after one reads what cargo said, `cargo/state.rs` `kept_said`), whose target directory does not have them yet; after an edit to a proc macro or build script |
 | `ra-jit/src/main.rs:5287`, `ra-jit/src/borrowck.rs:113` `ProcMacroServerChoice::Sysroot` | expands with the toolchain's `rust-analyzer-proc-macro-srv` loading rustc's proc-macro libraries | every load that has a proc macro |
 | `ra-jit/src/cargo/state.rs` `other_toolchain` | `rustc --version`, `--print=sysroot` | every client command; its `cargo metadata --no-deps` is blaze-manifest's reading since 2026-10-25 ([resolve.md](resolve.md)) |
 
@@ -1034,6 +1034,19 @@ Where J stands (2026-10-24):
   same, and the programs print the same. Left: `pest_consume_macros` (nushell, 12 calls),
   which ra-jit cannot compile
   ([#327](https://github.com/indexable-inc/blaze/issues/327)).
+- Nothing of a load is rustc's (2026-10-27, `no-rustc-load-1027`): into ra-jit's own target
+  directory the wrapper (`cargo/wrapper.rs`, `for_load`) has ra-jit compile and link every
+  build script (I) and every proc macro, and a library is only described for those that link
+  it (`crate.json`): cargo is given empty files where rustc would have written the library and
+  its metadata, and a dep-info that names every Rust file of the crate's directory, so that it
+  builds again what links the crate when one changes. Every crate that links a library there
+  is ra-jit's and compiled from the descriptions, so nothing reads those files, and no proc
+  macro is compiled again by rustc. A script or proc macro ra-jit cannot build, or a proc
+  macro with no server beside ra-jit, fails the load with why. A crate cargo built before the
+  directory was seeded from it is described from cargo's records. `RA_JIT_PROC_MACRO_SERVER=0`
+  is kept for `macroserver.py`'s reference build alone, which rustc builds whole. On blaze's
+  own release build this took the load from about 100 compiles by rustc (54 scripts, 28
+  libraries, 18 proc macros compiled again) to none.
 - Shipped (2026-10-25): on Linux the release workflow's ra-jit builds the server
   (`build_release.py --server`, `--exe` with `proc_macro` compiled into it) into the archive
   as `blaze-proc-macro-srv`, beside `ra-jit`, which `RA_JIT_PROC_MACRO_SERVER=1` names. The
