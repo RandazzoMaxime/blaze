@@ -535,6 +535,11 @@ each one's section: what `[Unreleased]` had, and the title of each change merged
   working. Every page, script, stylesheet, image, narration file and form sits under `/blaze`
   (`Served` on `site` in `site/content/site.flecs`); pages carry a canonical URL and Open Graph
   tags, `/blaze/sitemap.xml` lists them, and `/blaze/install.sh` serves `install.sh`.
+- The site says blaze, not ra-jit: page titles, the top bar, `og:site_name`, the home page, the
+  charter, the RFCs, `/bench` and `/updates`, and their narration, voiced again. ra-jit is left
+  only where it is still the literal name: the `ra-jit-live` crate and `#[ra_jit::cache]`, and
+  the line that blaze was called ra-jit until 2026-10-24 and `cargo ra-jit` still works.
+  Comments keep their pages and blocks (ids unchanged).
 - No `cargo blaze` command is passed to cargo any more (Andrew, 2026-10-26: commands that are
   no builds "should go to us and not cargo"). `metadata`, `locate-project`, `verify-project`,
   `version` and `help` are blaze's own, from blaze-manifest, blaze-registry and blaze-resolve
