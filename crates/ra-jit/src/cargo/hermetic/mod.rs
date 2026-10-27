@@ -102,8 +102,15 @@ pub(crate) fn closure_for(
         }
     }
     let wanted: Vec<StorePath> = roots.iter().map(|it| it.1.clone()).collect();
-    let all = closure::closure_of(&wanted)
-        .with_context(|| format!("the closure the build script of `{name}` runs with"))?;
+    let mut all = closure::closure_of(&wanted);
+    if all.is_err()
+        && let Some(remote) = remote()
+    {
+        let dir = super::daemon::store().context("RA_JIT_CACHE turns the store off")?;
+        crate::remote::Shared::lazily(&dir, &remote, closure::PROJECT)?.pull()?;
+        all = closure::closure_of(&wanted);
+    }
+    let all = all.with_context(|| format!("the closure the build script of `{name}` runs with"))?;
     let mut paths = Vec::with_capacity(all.len());
     for path in all {
         let dir = closure::materialize(&path)?;
@@ -111,6 +118,11 @@ pub(crate) fn closure_for(
     }
     let roots = roots.into_iter().map(|(attribute, it)| (attribute, it.path)).collect();
     Ok(Closure { roots, libs, paths })
+}
+
+/// The remote cache `RA_JIT_REMOTE` names, when it names one.
+fn remote() -> Option<String> {
+    std::env::var("RA_JIT_REMOTE").ok().filter(|it| !it.is_empty() && it != "off")
 }
 
 /// The crates `[workspace.metadata.blaze.system-deps]` of the root manifest at `manifest` gives
