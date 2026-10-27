@@ -5,10 +5,11 @@
 #       merged in, or a new one from main), harness/toolchain_bump.py moves the pin to the newest
 #       nightly that has every component blaze needs; answers.py --write on Linux x86-64, Linux
 #       AArch64 and macOS arm64; the pull request "toolchain: pin nightly-YYYY-MM-DD" is opened or
-#       updated, which runs the merge gate, and the release train is started on the branch
+#       updated, which runs the merge gate, and the release train is started on the branch and
+#       on toolchain/base, the main commit the branch is on
 #   the train on the branch finished: the standard library's refusals counted with the bump's
-#       build and main's (harness/stdcount.py); no job or harness red that is green on main's
-#       newest finished train, and no more refusals: `gh pr merge --auto`. Otherwise a comment on
+#       build and main's (harness/stdcount.py); no job or harness red that is green on
+#       toolchain/base's train, and no more refusals: `gh pr merge --auto`. Otherwise a comment on
 #       the pull request and the issue "Toolchain bump to <date> is blocked", opened or updated
 #   a step before the pull request failed (a vendoring conflict, no usable nightly, a conflict
 #       merging main into the bump): the same issue, with what failed
@@ -190,12 +191,14 @@ jobs:
     needs: std
     if: always() && github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'toolchain/bump' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # It waits for the train of the main commit the bump is on (toolchain/base), started beside
+    # the bump's: about as long as the bump's took.
+    timeout-minutes: 150
     permissions:
       contents: write
       pull-requests: write
       issues: write
-      actions: read
+      actions: write
     # main's script; the bump is read through the API.
     steps:
       - uses: actions/checkout@v7
