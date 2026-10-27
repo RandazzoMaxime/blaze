@@ -111,9 +111,9 @@ fn marked_format_args(cx: &Cx<'_, '_, '_>, call: &ast::MacroCall) -> Option<Stri
     let db = cx.db();
     let mac = cx.sema().resolve_macro_call(call)?;
     let source = mac.source(db)?.value;
-    let marked = source.attrs().any(|attr| {
-        attr.path().is_some_and(|path| path.syntax().text() == "clippy::format_args")
-    });
+    let marked = source
+        .attrs()
+        .any(|attr| attr.path().is_some_and(|path| path.syntax().text() == "clippy::format_args"));
     marked.then(|| mac.name(db).as_str().to_owned())
 }
 
